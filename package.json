@@ -1,0 +1,12 @@
+{
+  "name": "deepseek-agent-os",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Local-first desktop Agent OS optimized for DeepSeek.",
+  "scripts": {
+    "dev": "pnpm --filter @deepseek-agent-os/desktop dev",
+    "build": "pnpm --filter @deepseek-agent-os/desktop build",
+    "tauri": "pnpm --filter @deepseek-agent-os/desktop tauri"
+  },
+  "packageManager": "pnpm@9.15.9"
+}
