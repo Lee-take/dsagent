@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "identifier": "ai.deepseek-agent-os.desktop",
   "build": {
-    "beforeDevCommand": "pnpm dev",
-    "beforeBuildCommand": "pnpm build",
+    "beforeDevCommand": "npx pnpm@9.15.9 dev",
+    "beforeBuildCommand": "npx pnpm@9.15.9 build",
     "devUrl": "http://127.0.0.1:1420",
     "frontendDist": "../dist"
   },
