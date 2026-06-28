@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "description": "Local-first desktop Agent OS optimized for DeepSeek.",
   "scripts": {
-    "dev": "pnpm --filter @deepseek-agent-os/desktop dev",
-    "build": "pnpm --filter @deepseek-agent-os/desktop build",
-    "tauri": "pnpm --filter @deepseek-agent-os/desktop tauri"
+    "dev": "node scripts/require-desktop-workspace.mjs && pnpm --filter @deepseek-agent-os/desktop dev",
+    "build": "node scripts/require-desktop-workspace.mjs && pnpm --filter @deepseek-agent-os/desktop build",
+    "tauri": "node scripts/require-desktop-workspace.mjs && pnpm --filter @deepseek-agent-os/desktop tauri"
   },
   "packageManager": "pnpm@9.15.9"
 }

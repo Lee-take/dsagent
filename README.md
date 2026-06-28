@@ -11,6 +11,8 @@ Read first:
 
 ## Development
 
+The desktop workspace is created during the Foundation MVP implementation. After `apps/desktop/package.json` exists, run:
+
 ```powershell
 pnpm install
 pnpm dev
