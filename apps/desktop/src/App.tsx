@@ -250,8 +250,12 @@ export function App() {
       const summary = await invoke<WorkPackageImportSummary>("import_work_package", {
         packageJson: importPackageJson,
       });
-      const records = await invoke<TaskRecord[]>("list_task_records");
+      const [records, memories] = await Promise.all([
+        invoke<TaskRecord[]>("list_task_records"),
+        invoke<MemoryRecord[]>("list_memory_records"),
+      ]);
       setTaskRecords(records);
+      setMemoryRecords(memories);
       setImportPackageJson("");
       setPackageNotice(copy.package.imported(summary.imported, summary.skipped));
     } catch (error) {

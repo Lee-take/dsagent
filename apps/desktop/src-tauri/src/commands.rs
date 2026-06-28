@@ -99,7 +99,7 @@ pub fn export_work_package(state: State<'_, AppState>) -> Result<WorkPackage, St
     Ok(build_work_package(FoundationState::default(), task_records))
 }
 
-#[tauri::command(rename_all = "snake_case")]
+#[tauri::command]
 pub fn import_work_package(
     package_json: String,
     state: State<'_, AppState>,

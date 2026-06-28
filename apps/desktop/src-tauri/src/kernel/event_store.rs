@@ -156,6 +156,8 @@ impl EventStore {
             }
 
             self.append_task_record(record)?;
+            let memory = MemoryRecord::from_task_record(record);
+            self.append_memory_record(&memory)?;
             existing_ids.insert(record.id);
             summary.imported += 1;
         }
@@ -331,6 +333,45 @@ mod tests {
 
         assert!(!duplicate);
         assert_eq!(memories, vec![memory]);
+    }
+
+    #[test]
+    fn importing_task_records_captures_memory_for_new_records() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let existing = TaskRecord::new(
+            "Review finance inbox".to_string(),
+            "Collect evidence for the operations briefing.".to_string(),
+        )
+        .expect("record is valid");
+        let incoming = TaskRecord::new(
+            "Prepare weekly work package".to_string(),
+            "Export task records and remember the handoff scope.".to_string(),
+        )
+        .expect("record is valid");
+        store
+            .append_task_record(&existing)
+            .expect("existing record appends");
+        store
+            .append_memory_record(&MemoryRecord::from_task_record(&existing))
+            .expect("existing memory appends");
+
+        let summary = store
+            .import_task_records(&[existing.clone(), incoming.clone()])
+            .expect("records import");
+        let memories = store.list_memory_records().expect("memories load");
+
+        assert_eq!(summary.imported, 1);
+        assert_eq!(summary.skipped, 1);
+        assert_eq!(
+            memories
+                .iter()
+                .filter(|memory| memory.source_id == Some(existing.id))
+                .count(),
+            1
+        );
+        assert!(memories
+            .iter()
+            .any(|memory| memory.source_id == Some(incoming.id)));
     }
 
     #[test]
