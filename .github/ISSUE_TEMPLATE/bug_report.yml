@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for helping improve DeepSeek Agent OS. Please do not include secrets, API keys, private local paths, screenshots with sensitive data, mailbox content, or personal data.
+        Thanks for helping improve DeepSeek Agent OS. Please do not include secrets, API keys, private local paths, screenshots with sensitive data, mailbox content, or personal data. Use GitHub Private Vulnerability Reporting for security-sensitive reports.
   - type: textarea
     id: summary
     attributes:

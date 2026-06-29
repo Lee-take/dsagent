@@ -1233,6 +1233,26 @@ gh api repos/Lee-take/deepseek-agent-os/private-vulnerability-reporting --includ
 gh api repos/Lee-take/deepseek-agent-os --jq '.security_and_analysis'
 ```
 
+2026-06-30 Private security report issue routing v1:
+
+- Added a GitHub issue-template contact link to `https://github.com/Lee-take/deepseek-agent-os/security/advisories/new`.
+- Updated bug and DeepSeek compatibility issue template guidance so security-sensitive reports are routed to GitHub Private Vulnerability Reporting instead of public issues.
+- Blank issues remain disabled.
+- While verifying this documentation-only change, `pnpm test` exposed an existing Windows-only fake Codex bridge test flake: the nonblocking fake server listener could produce a nonblocking accepted stream, causing `read()` to fail with `WouldBlock`.
+- Fixed the fake bridge server test helper by setting the accepted stream back to blocking before applying the read timeout.
+
+Verification:
+
+```powershell
+$env:CARGO_TARGET_DIR='D:\codex-target\deepseek-ui-tauri-flake'; 1..5 | ForEach-Object { cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml codex_bridge_http_status_marks_connected_when_health_reports_required_capabilities -- --nocapture }
+npx pnpm@9.15.9 test
+npx pnpm@9.15.9 test:deepseek
+npx pnpm@9.15.9 test:deepseek:briefing
+git diff --check
+```
+
+Result: focused fake bridge health test passed 5 consecutive times; `pnpm test` passed with secret scan, desktop build, and all 218 Rust tests; both live DeepSeek smoke tests returned `ok=true`; `git diff --check` passed with only LF-to-CRLF warnings.
+
 ## Confirmed Architecture Direction
 
 - Build Agent OS Kernel plus Workflow Packs.

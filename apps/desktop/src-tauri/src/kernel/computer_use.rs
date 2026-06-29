@@ -480,6 +480,9 @@ mod tests {
                 }
             };
             stream
+                .set_nonblocking(false)
+                .expect("fake bridge request stream blocking");
+            stream
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .expect("set read timeout");
             let raw = read_one_http_request(&mut stream);

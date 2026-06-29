@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Use this for DeepSeek-first behavior already in scope: API key readiness, route selection, Operations Briefing synthesis, cache telemetry, and manual pricing configuration. Do not paste API keys or private evidence.
+        Use this for DeepSeek-first behavior already in scope: API key readiness, route selection, Operations Briefing synthesis, cache telemetry, and manual pricing configuration. Do not paste API keys or private evidence. Use GitHub Private Vulnerability Reporting for security-sensitive reports.
   - type: textarea
     id: summary
     attributes:
