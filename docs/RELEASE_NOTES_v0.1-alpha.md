@@ -59,6 +59,7 @@ Run on the release branch:
 
 ```powershell
 npx pnpm@9.15.9 install
+npx pnpm@9.15.9 test:secrets
 npx pnpm@9.15.9 --filter @deepseek-agent-os/desktop build
 $env:CARGO_TARGET_DIR='D:\codex-target\deepseek-ui-tauri'; cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 $env:CARGO_TARGET_DIR='D:\codex-target\deepseek-ui-tauri'; npx pnpm@9.15.9 --filter @deepseek-agent-os/desktop tauri build --debug

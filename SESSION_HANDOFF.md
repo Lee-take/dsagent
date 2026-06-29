@@ -1183,6 +1183,25 @@ git diff --check
 
 Result: desktop build and all 218 Rust tests passed; both DeepSeek live smoke tests returned `ok=true`; absolute evidence path output was redacted as `[local evidence directory]`; both secret scans had no matches; `git diff --check` passed with only LF-to-CRLF warnings.
 
+2026-06-29 CI secret scan v1:
+
+- Added `scripts/secret-scan.mjs` and `pnpm test:secrets`.
+- The scan reads tracked and unignored files from `git ls-files --cached --others --exclude-standard`, skips binary files, and checks for live `sk-` style API keys plus non-empty `DEEPSEEK_API_KEY` assignments.
+- Candidate values are never printed; failures report only file, line, and check name.
+- The scan includes four built-in rule self-tests and now runs at the start of `pnpm test`.
+- GitHub CI runs `node scripts/secret-scan.mjs` before dependency install, so public pushes do not require secrets but still check tracked files.
+
+Verification:
+
+```powershell
+npx pnpm@9.15.9 test
+npx pnpm@9.15.9 test:deepseek
+npx pnpm@9.15.9 test:deepseek:briefing
+git diff --check
+```
+
+Result: secret scan passed with 4 self-tests and 144 repository files scanned; desktop build and all 218 Rust tests passed; both DeepSeek live smoke tests returned `ok=true`; `git diff --check` passed with only LF-to-CRLF warnings.
+
 ## Confirmed Architecture Direction
 
 - Build Agent OS Kernel plus Workflow Packs.

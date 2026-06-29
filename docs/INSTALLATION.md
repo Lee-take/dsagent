@@ -36,10 +36,17 @@ npx pnpm@9.15.9 test
 npx pnpm@9.15.9 --filter @deepseek-agent-os/desktop tauri build --debug
 ```
 
-`pnpm test` runs the desktop frontend build and Rust tests. On Windows, the
+`pnpm test` runs the repository secret scan, desktop frontend build, and Rust
+tests. The scan covers tracked files plus unignored new files. On Windows, the
 test helper sets a temporary Cargo target directory when `CARGO_TARGET_DIR` is
 not already configured, which avoids local MinGW path parsing issues when the
 checkout path contains spaces.
+
+To run only the repository secret scan before committing or pushing:
+
+```powershell
+npx pnpm@9.15.9 test:secrets
+```
 
 macOS packaging has a committed Tauri config for `.app` and `.dmg`, but it still
 needs verification on a macOS host.

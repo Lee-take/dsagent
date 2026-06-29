@@ -29,6 +29,9 @@ Include:
 
 - DeepSeek API keys are read from the local process environment and must not be
   stored in events, UI state, logs, or exported work packages.
+- `pnpm test:secrets` scans tracked and unignored repository files for live
+  `sk-` style keys and non-empty `DEEPSEEK_API_KEY` assignments without printing
+  candidate values.
 - Manual DeepSeek pricing settings are local configuration, not live price
   claims.
 - ComputerControl requires explicit approval plus a short local unlock window.

@@ -44,8 +44,8 @@ Ship a buildable local-first desktop Agent OS alpha that demonstrates:
 - `.github/ISSUE_TEMPLATE/bug_report.yml` and
   `.github/ISSUE_TEMPLATE/deepseek_compatibility.yml` collect useful reports
   without encouraging new feature requests during the freeze.
-- `.github/workflows/ci.yml` verifies the desktop frontend build and Rust tests
-  on Windows without requiring secrets.
+- `.github/workflows/ci.yml` verifies the repository secret scan, desktop
+  frontend build, and Rust tests on Windows without requiring secrets.
 - `.env.example` documents local DeepSeek and external bridge environment
   variables without storing secret values.
 - `docs/RELEASE_NOTES_v0.1-alpha.md` is the draft release note source.

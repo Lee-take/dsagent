@@ -32,6 +32,9 @@ jobs:
           rustc --version
           cargo --version
 
+      - name: Run secret scan
+        run: node scripts/secret-scan.mjs
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 

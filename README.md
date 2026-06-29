@@ -45,11 +45,18 @@ npx pnpm@9.15.9 --filter @deepseek-agent-os/desktop tauri build --debug
 npx pnpm@9.15.9 dev
 ```
 
-`pnpm test` runs the desktop frontend build and Rust tests. On Windows, the
+`pnpm test` runs the repository secret scan, desktop frontend build, and Rust
+tests. The scan covers tracked files plus unignored new files. On Windows, the
 test helper automatically keeps Rust build output out of the repository path to
 avoid local MinGW path parsing issues when the checkout path contains spaces.
 Set `CARGO_TARGET_DIR` yourself only when you need a specific build cache
 location.
+
+To run only the repository secret scan before committing or pushing:
+
+```powershell
+npx pnpm@9.15.9 test:secrets
+```
 
 `test:deepseek` is an optional local smoke test. It reads `DEEPSEEK_API_KEY`
 from the local environment, calls DeepSeek Chat Completions, and prints only
