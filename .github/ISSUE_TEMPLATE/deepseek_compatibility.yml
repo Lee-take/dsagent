@@ -1,0 +1,53 @@
+name: DeepSeek compatibility report
+description: Report a DeepSeek-specific compatibility or routing issue.
+title: "[DeepSeek]: "
+labels: ["deepseek", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for DeepSeek-first behavior already in scope: API key readiness, route selection, Operations Briefing synthesis, cache telemetry, and manual pricing configuration. Do not paste API keys or private evidence.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What DeepSeek behavior is wrong or confusing?
+    validations:
+      required: true
+  - type: dropdown
+    id: behavior
+    attributes:
+      label: Behavior area
+      options:
+        - API key readiness
+        - Chat Completions request
+        - Operations Briefing synthesis
+        - Cache telemetry
+        - Manual pricing estimate
+        - Model route or thinking control
+        - Documentation
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+    validations:
+      required: true
+  - type: textarea
+    id: redacted_context
+    attributes:
+      label: Redacted context
+      description: Include redacted logs or UI state if useful. Do not include API keys or private evidence.

@@ -4,6 +4,8 @@
 
 This project is an open-source desktop Agent OS optimized for DeepSeek, designed for ordinary office and operations users first, while preserving a serious agent harness suitable for coding, analysis, automation, and industry workflows.
 
+This is an independent project and is not an official DeepSeek product or an affiliated DeepSeek repository.
+
 The product is not a DeepSeek clone of Codex, Claude Code, OpenClaw, or CodeWhale. It should combine the best ideas from lawful open-source and public references without becoming a feature pile.
 
 ## Core Thesis
@@ -48,6 +50,8 @@ Workflow Packs provide scenario-specific forms, prompts, templates, tool permiss
 - First Operations Management workflow is Operations Briefing: local evidence folder to management brief, anomaly table, action plan, and report package.
 - MVP import is preview-first: full export, import preview, template/workflow import, read-only run archive replay, and memory candidates requiring review.
 - Computer Use is behind an experimental high-risk flag in MVP.
+- v0.1-alpha is feature-frozen for GitHub open-source release preparation. Do not add new capabilities before release; limit work to documentation, packaging, verification, safety clarification, and bug fixes inside the existing scope.
+- Public release policy: Apache-2.0 license, GitHub repository name `deepseek-agent-os`, and source-only first alpha.
 
 ## Important Boundaries
 

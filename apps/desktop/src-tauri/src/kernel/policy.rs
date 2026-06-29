@@ -25,6 +25,18 @@ pub enum CapabilityKind {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum CapabilityFamily {
+    File,
+    Network,
+    Browser,
+    Email,
+    Drive,
+    Terminal,
+    ComputerUse,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RiskLevel {
     Low,
     Medium,
@@ -38,6 +50,82 @@ pub enum PolicyDecision {
     Allow,
     Ask,
     Deny,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityAccessStatus {
+    AutoApproved,
+    PendingApproval,
+    Approved,
+    Rejected,
+    Denied,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityGrantState {
+    #[default]
+    NotGranted,
+    Reusable,
+    OneShotAvailable,
+    OneShotConsumed,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CapabilityDescriptor {
+    pub family: CapabilityFamily,
+    pub capability: CapabilityKind,
+    pub title: String,
+    pub summary: String,
+    pub risk_level: RiskLevel,
+    pub default_scope: String,
+    pub experimental: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CapabilityAccessRequest {
+    pub id: Uuid,
+    pub access_mode: AccessMode,
+    pub family: CapabilityFamily,
+    pub capability: CapabilityKind,
+    pub title: String,
+    pub summary: String,
+    pub risk_level: RiskLevel,
+    pub decision: PolicyDecision,
+    pub status: CapabilityAccessStatus,
+    pub reason: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PermissionResolution {
+    pub id: Uuid,
+    pub request_id: Uuid,
+    pub approved: bool,
+    pub note: String,
+    pub created_at: DateTime<Utc>,
+}
+
+impl PermissionResolution {
+    pub fn new(request_id: Uuid, approved: bool, note: String) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            request_id,
+            approved,
+            note: note.trim().to_string(),
+            created_at: Utc::now(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CapabilityAccessRecord {
+    pub request: CapabilityAccessRequest,
+    pub resolution: Option<PermissionResolution>,
+    pub effective_status: CapabilityAccessStatus,
+    #[serde(default)]
+    pub grant_state: CapabilityGrantState,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -68,15 +156,188 @@ impl PermissionAuditEntry {
     }
 }
 
+pub fn builtin_capability_catalog() -> Vec<CapabilityDescriptor> {
+    [
+        descriptor(
+            CapabilityFamily::File,
+            CapabilityKind::FileRead,
+            "Read local files",
+            "Read selected files inside the current workspace.",
+            "workspace",
+            false,
+        ),
+        descriptor(
+            CapabilityFamily::File,
+            CapabilityKind::FileWrite,
+            "Write local files",
+            "Create or modify drafts and exported artifacts in approved folders.",
+            "workspace",
+            false,
+        ),
+        descriptor(
+            CapabilityFamily::Network,
+            CapabilityKind::NetworkSearch,
+            "Network search",
+            "Search the public web and collect source links for review.",
+            "internet_search",
+            false,
+        ),
+        descriptor(
+            CapabilityFamily::Browser,
+            CapabilityKind::BrowserBrowse,
+            "Browser browsing",
+            "Open and inspect web pages through the browser capability.",
+            "web_browse",
+            false,
+        ),
+        descriptor(
+            CapabilityFamily::Browser,
+            CapabilityKind::BrowserSubmit,
+            "Browser form submission",
+            "Fill or submit forms only after policy review.",
+            "form_submission",
+            false,
+        ),
+        descriptor(
+            CapabilityFamily::Email,
+            CapabilityKind::EmailRead,
+            "Email read",
+            "Read selected mailbox threads for task evidence.",
+            "email_read",
+            false,
+        ),
+        descriptor(
+            CapabilityFamily::Email,
+            CapabilityKind::EmailDraft,
+            "Email draft",
+            "Prepare draft replies without sending them.",
+            "email_draft",
+            false,
+        ),
+        descriptor(
+            CapabilityFamily::Email,
+            CapabilityKind::EmailSend,
+            "Email send",
+            "Send approved outbound email from a connected mailbox.",
+            "email_send",
+            false,
+        ),
+        descriptor(
+            CapabilityFamily::Drive,
+            CapabilityKind::DriveRead,
+            "Drive read",
+            "Read selected cloud-drive files and folders.",
+            "drive_read",
+            false,
+        ),
+        descriptor(
+            CapabilityFamily::Drive,
+            CapabilityKind::DriveWrite,
+            "Drive write",
+            "Upload or export approved artifacts to cloud drive.",
+            "drive_write",
+            false,
+        ),
+        descriptor(
+            CapabilityFamily::Terminal,
+            CapabilityKind::TerminalRead,
+            "Terminal read",
+            "Run read-only diagnostics and collect command output.",
+            "terminal_read",
+            false,
+        ),
+        descriptor(
+            CapabilityFamily::Terminal,
+            CapabilityKind::TerminalWrite,
+            "Terminal write",
+            "Run commands that can mutate files or machine state.",
+            "terminal_write",
+            false,
+        ),
+        descriptor(
+            CapabilityFamily::ComputerUse,
+            CapabilityKind::ComputerScreenshot,
+            "Computer screenshot",
+            "Capture or inspect the visible desktop for context.",
+            "computer_screenshot",
+            true,
+        ),
+        descriptor(
+            CapabilityFamily::ComputerUse,
+            CapabilityKind::ComputerControl,
+            "Computer control",
+            "Use mouse or keyboard actions with per-step approval.",
+            "computer_control",
+            true,
+        ),
+    ]
+    .to_vec()
+}
+
+pub fn capability_descriptor(capability: CapabilityKind) -> Option<CapabilityDescriptor> {
+    builtin_capability_catalog()
+        .into_iter()
+        .find(|descriptor| descriptor.capability == capability)
+}
+
+pub fn request_capability_access(
+    access_mode: AccessMode,
+    capability: CapabilityKind,
+) -> Result<CapabilityAccessRequest, String> {
+    let descriptor = capability_descriptor(capability)
+        .ok_or_else(|| "capability is not declared in the built-in catalog".to_string())?;
+    let risk_level = descriptor.risk_level;
+    let decision = decide(access_mode, capability);
+    let status = match decision {
+        PolicyDecision::Allow => CapabilityAccessStatus::AutoApproved,
+        PolicyDecision::Ask => CapabilityAccessStatus::PendingApproval,
+        PolicyDecision::Deny => CapabilityAccessStatus::Denied,
+    };
+
+    Ok(CapabilityAccessRequest {
+        id: Uuid::new_v4(),
+        access_mode,
+        family: descriptor.family,
+        capability,
+        title: descriptor.title,
+        summary: descriptor.summary,
+        risk_level,
+        decision,
+        status,
+        reason: decision_reason(access_mode, capability, risk_level, decision).to_string(),
+        created_at: Utc::now(),
+    })
+}
+
+fn descriptor(
+    family: CapabilityFamily,
+    capability: CapabilityKind,
+    title: &str,
+    summary: &str,
+    default_scope: &str,
+    experimental: bool,
+) -> CapabilityDescriptor {
+    CapabilityDescriptor {
+        family,
+        capability,
+        title: title.to_string(),
+        summary: summary.to_string(),
+        risk_level: capability_risk(capability),
+        default_scope: default_scope.to_string(),
+        experimental,
+    }
+}
+
 pub fn capability_risk(capability: CapabilityKind) -> RiskLevel {
     match capability {
         CapabilityKind::FileRead
         | CapabilityKind::NetworkSearch
         | CapabilityKind::EmailDraft
         | CapabilityKind::DriveRead
-        | CapabilityKind::TerminalRead
-        | CapabilityKind::ComputerScreenshot => RiskLevel::Low,
-        CapabilityKind::BrowserBrowse | CapabilityKind::EmailRead => RiskLevel::Medium,
+        | CapabilityKind::TerminalRead => RiskLevel::Low,
+        CapabilityKind::BrowserBrowse
+        | CapabilityKind::EmailRead
+        | CapabilityKind::ComputerScreenshot => RiskLevel::Medium,
         CapabilityKind::FileWrite
         | CapabilityKind::BrowserSubmit
         | CapabilityKind::DriveWrite
@@ -140,17 +401,86 @@ fn decision_reason(
 
 #[cfg(test)]
 mod tests {
-    use super::{decide, CapabilityKind, PermissionAuditEntry, PolicyDecision, RiskLevel};
+    use super::{
+        builtin_capability_catalog, request_capability_access, CapabilityAccessStatus,
+        CapabilityFamily, CapabilityKind, PermissionAuditEntry, PolicyDecision, RiskLevel,
+    };
     use crate::kernel::models::AccessMode;
+
+    #[test]
+    fn builtin_catalog_declares_phase_two_connector_families() {
+        let catalog = builtin_capability_catalog();
+
+        assert!(catalog
+            .iter()
+            .any(|capability| capability.family == CapabilityFamily::Browser
+                && capability.capability == CapabilityKind::BrowserBrowse));
+        assert!(catalog
+            .iter()
+            .any(|capability| capability.family == CapabilityFamily::Email
+                && capability.capability == CapabilityKind::EmailRead));
+        assert!(catalog
+            .iter()
+            .any(|capability| capability.family == CapabilityFamily::Drive
+                && capability.capability == CapabilityKind::DriveRead));
+        assert!(catalog.iter().any(|capability| capability.family
+            == CapabilityFamily::ComputerUse
+            && capability.capability == CapabilityKind::ComputerScreenshot));
+        assert!(catalog.iter().any(|capability| capability.family
+            == CapabilityFamily::ComputerUse
+            && capability.capability == CapabilityKind::ComputerControl
+            && capability.experimental));
+    }
+
+    #[test]
+    fn low_risk_access_request_is_auto_approved_when_policy_allows() {
+        let request = request_capability_access(AccessMode::AskOnRisk, CapabilityKind::DriveRead)
+            .expect("drive read is a declared capability");
+
+        assert_eq!(request.capability, CapabilityKind::DriveRead);
+        assert_eq!(request.risk_level, RiskLevel::Low);
+        assert_eq!(request.decision, PolicyDecision::Allow);
+        assert_eq!(request.status, CapabilityAccessStatus::AutoApproved);
+        assert!(request.reason.contains("low risk"));
+        assert!(request.created_at <= chrono::Utc::now());
+    }
+
+    #[test]
+    fn critical_access_request_waits_for_user_even_in_full_access() {
+        let request =
+            request_capability_access(AccessMode::FullAccess, CapabilityKind::ComputerControl)
+                .expect("computer control is declared but approval gated");
+
+        assert_eq!(request.capability, CapabilityKind::ComputerControl);
+        assert_eq!(request.risk_level, RiskLevel::Critical);
+        assert_eq!(request.decision, PolicyDecision::Ask);
+        assert_eq!(request.status, CapabilityAccessStatus::PendingApproval);
+        assert!(request.reason.contains("critical"));
+    }
+
+    #[test]
+    fn access_request_keeps_descriptor_context_for_ui() {
+        let request =
+            request_capability_access(AccessMode::LimitedAuto, CapabilityKind::BrowserSubmit)
+                .expect("browser submit is declared");
+
+        assert_eq!(request.family, CapabilityFamily::Browser);
+        assert_eq!(request.title, "Browser form submission");
+        assert!(!request.summary.is_empty());
+    }
 
     #[test]
     fn ask_every_step_always_asks() {
         assert_eq!(
-            decide(AccessMode::AskEveryStep, CapabilityKind::FileRead),
+            request_capability_access(AccessMode::AskEveryStep, CapabilityKind::FileRead)
+                .expect("file read is declared")
+                .decision,
             PolicyDecision::Ask
         );
         assert_eq!(
-            decide(AccessMode::AskEveryStep, CapabilityKind::EmailSend),
+            request_capability_access(AccessMode::AskEveryStep, CapabilityKind::EmailSend)
+                .expect("email send is declared")
+                .decision,
             PolicyDecision::Ask
         );
     }
@@ -158,35 +488,61 @@ mod tests {
     #[test]
     fn ask_on_risk_allows_low_risk_only() {
         assert_eq!(
-            decide(AccessMode::AskOnRisk, CapabilityKind::FileRead),
+            request_capability_access(AccessMode::AskOnRisk, CapabilityKind::FileRead)
+                .expect("file read is declared")
+                .decision,
             PolicyDecision::Allow
         );
         assert_eq!(
-            decide(AccessMode::AskOnRisk, CapabilityKind::BrowserBrowse),
+            request_capability_access(AccessMode::AskOnRisk, CapabilityKind::BrowserBrowse)
+                .expect("browser browse is declared")
+                .decision,
             PolicyDecision::Ask
         );
         assert_eq!(
-            decide(AccessMode::AskOnRisk, CapabilityKind::FileWrite),
+            request_capability_access(AccessMode::AskOnRisk, CapabilityKind::FileWrite)
+                .expect("file write is declared")
+                .decision,
             PolicyDecision::Ask
         );
         assert_eq!(
-            decide(AccessMode::AskOnRisk, CapabilityKind::EmailSend),
+            request_capability_access(AccessMode::AskOnRisk, CapabilityKind::EmailSend)
+                .expect("email send is declared")
+                .decision,
             PolicyDecision::Ask
         );
     }
 
     #[test]
+    fn ask_on_risk_requires_approval_for_screen_pixel_capture() {
+        let request =
+            request_capability_access(AccessMode::AskOnRisk, CapabilityKind::ComputerScreenshot)
+                .expect("computer screenshot is declared");
+
+        assert_eq!(request.risk_level, RiskLevel::Medium);
+        assert_eq!(request.decision, PolicyDecision::Ask);
+        assert_eq!(request.status, CapabilityAccessStatus::PendingApproval);
+        assert!(request.reason.contains("risky"));
+    }
+
+    #[test]
     fn limited_auto_allows_medium_but_asks_high_and_critical() {
         assert_eq!(
-            decide(AccessMode::LimitedAuto, CapabilityKind::BrowserBrowse),
+            request_capability_access(AccessMode::LimitedAuto, CapabilityKind::BrowserBrowse)
+                .expect("browser browse is declared")
+                .decision,
             PolicyDecision::Allow
         );
         assert_eq!(
-            decide(AccessMode::LimitedAuto, CapabilityKind::FileWrite),
+            request_capability_access(AccessMode::LimitedAuto, CapabilityKind::FileWrite)
+                .expect("file write is declared")
+                .decision,
             PolicyDecision::Ask
         );
         assert_eq!(
-            decide(AccessMode::LimitedAuto, CapabilityKind::EmailSend),
+            request_capability_access(AccessMode::LimitedAuto, CapabilityKind::EmailSend)
+                .expect("email send is declared")
+                .decision,
             PolicyDecision::Ask
         );
     }
@@ -194,15 +550,21 @@ mod tests {
     #[test]
     fn full_access_still_asks_for_email_send_and_computer_control() {
         assert_eq!(
-            decide(AccessMode::FullAccess, CapabilityKind::FileWrite),
+            request_capability_access(AccessMode::FullAccess, CapabilityKind::FileWrite)
+                .expect("file write is declared")
+                .decision,
             PolicyDecision::Allow
         );
         assert_eq!(
-            decide(AccessMode::FullAccess, CapabilityKind::EmailSend),
+            request_capability_access(AccessMode::FullAccess, CapabilityKind::EmailSend)
+                .expect("email send is declared")
+                .decision,
             PolicyDecision::Ask
         );
         assert_eq!(
-            decide(AccessMode::FullAccess, CapabilityKind::ComputerControl),
+            request_capability_access(AccessMode::FullAccess, CapabilityKind::ComputerControl)
+                .expect("computer control is declared")
+                .decision,
             PolicyDecision::Ask
         );
     }

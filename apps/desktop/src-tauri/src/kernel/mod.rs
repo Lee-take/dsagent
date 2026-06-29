@@ -1,5 +1,14 @@
+pub mod capability;
+pub mod codex_bridge_contract;
+pub mod codex_bridge_http;
+pub mod computer_use;
 pub mod deepseek;
+pub mod deepseek_pricing;
 pub mod event_store;
+pub mod local_directory;
 pub mod models;
+pub mod network_search;
 pub mod policy;
+pub mod tool_strategy;
 pub mod work_package;
+pub mod workflow;

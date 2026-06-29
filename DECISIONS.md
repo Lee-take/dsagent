@@ -105,3 +105,51 @@ Decision: Computer Use ships behind an experimental high-risk flag in MVP. Scree
 Reason: Computer Use is powerful but risky for ordinary users. The first version should prove the policy, audit, and UI controls before enabling broader automation.
 
 Status: Accepted.
+
+## D014: PDF Unicode strategy for MVP
+
+Decision: Keep PDF export lightweight and ASCII-safe in MVP. Markdown and HTML exports are the full-fidelity Unicode report formats.
+
+Reason: Bundling a CJK-capable font affects app size, license review, rendering quality, and cross-platform packaging. Runtime OS font discovery adds platform variability. The current PDF path remains useful for simple ASCII-safe handoff while HTML/Markdown preserve Chinese and other Unicode content.
+
+Status: Accepted.
+
+## D015: Codex bridge runtime lifecycle for MVP
+
+Decision: Codex bridge runs as an external compatible loopback HTTP service in MVP. The desktop app does not spawn, install, or supervise a sidecar process.
+
+Reason: The bridge touches screen pixels, input control, and source-backed search. Keeping it external makes lifecycle, trust, logging, upgrades, and local operator consent explicit while the contract stabilizes. A managed stdio sidecar can be revisited after token hardening, signing, and process supervision are designed.
+
+Status: Accepted.
+
+## D016: Memory Studio conflict actions
+
+Decision: Memory Studio offers three explicit conflict actions: link-and-accept, merge-and-accept, and replace-and-accept. Link keeps all visible memories. Merge writes a new merged memory from the preview and tombstones selected source memories. Replace writes the candidate as the new memory and tombstones selected target memories.
+
+Reason: Memory conflicts should not be silently collapsed. The user needs a visible choice between preserving relationships, consolidating duplicates, and superseding older records. All paths preserve append-only candidate resolutions, memory creation, links, and tombstones for audit.
+
+Status: Accepted.
+
+## D017: v0.1-alpha feature freeze for open-source release
+
+Decision: Stop adding new product capabilities before the first GitHub open-source release. Work is limited to release hygiene, documentation, safety clarification, verification, packaging, and bug fixes required to keep the existing scope buildable and honest.
+
+Reason: The project exists to provide serious DeepSeek-first domestic model support, not to become a feature pile. A credible GitHub alpha needs clear positioning, reproducible builds, safety boundaries, and transparent limitations more than additional features.
+
+Status: Accepted.
+
+## D018: Apache-2.0 license for public release
+
+Decision: Publish DeepSeek Agent OS under Apache-2.0.
+
+Reason: The project is infrastructure-style open source for DeepSeek-first agent support. Apache-2.0 keeps contribution and reuse permissive while adding an explicit patent grant that is useful for agent runtime, desktop, and integration work.
+
+Status: Accepted.
+
+## D019: Source-only first alpha
+
+Decision: Publish v0.1-alpha as source-only release material first. Do not attach unsigned Windows debug installer artifacts unless the maintainer explicitly approves that later.
+
+Reason: The current Windows installer is useful for local validation, but a public open-source alpha should avoid distributing unsigned binaries before signing, artifact provenance, and release packaging policy are mature. Source build instructions are enough for the first credible GitHub baseline.
+
+Status: Accepted.

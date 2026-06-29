@@ -14,6 +14,17 @@ pub enum ModelRoute {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum LargeModelProvider {
+    #[serde(rename = "deepseek")]
+    DeepSeek,
+    #[serde(rename = "chatgpt")]
+    ChatGpt,
+    Codex,
+    Custom,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ThinkingLevel {
     Auto,
     Fast,
@@ -77,6 +88,292 @@ impl TaskRecord {
 #[serde(rename_all = "snake_case")]
 pub enum MemoryRecordSource {
     TaskRecord,
+    MemoryCandidate,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryCandidateSource {
+    Manual,
+    TaskRecord,
+    Import,
+    WorkflowReflection,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryCandidateStatus {
+    Pending,
+    Accepted,
+    Rejected,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryType {
+    Preference,
+    ProjectContext,
+    WorkflowRule,
+    Artifact,
+    FailurePattern,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryScope {
+    Workspace,
+    Project,
+    Organization,
+    User,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemorySensitivity {
+    Normal,
+    Sensitive,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryLifecycle {
+    Active,
+    Archived,
+    Expires,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkSearchSourceModel {
+    FreeWebSource,
+    FreeLocalBrowser,
+    FreeSourceAggregator,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkSearchBackend {
+    #[serde(rename = "deepseek")]
+    DeepSeek,
+    NativeLargeModel,
+    SourceBackedModel,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EmailBackend {
+    ArchitectureOnly,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DriveBackend {
+    LocalFolderExportPackage,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputerScreenshotBackend {
+    CodexStyleScreenCapture,
+    CodexBridgeScreenCapture,
+    LocalWindowsScreenCapture,
+    LocalMacosScreenCapture,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputerControlBackend {
+    CodexStyleInputControl,
+    CodexBridgeInputControl,
+    LocalWindowsInputControl,
+    LocalMacosInputControl,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ToolBackendSettings {
+    pub network_search: NetworkSearchBackend,
+    pub email: EmailBackend,
+    pub drive: DriveBackend,
+    pub computer_screenshot: ComputerScreenshotBackend,
+    pub computer_control: ComputerControlBackend,
+}
+
+impl Default for ToolBackendSettings {
+    fn default() -> Self {
+        let computer_screenshot = if cfg!(target_os = "macos") {
+            ComputerScreenshotBackend::LocalMacosScreenCapture
+        } else {
+            ComputerScreenshotBackend::LocalWindowsScreenCapture
+        };
+        let computer_control = if cfg!(target_os = "macos") {
+            ComputerControlBackend::LocalMacosInputControl
+        } else {
+            ComputerControlBackend::LocalWindowsInputControl
+        };
+
+        Self {
+            network_search: NetworkSearchBackend::SourceBackedModel,
+            email: EmailBackend::ArchitectureOnly,
+            drive: DriveBackend::LocalFolderExportPackage,
+            computer_screenshot,
+            computer_control,
+        }
+    }
+}
+
+fn default_memory_candidate_type() -> MemoryType {
+    MemoryType::Preference
+}
+
+fn default_memory_record_type() -> MemoryType {
+    MemoryType::ProjectContext
+}
+
+fn default_memory_scope() -> MemoryScope {
+    MemoryScope::Workspace
+}
+
+fn default_memory_sensitivity() -> MemorySensitivity {
+    MemorySensitivity::Normal
+}
+
+fn default_memory_lifecycle() -> MemoryLifecycle {
+    MemoryLifecycle::Active
+}
+
+fn default_large_model_provider() -> LargeModelProvider {
+    LargeModelProvider::DeepSeek
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MemoryCandidate {
+    pub id: Uuid,
+    pub title: String,
+    pub body: String,
+    #[serde(default = "default_memory_candidate_type")]
+    pub memory_type: MemoryType,
+    #[serde(default = "default_memory_scope")]
+    pub scope: MemoryScope,
+    #[serde(default = "default_memory_sensitivity")]
+    pub sensitivity: MemorySensitivity,
+    #[serde(default = "default_memory_lifecycle")]
+    pub lifecycle: MemoryLifecycle,
+    pub source: MemoryCandidateSource,
+    pub source_id: Option<Uuid>,
+    pub rationale: String,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl MemoryCandidate {
+    pub fn new(
+        title: String,
+        body: String,
+        source: MemoryCandidateSource,
+        source_id: Option<Uuid>,
+        rationale: String,
+    ) -> Result<Self, String> {
+        Self::new_with_metadata(
+            title,
+            body,
+            source,
+            source_id,
+            rationale,
+            default_memory_candidate_type(),
+            default_memory_scope(),
+            default_memory_sensitivity(),
+            default_memory_lifecycle(),
+        )
+    }
+
+    pub fn new_with_metadata(
+        title: String,
+        body: String,
+        source: MemoryCandidateSource,
+        source_id: Option<Uuid>,
+        rationale: String,
+        memory_type: MemoryType,
+        scope: MemoryScope,
+        sensitivity: MemorySensitivity,
+        lifecycle: MemoryLifecycle,
+    ) -> Result<Self, String> {
+        Self::new_with_metadata_and_expiration(
+            title,
+            body,
+            source,
+            source_id,
+            rationale,
+            memory_type,
+            scope,
+            sensitivity,
+            lifecycle,
+            None,
+        )
+    }
+
+    pub fn new_with_metadata_and_expiration(
+        title: String,
+        body: String,
+        source: MemoryCandidateSource,
+        source_id: Option<Uuid>,
+        rationale: String,
+        memory_type: MemoryType,
+        scope: MemoryScope,
+        sensitivity: MemorySensitivity,
+        lifecycle: MemoryLifecycle,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<Self, String> {
+        let title = title.trim().to_string();
+        let body = body.trim().to_string();
+        if title.is_empty() {
+            return Err("memory candidate title is required".to_string());
+        }
+        if body.is_empty() {
+            return Err("memory candidate body is required".to_string());
+        }
+        if lifecycle == MemoryLifecycle::Expires && expires_at.is_none() {
+            return Err("memory candidate expiration date is required".to_string());
+        }
+
+        let now = Utc::now();
+        Ok(Self {
+            id: Uuid::new_v4(),
+            title,
+            body,
+            memory_type,
+            scope,
+            sensitivity,
+            lifecycle,
+            source,
+            source_id,
+            rationale: rationale.trim().to_string(),
+            expires_at: expires_at.filter(|_| lifecycle == MemoryLifecycle::Expires),
+            created_at: now,
+            updated_at: now,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MemoryCandidateResolution {
+    pub id: Uuid,
+    pub candidate_id: Uuid,
+    pub accepted: bool,
+    pub note: String,
+    pub created_at: DateTime<Utc>,
+}
+
+impl MemoryCandidateResolution {
+    pub fn new(candidate_id: Uuid, accepted: bool, note: String) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            candidate_id,
+            accepted,
+            note: note.trim().to_string(),
+            created_at: Utc::now(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -84,9 +381,22 @@ pub struct MemoryRecord {
     pub id: Uuid,
     pub title: String,
     pub body: String,
+    #[serde(default = "default_memory_record_type")]
+    pub memory_type: MemoryType,
+    #[serde(default = "default_memory_scope")]
+    pub scope: MemoryScope,
+    #[serde(default = "default_memory_sensitivity")]
+    pub sensitivity: MemorySensitivity,
+    #[serde(default = "default_memory_lifecycle")]
+    pub lifecycle: MemoryLifecycle,
     pub source: MemoryRecordSource,
     pub source_id: Option<Uuid>,
     pub pinned: bool,
+    pub expires_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub linked_memory_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub linked_memories: Vec<MemoryRecordLinkSummary>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -104,11 +414,269 @@ impl MemoryRecord {
             id: Uuid::new_v4(),
             title: record.title.clone(),
             body,
+            memory_type: MemoryType::ProjectContext,
+            scope: default_memory_scope(),
+            sensitivity: default_memory_sensitivity(),
+            lifecycle: default_memory_lifecycle(),
             source: MemoryRecordSource::TaskRecord,
             source_id: Some(record.id),
             pinned: false,
+            expires_at: None,
+            linked_memory_ids: Vec::new(),
+            linked_memories: Vec::new(),
             created_at: now,
             updated_at: now,
+        }
+    }
+
+    pub fn from_memory_candidate(candidate: &MemoryCandidate) -> Self {
+        let now = Utc::now();
+
+        Self {
+            id: Uuid::new_v4(),
+            title: candidate.title.clone(),
+            body: candidate.body.clone(),
+            memory_type: candidate.memory_type,
+            scope: candidate.scope,
+            sensitivity: candidate.sensitivity,
+            lifecycle: candidate.lifecycle,
+            source: MemoryRecordSource::MemoryCandidate,
+            source_id: Some(candidate.id),
+            pinned: false,
+            expires_at: candidate.expires_at,
+            linked_memory_ids: Vec::new(),
+            linked_memories: Vec::new(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    pub fn is_expired_at(&self, now: DateTime<Utc>) -> bool {
+        self.lifecycle == MemoryLifecycle::Expires
+            && self
+                .expires_at
+                .map(|expires_at| expires_at <= now)
+                .unwrap_or(false)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MemoryRecordLinkSummary {
+    pub id: Uuid,
+    pub title: String,
+    pub memory_type: MemoryType,
+    pub scope: MemoryScope,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<&MemoryRecord> for MemoryRecordLinkSummary {
+    fn from(record: &MemoryRecord) -> Self {
+        Self {
+            id: record.id,
+            title: record.title.clone(),
+            memory_type: record.memory_type,
+            scope: record.scope,
+            updated_at: record.updated_at,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MemoryRecordLink {
+    pub id: Uuid,
+    pub source_memory_id: Uuid,
+    pub target_memory_id: Uuid,
+    pub candidate_id: Option<Uuid>,
+    pub note: String,
+    pub created_at: DateTime<Utc>,
+}
+
+impl MemoryRecordLink {
+    pub fn new(
+        source_memory_id: Uuid,
+        target_memory_id: Uuid,
+        candidate_id: Option<Uuid>,
+        note: String,
+    ) -> Result<Self, String> {
+        if source_memory_id == target_memory_id {
+            return Err("memory link requires two different memories".to_string());
+        }
+
+        Ok(Self {
+            id: Uuid::new_v4(),
+            source_memory_id,
+            target_memory_id,
+            candidate_id,
+            note: note.trim().to_string(),
+            created_at: Utc::now(),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MemoryConflictSummary {
+    pub id: Uuid,
+    pub title: String,
+    pub body: String,
+    pub memory_type: MemoryType,
+    pub scope: MemoryScope,
+    pub sensitivity: MemorySensitivity,
+    pub lifecycle: MemoryLifecycle,
+    pub source: MemoryRecordSource,
+    pub source_id: Option<Uuid>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<&MemoryRecord> for MemoryConflictSummary {
+    fn from(record: &MemoryRecord) -> Self {
+        Self {
+            id: record.id,
+            title: record.title.clone(),
+            body: record.body.clone(),
+            memory_type: record.memory_type,
+            scope: record.scope,
+            sensitivity: record.sensitivity,
+            lifecycle: record.lifecycle,
+            source: record.source,
+            source_id: record.source_id,
+            expires_at: record.expires_at,
+            updated_at: record.updated_at,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MemoryCandidateRecord {
+    pub candidate: MemoryCandidate,
+    pub resolution: Option<MemoryCandidateResolution>,
+    pub effective_status: MemoryCandidateStatus,
+    #[serde(default)]
+    pub conflicting_memory_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub conflicting_memories: Vec<MemoryConflictSummary>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MemoryCandidateMergePreview {
+    pub candidate_id: Uuid,
+    pub source_memory_ids: Vec<Uuid>,
+    pub title: String,
+    pub body: String,
+    pub memory_type: MemoryType,
+    pub scope: MemoryScope,
+    pub sensitivity: MemorySensitivity,
+    pub lifecycle: MemoryLifecycle,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MemoryCandidateReplacePreview {
+    pub candidate_id: Uuid,
+    pub target_memory_ids: Vec<Uuid>,
+    pub replacement_title: String,
+    pub replacement_body: String,
+    pub memory_type: MemoryType,
+    pub scope: MemoryScope,
+    pub sensitivity: MemorySensitivity,
+    pub lifecycle: MemoryLifecycle,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub target_memories: Vec<MemoryConflictSummary>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MemoryRecordUpdate {
+    pub id: Uuid,
+    pub memory_id: Uuid,
+    pub title: String,
+    pub body: String,
+    pub memory_type: MemoryType,
+    pub scope: MemoryScope,
+    pub sensitivity: MemorySensitivity,
+    pub lifecycle: MemoryLifecycle,
+    pub pinned: bool,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub note: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl MemoryRecordUpdate {
+    pub fn new(
+        memory_id: Uuid,
+        title: String,
+        body: String,
+        memory_type: MemoryType,
+        scope: MemoryScope,
+        sensitivity: MemorySensitivity,
+        lifecycle: MemoryLifecycle,
+        pinned: bool,
+        expires_at: Option<DateTime<Utc>>,
+        note: String,
+    ) -> Result<Self, String> {
+        let title = title.trim().to_string();
+        let body = body.trim().to_string();
+        if title.is_empty() {
+            return Err("memory title is required".to_string());
+        }
+        if body.is_empty() {
+            return Err("memory body is required".to_string());
+        }
+        if lifecycle == MemoryLifecycle::Expires && expires_at.is_none() {
+            return Err("memory expiration date is required".to_string());
+        }
+
+        Ok(Self {
+            id: Uuid::new_v4(),
+            memory_id,
+            title,
+            body,
+            memory_type,
+            scope,
+            sensitivity,
+            lifecycle,
+            pinned,
+            expires_at: expires_at.filter(|_| lifecycle == MemoryLifecycle::Expires),
+            note: note.trim().to_string(),
+            updated_at: Utc::now(),
+        })
+    }
+
+    pub fn apply_to(&self, record: &MemoryRecord) -> MemoryRecord {
+        MemoryRecord {
+            id: record.id,
+            title: self.title.clone(),
+            body: self.body.clone(),
+            memory_type: self.memory_type,
+            scope: self.scope,
+            sensitivity: self.sensitivity,
+            lifecycle: self.lifecycle,
+            source: record.source,
+            source_id: record.source_id,
+            pinned: self.pinned,
+            expires_at: self.expires_at,
+            linked_memory_ids: record.linked_memory_ids.clone(),
+            linked_memories: record.linked_memories.clone(),
+            created_at: record.created_at,
+            updated_at: self.updated_at,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MemoryRecordDeletion {
+    pub id: Uuid,
+    pub memory_id: Uuid,
+    pub note: String,
+    pub deleted_at: DateTime<Utc>,
+}
+
+impl MemoryRecordDeletion {
+    pub fn new(memory_id: Uuid, note: String) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            memory_id,
+            note: note.trim().to_string(),
+            deleted_at: Utc::now(),
         }
     }
 }
@@ -116,20 +684,28 @@ impl MemoryRecord {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FoundationState {
     pub app_name: String,
+    #[serde(default = "default_large_model_provider")]
+    pub large_model_provider: LargeModelProvider,
     pub model_route: ModelRoute,
     pub thinking_level: ThinkingLevel,
     pub access_mode: AccessMode,
     pub workspace_scope: WorkspaceScope,
+    #[serde(default)]
+    pub network_search_source_model: Option<NetworkSearchSourceModel>,
+    pub tool_backends: ToolBackendSettings,
 }
 
 impl Default for FoundationState {
     fn default() -> Self {
         Self {
             app_name: "DeepSeek Agent OS".to_string(),
+            large_model_provider: default_large_model_provider(),
             model_route: ModelRoute::Auto,
             thinking_level: ThinkingLevel::Auto,
             access_mode: AccessMode::AskOnRisk,
             workspace_scope: WorkspaceScope::Workspace,
+            network_search_source_model: None,
+            tool_backends: ToolBackendSettings::default(),
         }
     }
 }
@@ -159,8 +735,11 @@ impl KernelEvent {
 #[cfg(test)]
 mod tests {
     use super::{
-        AccessMode, FoundationState, KernelEvent, MemoryRecord, MemoryRecordSource, ModelRoute,
-        TaskRecord, TaskRecordStatus, ThinkingLevel, WorkspaceScope,
+        AccessMode, ComputerControlBackend, ComputerScreenshotBackend, DriveBackend, EmailBackend,
+        FoundationState, KernelEvent, LargeModelProvider, MemoryCandidate, MemoryCandidateSource,
+        MemoryLifecycle, MemoryRecord, MemoryRecordSource, MemoryScope, MemorySensitivity,
+        MemoryType, ModelRoute, NetworkSearchBackend, TaskRecord, TaskRecordStatus, ThinkingLevel,
+        ToolBackendSettings, WorkspaceScope,
     };
 
     #[test]
@@ -168,10 +747,63 @@ mod tests {
         let state = FoundationState::default();
 
         assert_eq!(state.app_name, "DeepSeek Agent OS");
+        assert_eq!(state.large_model_provider, LargeModelProvider::DeepSeek);
         assert_eq!(state.model_route, ModelRoute::Auto);
         assert_eq!(state.thinking_level, ThinkingLevel::Auto);
         assert_eq!(state.access_mode, AccessMode::AskOnRisk);
         assert_eq!(state.workspace_scope, WorkspaceScope::Workspace);
+        assert_eq!(state.network_search_source_model, None);
+    }
+
+    #[test]
+    fn foundation_state_defaults_to_confirmed_tool_backends() {
+        let state = FoundationState::default();
+
+        assert_eq!(
+            state.tool_backends.network_search,
+            NetworkSearchBackend::SourceBackedModel
+        );
+        assert_eq!(state.tool_backends.email, EmailBackend::ArchitectureOnly);
+        assert_eq!(
+            state.tool_backends.drive,
+            DriveBackend::LocalFolderExportPackage
+        );
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                state.tool_backends.computer_screenshot,
+                ComputerScreenshotBackend::LocalMacosScreenCapture
+            );
+            assert_eq!(
+                state.tool_backends.computer_control,
+                ComputerControlBackend::LocalMacosInputControl
+            );
+        } else {
+            assert_eq!(
+                state.tool_backends.computer_screenshot,
+                ComputerScreenshotBackend::LocalWindowsScreenCapture
+            );
+            assert_eq!(
+                state.tool_backends.computer_control,
+                ComputerControlBackend::LocalWindowsInputControl
+            );
+        }
+    }
+
+    #[test]
+    fn tool_backend_settings_serialize_phase_two_choices() {
+        let value =
+            serde_json::to_value(ToolBackendSettings::default()).expect("settings serialize");
+
+        assert_eq!(value["network_search"], "source_backed_model");
+        assert_eq!(value["email"], "architecture_only");
+        assert_eq!(value["drive"], "local_folder_export_package");
+        if cfg!(target_os = "macos") {
+            assert_eq!(value["computer_screenshot"], "local_macos_screen_capture");
+            assert_eq!(value["computer_control"], "local_macos_input_control");
+        } else {
+            assert_eq!(value["computer_screenshot"], "local_windows_screen_capture");
+            assert_eq!(value["computer_control"], "local_windows_input_control");
+        }
     }
 
     #[test]
@@ -233,5 +865,85 @@ mod tests {
         assert!(!memory.pinned);
         assert!(memory.created_at <= chrono::Utc::now());
         assert_eq!(memory.created_at, memory.updated_at);
+    }
+
+    #[test]
+    fn memory_record_from_memory_candidate_preserves_review_source() {
+        let candidate = MemoryCandidate::new(
+            "Preferred report tone".to_string(),
+            "Use concise operating language with clear owners and evidence.".to_string(),
+            MemoryCandidateSource::Manual,
+            None,
+            "User proposed this as reusable guidance.".to_string(),
+        )
+        .expect("candidate is valid");
+
+        let memory = MemoryRecord::from_memory_candidate(&candidate);
+
+        assert_eq!(memory.title, "Preferred report tone");
+        assert_eq!(
+            memory.body,
+            "Use concise operating language with clear owners and evidence."
+        );
+        assert_eq!(memory.source, MemoryRecordSource::MemoryCandidate);
+        assert_eq!(memory.source_id, Some(candidate.id));
+        assert!(!memory.pinned);
+    }
+
+    #[test]
+    fn memory_metadata_candidate_defaults_are_review_safe() {
+        let candidate = MemoryCandidate::new(
+            "Preferred report tone".to_string(),
+            "Use concise operating language with clear owners.".to_string(),
+            MemoryCandidateSource::Manual,
+            None,
+            "User proposed this as reusable guidance.".to_string(),
+        )
+        .expect("candidate is valid");
+
+        assert_eq!(candidate.memory_type, MemoryType::Preference);
+        assert_eq!(candidate.scope, MemoryScope::Workspace);
+        assert_eq!(candidate.sensitivity, MemorySensitivity::Normal);
+        assert_eq!(candidate.lifecycle, MemoryLifecycle::Active);
+    }
+
+    #[test]
+    fn memory_metadata_legacy_candidate_json_defaults_review_tags() {
+        let candidate: MemoryCandidate = serde_json::from_value(serde_json::json!({
+            "id": uuid::Uuid::new_v4(),
+            "title": "Legacy candidate",
+            "body": "Loaded from an older event payload.",
+            "source": "manual",
+            "source_id": null,
+            "rationale": "Older versions did not store metadata.",
+            "created_at": chrono::Utc::now(),
+            "updated_at": chrono::Utc::now()
+        }))
+        .expect("legacy candidate deserializes");
+
+        assert_eq!(candidate.memory_type, MemoryType::Preference);
+        assert_eq!(candidate.scope, MemoryScope::Workspace);
+        assert_eq!(candidate.sensitivity, MemorySensitivity::Normal);
+        assert_eq!(candidate.lifecycle, MemoryLifecycle::Active);
+    }
+
+    #[test]
+    fn memory_metadata_legacy_record_json_defaults_review_tags() {
+        let record: MemoryRecord = serde_json::from_value(serde_json::json!({
+            "id": uuid::Uuid::new_v4(),
+            "title": "Legacy memory",
+            "body": "Loaded from an older memory event payload.",
+            "source": "task_record",
+            "source_id": uuid::Uuid::new_v4(),
+            "pinned": false,
+            "created_at": chrono::Utc::now(),
+            "updated_at": chrono::Utc::now()
+        }))
+        .expect("legacy memory record deserializes");
+
+        assert_eq!(record.memory_type, MemoryType::ProjectContext);
+        assert_eq!(record.scope, MemoryScope::Workspace);
+        assert_eq!(record.sensitivity, MemorySensitivity::Normal);
+        assert_eq!(record.lifecycle, MemoryLifecycle::Active);
     }
 }

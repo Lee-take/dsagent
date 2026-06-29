@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  desktop:
+    name: Desktop build and Rust tests
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@9.15.9 --activate
+
+      - name: Show tool versions
+        run: |
+          node --version
+          pnpm --version
+          rustc --version
+          cargo --version
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build desktop frontend
+        run: pnpm --filter @deepseek-agent-os/desktop build
+
+      - name: Run Rust tests
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}\deepseek-agent-os-cargo-target
+        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
