@@ -35,6 +35,18 @@ Ship a buildable local-first desktop Agent OS alpha that demonstrates:
 - Run final verification on the release branch.
 - Prepare release notes that call out alpha limits plainly.
 
+## Post-Release Maintenance
+
+- Do not move an already published release tag. Keep public source snapshots
+  reproducible for users who downloaded the generated source archive.
+- If post-release hardening commits should become a released source snapshot,
+  create a new source-only prerelease tag instead of rewriting `v0.1-alpha`.
+- Keep patch prereleases focused on release hygiene, security checks,
+  documentation corrections, or DeepSeek compatibility verification. Do not use
+  patch releases to add new product capabilities during the v0.1-alpha freeze.
+- Do not attach unsigned installer binaries unless the maintainer explicitly
+  approves binary distribution for that release.
+
 ## Release Hygiene Artifacts
 
 - `CONTRIBUTING.md` explains the v0.1-alpha feature freeze.

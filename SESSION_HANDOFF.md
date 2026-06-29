@@ -1202,6 +1202,22 @@ git diff --check
 
 Result: secret scan passed with 4 self-tests and 144 repository files scanned; desktop build and all 218 Rust tests passed; both DeepSeek live smoke tests returned `ok=true`; `git diff --check` passed with only LF-to-CRLF warnings.
 
+2026-06-30 Public release state audit v1:
+
+- Current `main` head is `cf84bd3909ab8c10e353e6fa23773b9ab6927d10` (`Add CI secret scan`).
+- GitHub release `v0.1-alpha` is a public prerelease published on 2026-06-29 at `https://github.com/Lee-take/deepseek-agent-os/releases/tag/v0.1-alpha`.
+- The published `v0.1-alpha` tag resolves to commit `8b5f377855664886970eadeb80b9905ad044e8f2` (`Finalize v0.1-alpha release notes`), so it does not include the later local DeepSeek smoke test, Operations Briefing smoke test, or CI secret scan commits.
+- Do not move the existing public `v0.1-alpha` tag. If the maintainer wants the later hardening commits in a public release snapshot, create a new source-only prerelease tag instead.
+- GitHub repository security-state check on 2026-06-30 reported secret scanning `enabled`, secret scanning push protection `enabled`, Dependabot security updates `disabled`, and `private_vulnerability_reporting_enabled=null`.
+
+Verification:
+
+```powershell
+gh release view v0.1-alpha --repo Lee-take/deepseek-agent-os --json tagName,targetCommitish,publishedAt,url,isPrerelease,isDraft,name
+git rev-list -n 1 v0.1-alpha
+gh api repos/Lee-take/deepseek-agent-os --jq '{secret_scanning:.security_and_analysis.secret_scanning.status, secret_scanning_push_protection:.security_and_analysis.secret_scanning_push_protection.status, dependabot_security_updates:.security_and_analysis.dependabot_security_updates.status, private_vulnerability_reporting_enabled:.private_vulnerability_reporting_enabled}'
+```
+
 ## Confirmed Architecture Direction
 
 - Build Agent OS Kernel plus Workflow Packs.
