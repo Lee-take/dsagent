@@ -1263,6 +1263,16 @@ Result: focused fake bridge health test passed 5 consecutive times; `pnpm test` 
 - Project version metadata is `0.0.1` in `package.json`, `apps/desktop/package.json`, `apps/desktop/src-tauri/Cargo.toml`, `apps/desktop/src-tauri/Cargo.lock`, and `apps/desktop/src-tauri/tauri.conf.json`.
 - `docs/RELEASE_NOTES_v0.0.1.md` is the current release note source. `docs/RELEASE_NOTES_v0.1-alpha.md` is historical only.
 
+2026-06-30 v0.0.1 GitHub release milestone:
+
+- Public release: `https://github.com/Lee-take/deepseek-agent-os/releases/tag/v0.0.1`.
+- Release name: `DeepSeek Agent OS v0.0.1`; prerelease, not draft.
+- Release tag `v0.0.1` points to commit `108ffdaa497c1fea231cec2b14ac7496b5cc7341` (`Define v0.0.1 Windows preview release`).
+- GitHub CI for the release commit passed: `https://github.com/Lee-take/deepseek-agent-os/actions/runs/28391840978`.
+- Release assets are intentionally empty; public release is source-first. The local Windows debug installer was built only for validation at `D:\codex-target\deepseek-ui-tauri\debug\bundle\nsis\DeepSeek Agent OS_0.0.1_x64-setup.exe`.
+- GitHub About description now says this is an independent Windows-first desktop project for helping colleagues use DeepSeek models, macOS next, and not official DeepSeek.
+- This is the checkpoint to remember when opening a new conversation: `v0.0.1` is published, and the active next phase is making the Windows app genuinely run end to end before adding broad new features.
+
 ## Confirmed Architecture Direction
 
 - Build Agent OS Kernel plus Workflow Packs.
