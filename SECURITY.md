@@ -12,9 +12,9 @@ Computer Use boundaries, and package import/export behavior.
 
 ## Reporting A Vulnerability
 
-Before the public repository has a dedicated security advisory channel, report
-security issues privately to the project maintainer. Do not open a public issue
-with exploit details, secrets, screenshots, tokens, or private local paths.
+Use GitHub Private Vulnerability Reporting on this repository for sensitive
+security reports. Do not open a public issue with exploit details, secrets,
+screenshots, tokens, or private local paths.
 
 Include:
 

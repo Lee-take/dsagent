@@ -52,6 +52,8 @@ Ship a buildable local-first desktop Agent OS alpha that demonstrates:
 - `CONTRIBUTING.md` explains the v0.1-alpha feature freeze.
 - `SECURITY.md` documents current security boundaries and private reporting
   expectations.
+- GitHub Private Vulnerability Reporting is enabled for sensitive security
+  reports.
 - `.github/pull_request_template.md` keeps PRs scoped to existing alpha work.
 - `.github/ISSUE_TEMPLATE/bug_report.yml` and
   `.github/ISSUE_TEMPLATE/deepseek_compatibility.yml` collect useful reports

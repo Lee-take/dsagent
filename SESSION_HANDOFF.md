@@ -1218,6 +1218,21 @@ git rev-list -n 1 v0.1-alpha
 gh api repos/Lee-take/deepseek-agent-os --jq '{secret_scanning:.security_and_analysis.secret_scanning.status, secret_scanning_push_protection:.security_and_analysis.secret_scanning_push_protection.status, dependabot_security_updates:.security_and_analysis.dependabot_security_updates.status, private_vulnerability_reporting_enabled:.private_vulnerability_reporting_enabled}'
 ```
 
+2026-06-30 Private vulnerability reporting v1:
+
+- Enabled GitHub Private Vulnerability Reporting for `Lee-take/deepseek-agent-os` using the repository API.
+- Updated `SECURITY.md` so sensitive reports should use GitHub Private Vulnerability Reporting instead of public issues or ad hoc maintainer contact.
+- Repository security-state check on the dedicated endpoint returned `{"enabled":true}`.
+- General repository `security_and_analysis` still reports secret scanning `enabled`, secret scanning push protection `enabled`, Dependabot security updates `disabled`, and secret scanning non-provider patterns/validity checks `disabled`.
+
+Verification:
+
+```powershell
+gh api --method PUT repos/Lee-take/deepseek-agent-os/private-vulnerability-reporting --silent
+gh api repos/Lee-take/deepseek-agent-os/private-vulnerability-reporting --include
+gh api repos/Lee-take/deepseek-agent-os --jq '.security_and_analysis'
+```
+
 ## Confirmed Architecture Direction
 
 - Build Agent OS Kernel plus Workflow Packs.
@@ -1248,5 +1263,5 @@ gh api repos/Lee-take/deepseek-agent-os --jq '{secret_scanning:.security_and_ana
 
 ## Open Questions
 
-- Public repository owner and security contact channel can be filled from the authenticated GitHub account unless the maintainer gives a dedicated contact.
+- Dependabot security updates remain disabled on GitHub; enabling automated security PRs should be a maintainer policy decision if it creates ongoing issue/PR noise.
 - The maintainer has approved storing the DeepSeek test API key locally for this project. It must stay local-only and must not be uploaded.
