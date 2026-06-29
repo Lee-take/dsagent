@@ -1,6 +1,6 @@
 # DeepSeek Agent OS v0.1-alpha Release Notes
 
-Status: draft for first public GitHub release.
+Status: first public source-only alpha.
 
 ## Positioning
 
