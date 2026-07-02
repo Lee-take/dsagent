@@ -41,15 +41,13 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Stage WebView2 loader
-        run: pnpm stage:webview2-loader
-
       - name: Build desktop frontend
         run: pnpm --filter @deepseek-agent-os/desktop build
 
       - name: Run Rust tests
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}\deepseek-agent-os-cargo-target
+          TAURI_CONFIG: '{"bundle":{"active":false,"resources":null}}'
         run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 
       - name: Run source-only release guard

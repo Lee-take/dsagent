@@ -3384,7 +3384,10 @@ function checkGitHubReleaseHygiene() {
     ["pnpm@9.15.9", "CI pinned pnpm"],
     ["node scripts/secret-scan.mjs", "CI secret scan"],
     ["pnpm --filter @deepseek-agent-os/desktop build", "CI desktop frontend build"],
-    ["pnpm stage:webview2-loader", "CI WebView2 loader staging"],
+    [
+      'TAURI_CONFIG: \'{"bundle":{"active":false,"resources":null}}\'',
+      "CI Rust test disables bundle resources",
+    ],
     ["cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml", "CI Rust tests"],
     ["pnpm test:release-source", "CI source-only release guard"],
   ];
@@ -3397,6 +3400,12 @@ function checkGitHubReleaseHygiene() {
     failures.push(".github/workflows/ci.yml must not require DeepSeek secrets");
   } else {
     checks.push("CI does not require DeepSeek secrets");
+  }
+
+  if (ciWorkflow.includes("pnpm stage:webview2-loader")) {
+    failures.push(".github/workflows/ci.yml must not stage WebView2Loader before Rust unit tests");
+  } else {
+    checks.push("CI does not stage WebView2Loader before Rust unit tests");
   }
 
   const ciWriteBoundaryFindings = ciWriteBoundaryViolations(ciWorkflow);
