@@ -27,8 +27,8 @@ use crate::kernel::computer_use::{
     computer_use_backend_status_for_strategy, ComputerUseBackendStatus,
 };
 use crate::kernel::deepseek::{
-    current_deepseek_credential_status, DeepSeekChatCacheState, DeepSeekChatTelemetry,
-    DeepSeekCredentialStatus, DeepSeekMemoryChatCompletionCache,
+    current_deepseek_credential_status, DeepSeekChatCacheState, DeepSeekChatCacheStatus,
+    DeepSeekChatTelemetry, DeepSeekCredentialStatus, DeepSeekMemoryChatCompletionCache,
     DeepSeekOperationsBriefingSynthesizer, HttpDeepSeekChatCompletionTransport,
     DEEPSEEK_API_KEY_ENV,
 };
@@ -37,7 +37,7 @@ use crate::kernel::deepseek_pricing::{
     save_deepseek_pricing_settings as persist_deepseek_pricing_settings, DeepSeekPricingSettings,
     DeepSeekPricingState,
 };
-use crate::kernel::event_store::EventStore;
+use crate::kernel::event_store::{EventStore, EventStoreError, EventStoreResult};
 use crate::kernel::local_directory::{
     load_local_directory_state, local_directory_readiness_from_state,
     save_local_directory_settings as persist_local_directory_settings,
@@ -53,8 +53,8 @@ use crate::kernel::models::{
 use crate::kernel::models::{
     MemoryCandidate, MemoryCandidateMergePreview, MemoryCandidateRecord,
     MemoryCandidateReplacePreview, MemoryCandidateResolution, MemoryCandidateSource,
-    MemoryLifecycle, MemoryRecord, MemoryRecordDeletion, MemoryRecordUpdate, MemoryScope,
-    MemorySensitivity, MemoryType,
+    MemoryCandidateStatus, MemoryLifecycle, MemoryRecord, MemoryRecordDeletion, MemoryRecordLink,
+    MemoryRecordUpdate, MemoryRelationKind, MemoryScope, MemorySensitivity, MemoryType,
 };
 use crate::kernel::network_search::{
     network_search_route_status_for_strategy, NetworkSearchRouteStatus,
@@ -217,6 +217,29 @@ fn current_work_package_tool_readiness(
     }
 }
 
+fn pending_memory_candidates_for_work_package(
+    records: Vec<MemoryCandidateRecord>,
+) -> Vec<MemoryCandidate> {
+    records
+        .into_iter()
+        .filter(|record| record.effective_status == MemoryCandidateStatus::Pending)
+        .map(|record| record.candidate)
+        .collect()
+}
+
+fn link_existing_memory_records(
+    store: &EventStore,
+    source_memory_id: Uuid,
+    target_memory_id: Uuid,
+    relation: MemoryRelationKind,
+    note: String,
+) -> EventStoreResult<Vec<MemoryRecord>> {
+    let link = MemoryRecordLink::new(source_memory_id, target_memory_id, None, relation, note)
+        .map_err(EventStoreError::InvalidState)?;
+    store.append_memory_record_link(&link)?;
+    store.list_memory_records()
+}
+
 fn current_local_directory_readiness(
     app: &AppHandle,
 ) -> Result<LocalDirectoryReadinessStatus, String> {
@@ -306,6 +329,75 @@ fn deepseek_telemetry_with_pricing(
     }
 
     telemetry
+}
+
+fn operations_briefing_model_route_context(
+    provider: LargeModelProvider,
+    model_route: ModelRoute,
+) -> String {
+    format!(
+        "{} / {}",
+        large_model_provider_context_label(provider),
+        model_route_context_label(model_route)
+    )
+}
+
+fn large_model_provider_context_label(provider: LargeModelProvider) -> &'static str {
+    match provider {
+        LargeModelProvider::DeepSeek => "deepseek",
+        LargeModelProvider::ChatGpt => "chatgpt",
+        LargeModelProvider::Codex => "codex",
+        LargeModelProvider::Custom => "custom",
+    }
+}
+
+fn model_route_context_label(model_route: ModelRoute) -> &'static str {
+    match model_route {
+        ModelRoute::Auto => "auto",
+        ModelRoute::Flash => "flash",
+        ModelRoute::Pro => "pro",
+    }
+}
+
+fn thinking_level_context_label(thinking_level: ThinkingLevel) -> &'static str {
+    match thinking_level {
+        ThinkingLevel::Auto => "auto",
+        ThinkingLevel::Fast => "fast",
+        ThinkingLevel::Standard => "standard",
+        ThinkingLevel::Deep => "deep",
+    }
+}
+
+fn operations_briefing_token_cache_context(telemetry: &[DeepSeekChatTelemetry]) -> String {
+    if telemetry.is_empty() {
+        return "no DeepSeek request recorded".to_string();
+    }
+
+    telemetry
+        .iter()
+        .map(|entry| {
+            let tokens = entry
+                .total_tokens
+                .map(|tokens| format!("{tokens} total tokens"))
+                .unwrap_or_else(|| "token usage unavailable".to_string());
+            format!(
+                "{} cache {}, {}, {} ms",
+                entry.model,
+                deepseek_cache_status_context_label(entry.cache_status),
+                tokens,
+                entry.elapsed_ms
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn deepseek_cache_status_context_label(status: DeepSeekChatCacheStatus) -> &'static str {
+    match status {
+        DeepSeekChatCacheStatus::Disabled => "disabled",
+        DeepSeekChatCacheStatus::Hit => "hit",
+        DeepSeekChatCacheStatus::Miss => "miss",
+    }
 }
 
 #[tauri::command]
@@ -602,12 +694,31 @@ pub fn replace_memory_candidate_conflicts(
 pub fn link_memory_candidate_to_conflicts(
     candidate_id: Uuid,
     linked_memory_ids: Vec<Uuid>,
+    relation: Option<MemoryRelationKind>,
     note: String,
     state: State<'_, AppState>,
 ) -> Result<MemoryCandidateResolution, String> {
     let store = state.event_store.lock().map_err(|_| lock_error())?;
     store
-        .link_memory_candidate_to_conflicts(candidate_id, linked_memory_ids, note)
+        .link_memory_candidate_to_conflicts_with_relation(
+            candidate_id,
+            linked_memory_ids,
+            relation.unwrap_or(MemoryRelationKind::Extends),
+            note,
+        )
+        .map_err(event_store_error)
+}
+
+#[tauri::command]
+pub fn link_memory_records(
+    source_memory_id: Uuid,
+    target_memory_id: Uuid,
+    relation: MemoryRelationKind,
+    note: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<MemoryRecord>, String> {
+    let store = state.event_store.lock().map_err(|_| lock_error())?;
+    link_existing_memory_records(&store, source_memory_id, target_memory_id, relation, note)
         .map_err(event_store_error)
 }
 
@@ -1406,7 +1517,11 @@ pub fn write_drive_boundary(
     let package_json = {
         let store = state.event_store.lock().map_err(|_| lock_error())?;
         let task_records = store.list_task_records().map_err(event_store_error)?;
-        let memory_candidates = store.list_memory_candidates().map_err(event_store_error)?;
+        let memory_candidates = pending_memory_candidates_for_work_package(
+            store
+                .list_memory_candidate_records()
+                .map_err(event_store_error)?,
+        );
         let operations_briefing_runs = store
             .list_operations_briefing_runs()
             .map_err(event_store_error)?;
@@ -1473,7 +1588,7 @@ pub fn run_operations_briefing(
         approval_granted,
     };
     let mut deepseek_telemetry = Vec::new();
-    let outcome = if let Some(api_key) = operations_briefing_deepseek_api_key_for_provider(
+    let mut outcome = if let Some(api_key) = operations_briefing_deepseek_api_key_for_provider(
         |name| std::env::var(name).ok(),
         large_model_provider,
     ) {
@@ -1500,6 +1615,12 @@ pub fn run_operations_briefing(
         .map(|pricing_state| pricing_state.settings);
     let deepseek_telemetry =
         deepseek_telemetry_with_pricing(deepseek_telemetry, pricing_settings.as_ref());
+    outcome.run.context_receipt.model_route =
+        operations_briefing_model_route_context(large_model_provider, model_route);
+    outcome.run.context_receipt.thinking_level =
+        thinking_level_context_label(thinking_level).to_string();
+    outcome.run.context_receipt.token_cache_state =
+        operations_briefing_token_cache_context(&deepseek_telemetry);
     let should_record_access_request = !approval_granted
         || outcome.access_request.decision == crate::kernel::policy::PolicyDecision::Allow;
     let entry = PermissionAuditEntry::evaluate(access_mode, CapabilityKind::FileRead);
@@ -1793,7 +1914,11 @@ pub fn export_work_package(
 ) -> Result<WorkPackage, String> {
     let store = state.event_store.lock().map_err(|_| lock_error())?;
     let task_records = store.list_task_records().map_err(event_store_error)?;
-    let memory_candidates = store.list_memory_candidates().map_err(event_store_error)?;
+    let memory_candidates = pending_memory_candidates_for_work_package(
+        store
+            .list_memory_candidate_records()
+            .map_err(event_store_error)?,
+    );
     let operations_briefing_runs = store
         .list_operations_briefing_runs()
         .map_err(event_store_error)?;
@@ -1844,9 +1969,11 @@ pub fn preview_work_package_import(
 mod tests {
     use crate::commands::{
         computer_screenshot_evidence_base_dir, computer_tool_strategy_for_command,
-        deepseek_telemetry_with_pricing, operations_briefing_deepseek_api_key_for_provider,
+        deepseek_telemetry_with_pricing, link_existing_memory_records,
+        operations_briefing_deepseek_api_key_for_provider, operations_briefing_model_route_context,
         operations_briefing_report_export_dir, operations_briefing_template_seed_dir,
-        should_require_computer_control_unlock, ComputerControlUnlockState,
+        operations_briefing_token_cache_context, should_require_computer_control_unlock,
+        thinking_level_context_label, ComputerControlUnlockState,
         COMPUTER_CONTROL_UNLOCK_TTL_MINUTES,
     };
     use crate::kernel::deepseek::{
@@ -1857,8 +1984,10 @@ mod tests {
         LocalDirectorySettings, LocalDirectoryState, LOCAL_DIRECTORY_SETTINGS_FILE,
     };
     use crate::kernel::models::{
-        ComputerControlBackend, ComputerScreenshotBackend, LargeModelProvider,
-        NetworkSearchSourceModel,
+        ComputerControlBackend, ComputerScreenshotBackend, LargeModelProvider, MemoryCandidate,
+        MemoryCandidateRecord, MemoryCandidateResolution, MemoryCandidateSource,
+        MemoryCandidateStatus, MemoryRecord, MemoryRelationKind, ModelRoute,
+        NetworkSearchSourceModel, TaskRecord, ThinkingLevel,
     };
     use chrono::{Duration, TimeZone, Utc};
     use uuid::Uuid;
@@ -2050,6 +2179,129 @@ mod tests {
     }
 
     #[test]
+    fn link_existing_memory_records_returns_projected_relation_notes() {
+        let store =
+            crate::kernel::event_store::EventStore::open_memory().expect("memory store opens");
+        let briefing_task = TaskRecord::new(
+            "Briefing tone rule".to_string(),
+            "Use concise operating language.".to_string(),
+        )
+        .expect("briefing task is valid");
+        let source_trace_task = TaskRecord::new(
+            "Source trace rule".to_string(),
+            "Keep evidence links visible.".to_string(),
+        )
+        .expect("source trace task is valid");
+        let briefing_memory = MemoryRecord::from_task_record(&briefing_task);
+        let source_trace_memory = MemoryRecord::from_task_record(&source_trace_task);
+        store
+            .append_memory_record(&briefing_memory)
+            .expect("briefing memory appends");
+        store
+            .append_memory_record(&source_trace_memory)
+            .expect("source trace memory appends");
+
+        let memories = link_existing_memory_records(
+            &store,
+            briefing_memory.id,
+            source_trace_memory.id,
+            MemoryRelationKind::Derives,
+            "Briefing tone derives from source traceability.".to_string(),
+        )
+        .expect("existing memories link");
+
+        let projected_briefing = memories
+            .iter()
+            .find(|memory| memory.id == briefing_memory.id)
+            .expect("briefing memory remains visible");
+        let projected_source_trace = memories
+            .iter()
+            .find(|memory| memory.id == source_trace_memory.id)
+            .expect("source trace memory remains visible");
+
+        assert_eq!(projected_briefing.linked_memories.len(), 1);
+        assert_eq!(
+            projected_briefing.linked_memories[0].id,
+            source_trace_memory.id
+        );
+        assert_eq!(
+            projected_briefing.linked_memories[0].relation,
+            MemoryRelationKind::Derives
+        );
+        assert_eq!(
+            projected_briefing.linked_memories[0].note,
+            "Briefing tone derives from source traceability."
+        );
+        assert_eq!(projected_source_trace.linked_memories.len(), 1);
+        assert_eq!(
+            projected_source_trace.linked_memories[0].id,
+            briefing_memory.id
+        );
+    }
+
+    #[test]
+    fn work_package_exports_only_pending_memory_candidates() {
+        let pending_candidate = MemoryCandidate::new(
+            "Imported briefing preference".to_string(),
+            "Review this candidate before writing it as local memory.".to_string(),
+            MemoryCandidateSource::Import,
+            None,
+            "Imported package candidate.".to_string(),
+        )
+        .expect("pending candidate is valid");
+        let accepted_candidate = MemoryCandidate::new(
+            "Already accepted preference".to_string(),
+            "This candidate has already been resolved locally.".to_string(),
+            MemoryCandidateSource::Manual,
+            None,
+            "Local reviewer accepted this candidate.".to_string(),
+        )
+        .expect("accepted candidate is valid");
+        let rejected_candidate = MemoryCandidate::new(
+            "Rejected preference".to_string(),
+            "This candidate has already been rejected locally.".to_string(),
+            MemoryCandidateSource::Manual,
+            None,
+            "Local reviewer rejected this candidate.".to_string(),
+        )
+        .expect("rejected candidate is valid");
+
+        let candidates = super::pending_memory_candidates_for_work_package(vec![
+            MemoryCandidateRecord {
+                candidate: pending_candidate.clone(),
+                resolution: None,
+                effective_status: MemoryCandidateStatus::Pending,
+                conflicting_memory_ids: Vec::new(),
+                conflicting_memories: Vec::new(),
+            },
+            MemoryCandidateRecord {
+                candidate: accepted_candidate.clone(),
+                resolution: Some(MemoryCandidateResolution::new(
+                    accepted_candidate.id,
+                    true,
+                    "Accepted locally.".to_string(),
+                )),
+                effective_status: MemoryCandidateStatus::Accepted,
+                conflicting_memory_ids: Vec::new(),
+                conflicting_memories: Vec::new(),
+            },
+            MemoryCandidateRecord {
+                candidate: rejected_candidate.clone(),
+                resolution: Some(MemoryCandidateResolution::new(
+                    rejected_candidate.id,
+                    false,
+                    "Rejected locally.".to_string(),
+                )),
+                effective_status: MemoryCandidateStatus::Rejected,
+                conflicting_memory_ids: Vec::new(),
+                conflicting_memories: Vec::new(),
+            },
+        ]);
+
+        assert_eq!(candidates, vec![pending_candidate]);
+    }
+
+    #[test]
     fn computer_tool_strategy_for_command_routes_chatgpt_to_codex_bridge() {
         let strategy = computer_tool_strategy_for_command(LargeModelProvider::ChatGpt, None);
 
@@ -2140,5 +2392,35 @@ mod tests {
         let entries = deepseek_telemetry_with_pricing(vec![telemetry], Some(&settings));
 
         assert_eq!(entries[0].estimated_cost_micro_usd, Some(280_000));
+    }
+
+    #[test]
+    fn operations_briefing_context_helpers_record_route_thinking_and_cache() {
+        let telemetry = DeepSeekChatTelemetry {
+            id: Uuid::new_v4(),
+            request_hash: "abc123".to_string(),
+            model: DEEPSEEK_FLASH_MODEL.to_string(),
+            cache_status: DeepSeekChatCacheStatus::Hit,
+            elapsed_ms: 25,
+            prompt_tokens: Some(10),
+            completion_tokens: Some(5),
+            total_tokens: Some(15),
+            estimated_cost_micro_usd: None,
+            created_at: Utc::now(),
+        };
+
+        assert_eq!(
+            operations_briefing_model_route_context(LargeModelProvider::DeepSeek, ModelRoute::Pro),
+            "deepseek / pro"
+        );
+        assert_eq!(thinking_level_context_label(ThinkingLevel::Deep), "deep");
+        assert_eq!(
+            operations_briefing_token_cache_context(&[telemetry]),
+            format!("{DEEPSEEK_FLASH_MODEL} cache hit, 15 total tokens, 25 ms")
+        );
+        assert_eq!(
+            operations_briefing_token_cache_context(&[]),
+            "no DeepSeek request recorded"
+        );
     }
 }

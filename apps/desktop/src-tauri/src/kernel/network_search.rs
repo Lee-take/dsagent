@@ -84,26 +84,26 @@ fn network_search_route_note(
     source_backed_adapter_ready: bool,
 ) -> String {
     if native_bridge_ready {
-        return "NetworkSearch will execute through the selected large model's native bridge contract and requires source links for evidence."
+        return "Web search will execute through the selected model route and requires source links for evidence."
             .to_string();
     }
 
     if source_backed_adapter_ready {
-        return "NetworkSearch will execute through the selected free source-backed adapter and requires source links for evidence."
+        return "Web search will execute through the selected source-linked web-search option and requires source links for evidence."
             .to_string();
     }
 
     if strategy.large_model_supports_network_search {
-        return "NetworkSearch can use the selected large model's source-backed route after a native bridge is connected; local free-source execution requires choosing a source model."
+        return "Web search can use the selected model route after the configured local bridge service is connected; local source-linked search requires choosing a web-search option."
             .to_string();
     }
 
     if source_model_missing {
-        return "The selected large model does not provide source-backed NetworkSearch; choose a free NetworkSearch source model before running search."
+        return "The selected model route does not provide verified web search yet; choose a free source-linked web-search option before running search."
             .to_string();
     }
 
-    "NetworkSearch has no executable source-backed adapter selected yet; choose a source model before running search."
+    "Web search has no executable source-linked route selected yet; choose a web-search option before running search."
         .to_string()
 }
 
@@ -141,8 +141,8 @@ mod tests {
         assert!(
             status
                 .note
-                .contains("does not provide source-backed NetworkSearch"),
-            "status note should distinguish model orchestration from source-backed search"
+                .contains("does not provide verified web search yet"),
+            "status note should distinguish model orchestration from source-linked search"
         );
     }
 
@@ -181,7 +181,7 @@ mod tests {
             NetworkSearchExecutionMode::PermissionAuditOnly
         );
         assert!(status.requires_user_confirmation);
-        assert!(status.note.contains("native bridge"));
+        assert!(status.note.contains("configured local bridge service"));
     }
 
     #[test]
@@ -205,7 +205,7 @@ mod tests {
         );
         assert!(status.network_requests_enabled);
         assert!(!status.requires_user_confirmation);
-        assert!(status.note.contains("native"));
+        assert!(status.note.contains("selected model route"));
     }
 
     #[test]

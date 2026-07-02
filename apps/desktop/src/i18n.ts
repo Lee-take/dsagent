@@ -13,6 +13,8 @@ import type {
   LargeModelProvider,
   Language,
   MemoryLifecycle,
+  MemoryRelationKind,
+  MemorySearchMatchSource,
   MemoryScope,
   MemorySensitivity,
   MemoryCandidateStatus,
@@ -211,6 +213,7 @@ type TranslationSet = {
     pdfReportPendingHint: string;
     pdfReportExportFailed: string;
     latestRun: string;
+    runs: string;
     noRuns: string;
     pendingHint: string;
     failed: string;
@@ -221,6 +224,20 @@ type TranslationSet = {
     noActions: string;
     evidence: string;
     archived: string;
+    archiveEvidenceRedacted: string;
+    contextReceipt: string;
+    contextUserIntent: string;
+    contextLoopMode: string;
+    contextWorkflowPolicy: string;
+    contextSelectedEvidence: string;
+    contextSelectedMemories: string;
+    contextNoSelectedMemories: string;
+    contextModelRoute: string;
+    contextThinkingLevel: string;
+    contextTokenCache: string;
+    contextValidation: string;
+    contextIntentionalOmissions: string;
+    contextNoItems: string;
     status: Record<OperationsBriefingRunStatus, string>;
   };
   package: {
@@ -240,13 +257,23 @@ type TranslationSet = {
     previewNewTasks: string;
     previewSkippedTasks: string;
     previewMemoryCandidates: string;
+    previewNewMemoryCandidates: string;
+    previewSkippedMemoryCandidates: string;
     previewMemoryCandidateHint: string;
+    previewMemoryCandidateReviewSupported: string;
+    previewMemoryCandidateReviewUnsupported: string;
     previewArchivedRuns: string;
+    previewNewArchivedRuns: string;
+    previewSkippedArchivedRuns: string;
     previewArchiveHint: string;
+    previewArchiveReplaySupported: string;
+    previewArchiveReplayUnsupported: string;
     previewWorkflowTemplates: string;
     previewNewWorkflowTemplates: string;
     previewSkippedWorkflowTemplates: string;
     previewWorkflowTemplateHint: string;
+    previewWorkflowTemplateImportSupported: string;
+    previewWorkflowTemplateImportUnsupported: string;
     packageJson: string;
     importJson: string;
     emptyTitle: string;
@@ -330,15 +357,29 @@ type TranslationSet = {
     replaced: string;
     replaceFailed: string;
     linkAndAccept: string;
+    linkRelation: string;
+    linkExisting: string;
+    linkingExisting: string;
+    linkSource: string;
+    linkTarget: string;
+    linkExistingNote: string;
+    emptyExistingLink: string;
+    existingLinked: string;
+    existingLinkFailed: string;
     linked: string;
     linkFailed: string;
     linkedMemories: (count: number) => string;
+    linkNote: string;
+    searchMatchedBy: string;
+    searchMatchUnknown: string;
+    searchMatchOptions: Record<MemorySearchMatchSource, string>;
     updatedAt: string;
     candidateStatus: Record<MemoryCandidateStatus, string>;
     typeOptions: Record<MemoryType, string>;
     scopeOptions: Record<MemoryScope, string>;
     sensitivityOptions: Record<MemorySensitivity, string>;
     lifecycleOptions: Record<MemoryLifecycle, string>;
+    relationOptions: Record<MemoryRelationKind, string>;
   };
   audit: {
     title: string;
@@ -556,12 +597,12 @@ export const translations: Record<Language, TranslationSet> = {
       thinkingLevel: "思考强度",
       themeStyle: "界面风格",
       language: "界面语言",
-      networkSearchSourceModel: "NetworkSearch 来源模型",
+      networkSearchSourceModel: "联网搜索来源模型",
     },
     largeModelOptions: {
       deepseek: "DeepSeek",
-      chatgpt: "ChatGPT",
-      codex: "Codex",
+      chatgpt: "外部对话模型",
+      codex: "本地桥接路线",
       custom: "自定义模型",
     },
     modelOptions: {
@@ -590,7 +631,7 @@ export const translations: Record<Language, TranslationSet> = {
       porcelain: "青花瓷",
     },
     networkSearchSourceOptions: {
-      free_web_source: "免费 Web 来源模型",
+      free_web_source: "免费网页来源模型",
       free_local_browser: "免费本地浏览器搜索（alpha）",
       free_source_aggregator: "免费来源聚合器（alpha）",
     },
@@ -600,19 +641,19 @@ export const translations: Record<Language, TranslationSet> = {
       other: "其它平台",
     },
     codexBridgeTransportOptions: {
-      http: "外部 HTTP bridge",
-      stdio: "stdio sidecar（暂缓）",
+      http: "本地 HTTP 桥接服务",
+      stdio: "本地服务启动暂缓",
     },
     backendOptions: {
       network_search: {
         deepseek: "DeepSeek 搜索编排",
-        native_large_model: "大模型原生 NetworkSearch",
-        source_backed_model: "来源支撑 NetworkSearch 模型",
+        native_large_model: "大模型原生联网搜索",
+        source_backed_model: "来源支撑联网搜索模型",
       },
       network_search_execution: {
-        permission_audit_only: "仅权限与审计",
-        source_backed_adapter: "来源适配器执行",
-        native_bridge_contract: "原生桥接执行",
+        permission_audit_only: "仅权限复核",
+        source_backed_adapter: "来源关联路线执行",
+        native_bridge_contract: "所选模型联网搜索",
       },
       network_search_evidence: {
         pending_user_confirmation: "待确认",
@@ -625,20 +666,20 @@ export const translations: Record<Language, TranslationSet> = {
         local_folder_export_package: "本地文件夹与导出包",
       },
       computer_screenshot: {
-        codex_style_screen_capture: "Codex 式屏幕像素读取",
-        codex_bridge_screen_capture: "Codex Bridge 屏幕像素读取",
-        local_windows_screen_capture: "本地 Windows 屏幕像素读取",
-        local_macos_screen_capture: "本地 macOS 屏幕像素读取",
+        codex_style_screen_capture: "兼容本地服务屏幕路线",
+        codex_bridge_screen_capture: "已配置本地服务屏幕路线",
+        local_windows_screen_capture: "本地 Windows 屏幕查看",
+        local_macos_screen_capture: "本地 macOS 屏幕查看",
       },
       computer_control: {
-        codex_style_input_control: "Codex 式鼠标键盘控制",
-        codex_bridge_input_control: "Codex Bridge 鼠标键盘控制",
+        codex_style_input_control: "兼容本地服务鼠标键盘路线",
+        codex_bridge_input_control: "已配置本地服务鼠标键盘路线",
         local_windows_input_control: "本地 Windows 鼠标键盘控制",
         local_macos_input_control: "本地 macOS 鼠标键盘控制",
       },
     },
     backendLabels: {
-      title: "工具后端策略",
+      title: "工具路线策略",
       largeModelProvider: "大模型",
       networkSearch: "联网搜索",
       networkSearchSupport: "搜索支持",
@@ -650,7 +691,7 @@ export const translations: Record<Language, TranslationSet> = {
       deepSeekOrchestration: "DeepSeek 编排",
       confirmationGate: "确认门",
       email: "邮件",
-      drive: "Drive",
+      drive: "本地文件夹",
       computerScreenshot: "屏幕读取",
       computerControl: "电脑控制",
       deepSeekApi: "DeepSeek API",
@@ -668,23 +709,23 @@ export const translations: Record<Language, TranslationSet> = {
       disabled: "未启用",
       confirmationRequired: "需确认",
       confirmationNotRequired: "无需确认",
-      screenshotBackendStatus: "屏幕后端状态",
+      screenshotBackendStatus: "屏幕路线状态",
       screenshotPermission: "屏幕权限",
-      controlBackendStatus: "控制后端状态",
+      controlBackendStatus: "控制路线状态",
       controlPermission: "控制权限",
-      codexBridgeRuntime: "Codex bridge 运行时",
+      codexBridgeRuntime: "本地桥接服务",
       backendAvailable: "可用",
-      backendUnavailable: "未接通",
+      backendUnavailable: "不可用",
       approvalRequired: "需审批",
       osPermissionRequired: "需系统授权",
       osPermissionNotRequired: "无需显式系统授权",
-      bridgeRequired: "需 bridge",
-      bridgeNotRequired: "无需 bridge",
-      bridgeEndpointConfigured: "Endpoint 已配置",
-      bridgeEndpointMissing: "Endpoint 未配置",
+      bridgeRequired: "需要本地桥接",
+      bridgeNotRequired: "不需要本地桥接",
+      bridgeEndpointConfigured: "本地地址已配置",
+      bridgeEndpointMissing: "本地地址未配置",
       bridgeConnected: "已连接",
       bridgeNotConnected: "未连接",
-      bridgeTransportMissing: "Transport 未选择",
+      bridgeTransportMissing: "路线类型未选择",
       nativeSupported: "原生支持",
       sourceModelRequired: "需来源模型",
       notSelected: "未选择",
@@ -707,7 +748,7 @@ export const translations: Record<Language, TranslationSet> = {
       network: "联网",
       browser: "浏览器",
       email: "邮件",
-      drive: "网盘",
+      drive: "本地文件夹",
       terminal: "终端",
       computer_use: "电脑控制",
     },
@@ -720,8 +761,8 @@ export const translations: Record<Language, TranslationSet> = {
       email_read: "读取邮件",
       email_draft: "起草邮件",
       email_send: "发送邮件",
-      drive_read: "读取网盘",
-      drive_write: "写入网盘",
+      drive_read: "读取本地文件夹",
+      drive_write: "导出到本地文件夹",
       terminal_read: "读取终端",
       terminal_write: "写入终端",
       computer_screenshot: "屏幕截图",
@@ -736,8 +777,8 @@ export const translations: Record<Language, TranslationSet> = {
       email_read: "读取选定邮件线程作为任务证据。",
       email_draft: "生成邮件草稿，不直接发送。",
       email_send: "发送已审批的外发邮件。",
-      drive_read: "读取选定网盘文件与文件夹。",
-      drive_write: "上传或导出成果到网盘。",
+      drive_read: "读取选定本地文件夹中的文件。",
+      drive_write: "把成果导出到选定本地文件夹。",
       terminal_read: "运行只读诊断命令并收集输出。",
       terminal_write: "运行可能修改文件或系统状态的命令。",
       computer_screenshot: "截取或检查当前屏幕。",
@@ -773,7 +814,7 @@ export const translations: Record<Language, TranslationSet> = {
       failed: "失败",
     },
     workbench: {
-      stage: "基础 MVP",
+      stage: "0.1.0 预览",
       title: "运营简报工作台",
       summary:
         "第一版已打通桌面工作台、权限控制、DeepSeek 路由默认值与本地内核边界。",
@@ -826,24 +867,25 @@ export const translations: Record<Language, TranslationSet> = {
       run: "运行",
       running: "运行中",
       seedTemplates: "写入模板",
-      seededTemplates: "样例证据模板已写入本地证据文件夹。",
-      seedPendingHint: "已创建 FileWrite 待审批请求，批准后再次写入即可生成模板。",
-      seedFailed: "样例证据模板写入失败。",
+      seededTemplates: "空白操作模板已写入本地证据文件夹。",
+      seedPendingHint: "已创建文件写入审批请求，批准后再次写入即可生成模板。",
+      seedFailed: "空白操作模板写入失败。",
       exportPackage: "导出简报包",
       exportReport: "导出报告",
       exportHtmlReport: "导出 HTML",
       exportPdfReport: "导出 PDF",
       exported: "简报工作包已生成。",
       reportExported: "运营简报 Markdown 报告已导出到本地导出文件夹。",
-      reportPendingHint: "已创建 DriveWrite 待审批请求，批准后再次导出即可写入报告。",
+      reportPendingHint: "已创建本地文件夹导出审批请求，批准后再次导出即可写入报告。",
       reportExportFailed: "运营简报报告导出失败。",
       htmlReportExported: "运营简报 HTML 报告已导出到本地导出文件夹。",
-      htmlReportPendingHint: "已创建 DriveWrite 待审批请求，批准后再次导出即可写入 HTML 报告。",
+      htmlReportPendingHint: "已创建本地文件夹导出审批请求，批准后再次导出即可写入 HTML 报告。",
       htmlReportExportFailed: "运营简报 HTML 报告导出失败。",
       pdfReportExported: "运营简报 PDF 报告已导出到本地导出文件夹。",
-      pdfReportPendingHint: "已创建 DriveWrite 待审批请求，批准后再次导出即可写入 PDF 报告。",
+      pdfReportPendingHint: "已创建本地文件夹导出审批请求，批准后再次导出即可写入 PDF 报告。",
       pdfReportExportFailed: "运营简报 PDF 报告导出失败。",
       latestRun: "最近运行",
+      runs: "运行归档",
       noRuns: "暂无运营简报运行记录",
       pendingHint: "已创建待审批请求，批准后再次运行即可执行。",
       failed: "运营简报运行失败。",
@@ -854,6 +896,20 @@ export const translations: Record<Language, TranslationSet> = {
       noActions: "暂无行动项",
       evidence: "证据",
       archived: "归档",
+      archiveEvidenceRedacted: "源机器证据句柄已清理",
+      contextReceipt: "上下文回执",
+      contextUserIntent: "用户意图",
+      contextLoopMode: "循环模式",
+      contextWorkflowPolicy: "工作流策略",
+      contextSelectedEvidence: "选入证据",
+      contextSelectedMemories: "选入记忆",
+      contextNoSelectedMemories: "本次未选入记忆",
+      contextModelRoute: "模型路线",
+      contextThinkingLevel: "思考等级",
+      contextTokenCache: "Token / 缓存",
+      contextValidation: "验证结果",
+      contextIntentionalOmissions: "有意省略",
+      contextNoItems: "无",
       status: {
         pending_approval: "待审批",
         draft_ready: "草稿就绪",
@@ -877,13 +933,23 @@ export const translations: Record<Language, TranslationSet> = {
       previewNewTasks: "新增任务",
       previewSkippedTasks: "跳过任务",
       previewMemoryCandidates: "候选记忆",
+      previewNewMemoryCandidates: "新增候选记忆",
+      previewSkippedMemoryCandidates: "跳过候选记忆",
       previewMemoryCandidateHint: "候选记忆将进入本地确认队列，不会直接写入长期记忆。",
+      previewMemoryCandidateReviewSupported: "候选记忆可进入本地复核队列。",
+      previewMemoryCandidateReviewUnsupported: "当前版本无法复核这些候选记忆。",
       previewArchivedRuns: "简报归档",
+      previewNewArchivedRuns: "新增简报归档",
+      previewSkippedArchivedRuns: "跳过简报归档",
       previewArchiveHint: "简报运行将作为只读归档导入，不会重新执行工具。",
+      previewArchiveReplaySupported: "简报归档可在本地只读回放。",
+      previewArchiveReplayUnsupported: "当前版本无法回放这些简报归档。",
       previewWorkflowTemplates: "工作流模板",
       previewNewWorkflowTemplates: "新增模板",
       previewSkippedWorkflowTemplates: "跳过模板",
       previewWorkflowTemplateHint: "工作流模板包将登记为本地可用资产，不会写入用户目录。",
+      previewWorkflowTemplateImportSupported: "工作流模板可登记为本地可用资产。",
+      previewWorkflowTemplateImportUnsupported: "当前版本无法导入这些工作流模板。",
       packageJson: "工作包 JSON",
       importJson: "导入 JSON",
       emptyTitle: "请先填写任务标题。",
@@ -968,9 +1034,26 @@ export const translations: Record<Language, TranslationSet> = {
       replaced: "候选记忆已接受，被替换记忆已归档。",
       replaceFailed: "候选记忆替换失败。",
       linkAndAccept: "关联并接受",
+      linkRelation: "关联关系",
+      linkExisting: "关联已有记忆",
+      linkingExisting: "关联中",
+      linkSource: "源记忆",
+      linkTarget: "目标记忆",
+      linkExistingNote: "为什么关联这两条记忆",
+      emptyExistingLink: "请选择两条不同的长期记忆。",
+      existingLinked: "两条长期记忆已建立关联。",
+      existingLinkFailed: "长期记忆关联失败。",
       linked: "候选记忆已接受，并与重叠记忆建立关联。",
       linkFailed: "候选记忆关联失败。",
       linkedMemories: (count) => `关联 ${count} 条记忆`,
+      linkNote: "关联说明",
+      searchMatchedBy: "命中来源",
+      searchMatchUnknown: "关联记忆",
+      searchMatchOptions: {
+        direct: "直接命中",
+        linked_memory_title: "关联标题命中",
+        linked_memory_body: "关联正文命中",
+      },
       updatedAt: "更新于",
       candidateStatus: {
         pending: "待确认",
@@ -998,6 +1081,12 @@ export const translations: Record<Language, TranslationSet> = {
         active: "启用",
         archived: "归档",
         expires: "会过期",
+      },
+      relationOptions: {
+        related: "相关",
+        updates: "更新",
+        extends: "扩展",
+        derives: "推导",
       },
     },
     audit: {
@@ -1036,31 +1125,31 @@ export const translations: Record<Language, TranslationSet> = {
       failed: "浏览失败。",
     },
     browserSubmitTool: {
-      title: "浏览器提交边界",
+      title: "浏览器提交审批",
       urlPlaceholder: "目标表单网址",
       summaryPlaceholder: "提交动作说明",
       requestSubmit: "请求提交",
       requestingSubmit: "请求中",
-      pendingHint: "已创建 BrowserSubmit 待审批请求；v1 不会提交表单。",
-      blocked: "BrowserSubmit v1 仅记录审批与审计，未提交任何表单。",
-      failed: "BrowserSubmit 请求失败。",
+      pendingHint: "已创建浏览器提交审批请求；当前版本不会提交表单。",
+      blocked: "浏览器提交只留下权限复核记录，未提交任何表单。",
+      failed: "浏览器提交请求失败。",
     },
     networkSearchTool: {
-      title: "网络搜索边界",
+      title: "联网搜索审批",
       queryPlaceholder: "搜索关键词",
       scopePlaceholder: "来源范围，例如：公开网页",
       requestSearch: "请求搜索",
       requestingSearch: "请求中",
-      pendingHint: "已创建 NetworkSearch 待审批请求；批准前不会访问网络。",
-      completed: "NetworkSearch 已执行，并记录了来源链接。",
-      blocked: "NetworkSearch 未完成。请查看最近工具输出中的失败原因。",
-      failed: "NetworkSearch 请求失败。",
-      sourceModelRequiredTitle: "需要 NetworkSearch 来源模型",
+      pendingHint: "已创建联网搜索待审批请求；批准前不会访问网络。",
+      completed: "联网搜索已执行，并记录了来源链接。",
+      blocked: "联网搜索未完成。请查看最近工具输出中的失败原因。",
+      failed: "联网搜索请求失败。",
+      sourceModelRequiredTitle: "需要联网搜索来源模型",
       sourceModelRequiredBody:
-        "当前开源 alpha 使用免费来源适配器执行真实搜索，请先选择来源模型以保留可审计链接；本地浏览器和聚合器预设目前共用来源型 HTTP 适配器。",
-      sourceModelPlaceholder: "选择免费来源模型",
-      sourceModelMissing: "请先选择 NetworkSearch 来源模型。",
-      routeNotEnabled: "当前 NetworkSearch 路线尚未启用真实搜索。",
+        "当前开源 alpha 使用免费来源关联联网搜索选项执行真实搜索，请先选择来源模型以保留可审计链接；本地浏览器和聚合器预设目前共用同一本地搜索实现。",
+      sourceModelPlaceholder: "选择免费联网来源",
+      sourceModelMissing: "请先选择联网搜索来源模型。",
+      routeNotEnabled: "当前联网搜索路线尚未启用真实搜索。",
     },
     fileTool: {
       title: "文件工具",
@@ -1071,16 +1160,16 @@ export const translations: Record<Language, TranslationSet> = {
       failed: "读取失败。",
     },
     fileWriteTool: {
-      title: "文件写入边界",
+      title: "文件写入审批",
       pathPlaceholder: "目标文件路径",
       summaryPlaceholder: "写入或修改说明",
       contentPlaceholder: "写入内容",
       requestWrite: "请求写入",
       requestingWrite: "请求中",
-      pendingHint: "已创建 FileWrite 待审批请求；批准后再次提交即可写入。",
+      pendingHint: "已创建文件写入审批请求；批准后再次提交即可写入。",
       completed: "文件已写入本地工作区。",
-      blocked: "FileWrite 未执行。",
-      failed: "FileWrite 请求失败。",
+      blocked: "文件写入未执行。",
+      failed: "文件写入请求失败。",
     },
     folderTool: {
       title: "证据文件夹",
@@ -1097,14 +1186,14 @@ export const translations: Record<Language, TranslationSet> = {
       running: "运行中",
       pendingHint: "已创建待审批请求，批准后再次运行即可执行。",
       failed: "终端只读命令失败。",
-      writeTitle: "终端写入边界",
+      writeTitle: "终端写入审批",
       writeCommandLabel: "待审批写入命令",
       writePlaceholder: "例如：npm install",
       requestWrite: "请求",
       requestingWrite: "请求中",
-      writePendingHint: "已创建 TerminalWrite 待审批请求；v1 不会直接执行写命令。",
-      writeBlocked: "TerminalWrite v1 仅记录审批与审计，未执行命令。",
-      writeFailed: "TerminalWrite 请求失败。",
+      writePendingHint: "已创建终端写入审批请求；当前版本不会直接执行写命令。",
+      writeBlocked: "终端写入只留下权限复核记录，未执行命令。",
+      writeFailed: "终端写入请求失败。",
       options: {
         pwd: "当前目录",
         "git status --short": "Git 状态",
@@ -1113,7 +1202,7 @@ export const translations: Record<Language, TranslationSet> = {
       },
     },
     computerTool: {
-      title: "屏幕截图边界",
+      title: "屏幕读取审批",
       capture: "检查屏幕",
       capturing: "检查中",
       pendingHint: "已创建屏幕截图待审批请求，批准后再次检查即可执行。",
@@ -1122,7 +1211,7 @@ export const translations: Record<Language, TranslationSet> = {
       failed: "屏幕截图请求失败。",
     },
     computerControlTool: {
-      title: "桌面控制边界",
+      title: "电脑控制审批",
       unlockTitle: "桌面控制本地解锁",
       unlockChallengeLabel: "本机码",
       unlockTokenPlaceholder: "输入本机码",
@@ -1136,64 +1225,64 @@ export const translations: Record<Language, TranslationSet> = {
       actionPlaceholder: "click:120,340 或 hotkey:ctrl+shift+p",
       requestControl: "请求控制",
       requestingControl: "请求中",
-      pendingHint: "已创建 ComputerControl 待审批请求；批准后重试将执行结构化动作。",
-      executed: "ComputerControl 已执行，并已记录审批与审计。",
-      blocked: "ComputerControl 未执行；请检查动作格式、系统权限或本地输入后端。",
-      failed: "ComputerControl 请求失败。",
+      pendingHint: "已创建电脑控制审批请求；批准后可重试一次，执行结构化动作。",
+      executed: "电脑控制已执行，并已保存权限复核记录。",
+      blocked: "电脑控制未执行；请检查动作格式、系统权限或本地输入路线。",
+      failed: "电脑控制请求失败。",
     },
     emailTool: {
-      title: "邮件发送边界",
+      title: "邮件发送审批",
       toPlaceholder: "收件人",
       subjectPlaceholder: "主题",
       bodyPlaceholder: "正文",
       requestSend: "请求发送",
       requestingSend: "请求中",
-      pendingHint: "已创建 EmailSend 待审批请求；批准后可重试一次，v1 不会直接发送邮件。",
-      blocked: "EmailSend v1 仅记录审批与审计，未发送邮件。",
-      failed: "EmailSend 请求失败。",
+      pendingHint: "已创建邮件发送审批请求；批准后可重试一次，当前版本不会直接发送邮件。",
+      blocked: "邮件发送只留下权限复核记录，未发送邮件。",
+      failed: "邮件发送请求失败。",
     },
     emailDraftTool: {
-      title: "邮件草稿边界",
+      title: "邮件草稿审批",
       toPlaceholder: "草稿收件人",
       subjectPlaceholder: "草稿主题",
       bodyPlaceholder: "草稿正文",
       requestDraft: "请求草稿",
       requestingDraft: "请求中",
-      pendingHint: "已创建 EmailDraft 待审批请求；v1 不会创建真实邮箱草稿。",
-      blocked: "EmailDraft v1 仅记录审批与审计，未创建邮箱草稿。",
-      failed: "EmailDraft 请求失败。",
+      pendingHint: "已创建邮件草稿审批请求；当前版本不会创建真实邮箱草稿。",
+      blocked: "邮件草稿只留下权限复核记录，未创建邮箱草稿。",
+      failed: "邮件草稿请求失败。",
     },
     emailReadTool: {
-      title: "邮件读取边界",
+      title: "邮件读取审批",
       mailboxPlaceholder: "邮箱或文件夹",
       queryPlaceholder: "读取条件或线索",
       requestRead: "请求读取",
       requestingRead: "请求中",
-      pendingHint: "已创建 EmailRead 待审批请求；v1 不会读取真实邮箱。",
-      blocked: "EmailRead v1 仅记录审批与审计，未读取邮箱。",
-      failed: "EmailRead 请求失败。",
+      pendingHint: "已创建邮件读取审批请求；当前版本不会读取真实邮箱。",
+      blocked: "邮件读取只留下权限复核记录，未读取邮箱。",
+      failed: "邮件读取请求失败。",
     },
     driveReadTool: {
-      title: "Drive 本地文件夹读取",
+      title: "本地文件夹读取",
       locationPlaceholder: "本地文件夹路径",
       queryPlaceholder: "文件名或内容关键词",
       requestRead: "请求读取",
       requestingRead: "请求中",
-      pendingHint: "已创建 DriveRead 待审批请求；批准后会读取本地文件夹。",
-      completed: "DriveRead 已读取本地文件夹并记录结果。",
-      blocked: "DriveRead 未完成；请查看最近工具输出中的失败原因。",
-      failed: "DriveRead 请求失败。",
+      pendingHint: "已创建本地文件夹读取审批请求；批准后会读取本地文件夹。",
+      completed: "本地文件夹读取已完成，并记录了结果。",
+      blocked: "本地文件夹读取未完成；请查看最近工具输出中的失败原因。",
+      failed: "本地文件夹读取请求失败。",
     },
     driveWriteTool: {
-      title: "Drive 导出工作包",
+      title: "工作包导出",
       locationPlaceholder: "本地导出文件夹路径",
       summaryPlaceholder: "导出工作包说明",
       requestWrite: "导出工作包",
       requestingWrite: "请求中",
-      pendingHint: "已创建 DriveWrite 待审批请求；批准后会导出当前工作包 JSON。",
-      completed: "DriveWrite 已将当前工作包 JSON 导出到本地文件夹。",
-      blocked: "DriveWrite 未完成；请查看最近工具输出中的失败原因。",
-      failed: "DriveWrite 请求失败。",
+      pendingHint: "已创建本地文件夹导出审批请求；批准后会导出当前工作包 JSON。",
+      completed: "工作包已导出到本地文件夹。",
+      blocked: "工作包导出未完成；请查看最近工具输出中的失败原因。",
+      failed: "工作包导出请求失败。",
     },
     inspector: {
       title: "运行控制",
@@ -1220,12 +1309,12 @@ export const translations: Record<Language, TranslationSet> = {
       thinkingLevel: "Thinking level",
       themeStyle: "Interface style",
       language: "Interface language",
-      networkSearchSourceModel: "NetworkSearch source model",
+      networkSearchSourceModel: "Web search source model",
     },
     largeModelOptions: {
       deepseek: "DeepSeek",
-      chatgpt: "ChatGPT",
-      codex: "Codex",
+      chatgpt: "External chat model",
+      codex: "Local bridge route",
       custom: "Custom model",
     },
     modelOptions: {
@@ -1264,19 +1353,19 @@ export const translations: Record<Language, TranslationSet> = {
       other: "Other platform",
     },
     codexBridgeTransportOptions: {
-      http: "External HTTP bridge",
-      stdio: "stdio sidecar (deferred)",
+      http: "Local HTTP bridge service",
+      stdio: "Local service startup deferred",
     },
     backendOptions: {
       network_search: {
         deepseek: "DeepSeek search orchestration",
-        native_large_model: "Native large-model NetworkSearch",
-        source_backed_model: "Source-backed NetworkSearch model",
+        native_large_model: "Native large-model web search",
+        source_backed_model: "Source-linked web-search option",
       },
       network_search_execution: {
-        permission_audit_only: "Permission and audit only",
-        source_backed_adapter: "Source adapter execution",
-        native_bridge_contract: "Native bridge contract",
+        permission_audit_only: "Permission review only",
+        source_backed_adapter: "Source-linked route execution",
+        native_bridge_contract: "Selected model web search",
       },
       network_search_evidence: {
         pending_user_confirmation: "Pending confirmation",
@@ -1289,20 +1378,20 @@ export const translations: Record<Language, TranslationSet> = {
         local_folder_export_package: "Local folders and export packages",
       },
       computer_screenshot: {
-        codex_style_screen_capture: "Codex-style screen pixel capture",
-        codex_bridge_screen_capture: "Codex Bridge screen pixel capture",
-        local_windows_screen_capture: "Local Windows screen pixel capture",
-        local_macos_screen_capture: "Local macOS screen pixel capture",
+        codex_style_screen_capture: "Legacy local-service screen route",
+        codex_bridge_screen_capture: "Configured local-service screen route",
+        local_windows_screen_capture: "Local Windows screen inspection",
+        local_macos_screen_capture: "Local macOS screen inspection",
       },
       computer_control: {
-        codex_style_input_control: "Codex-style mouse and keyboard control",
-        codex_bridge_input_control: "Codex Bridge mouse and keyboard control",
+        codex_style_input_control: "Legacy local-service mouse and keyboard route",
+        codex_bridge_input_control: "Configured local-service mouse and keyboard route",
         local_windows_input_control: "Local Windows mouse and keyboard control",
         local_macos_input_control: "Local macOS mouse and keyboard control",
       },
     },
     backendLabels: {
-      title: "Tool Backend Strategy",
+      title: "Tool Route Strategy",
       largeModelProvider: "Large model",
       networkSearch: "Network search",
       networkSearchSupport: "Search support",
@@ -1332,23 +1421,23 @@ export const translations: Record<Language, TranslationSet> = {
       disabled: "Disabled",
       confirmationRequired: "Required",
       confirmationNotRequired: "Not required",
-      screenshotBackendStatus: "Screen backend status",
+      screenshotBackendStatus: "Screen route status",
       screenshotPermission: "Screen permission",
-      controlBackendStatus: "Control backend status",
+      controlBackendStatus: "Control route status",
       controlPermission: "Control permission",
-      codexBridgeRuntime: "Codex bridge runtime",
+      codexBridgeRuntime: "Local bridge service",
       backendAvailable: "Available",
-      backendUnavailable: "Not connected",
+      backendUnavailable: "Unavailable",
       approvalRequired: "Approval required",
       osPermissionRequired: "OS permission required",
       osPermissionNotRequired: "No explicit OS permission",
-      bridgeRequired: "Bridge required",
-      bridgeNotRequired: "Bridge not required",
-      bridgeEndpointConfigured: "Endpoint configured",
-      bridgeEndpointMissing: "Endpoint missing",
+      bridgeRequired: "Local bridge required",
+      bridgeNotRequired: "Local bridge not required",
+      bridgeEndpointConfigured: "Local address configured",
+      bridgeEndpointMissing: "Local address missing",
       bridgeConnected: "Connected",
       bridgeNotConnected: "Not connected",
-      bridgeTransportMissing: "Transport missing",
+      bridgeTransportMissing: "Route type missing",
       nativeSupported: "Native",
       sourceModelRequired: "Source model required",
       notSelected: "Not selected",
@@ -1400,8 +1489,8 @@ export const translations: Record<Language, TranslationSet> = {
       email_read: "Read selected email threads for task evidence.",
       email_draft: "Prepare drafts without sending.",
       email_send: "Send approved outbound email.",
-      drive_read: "Read selected cloud-drive files and folders.",
-      drive_write: "Upload or export artifacts to cloud drive.",
+      drive_read: "Read selected local-folder text evidence.",
+      drive_write: "Export work packages to a selected local folder.",
       terminal_read: "Run read-only diagnostics and collect output.",
       terminal_write: "Run commands that can change files or system state.",
       computer_screenshot: "Capture or inspect the visible desktop.",
@@ -1437,7 +1526,7 @@ export const translations: Record<Language, TranslationSet> = {
       failed: "Failed",
     },
     workbench: {
-      stage: "Foundation MVP",
+      stage: "0.1.0 preview",
       title: "Operations Briefing Workbench",
       summary:
         "The first runnable slice proves the desktop shell, policy controls, DeepSeek routing defaults, and local kernel boundary.",
@@ -1490,8 +1579,8 @@ export const translations: Record<Language, TranslationSet> = {
       run: "Run",
       running: "Running",
       seedTemplates: "Seed templates",
-      seededTemplates: "Sample evidence templates seeded into the local evidence folder.",
-      seedPendingHint: "A FileWrite approval request was created. Approve it, then seed again.",
+      seededTemplates: "Blank operator templates seeded into the local evidence folder.",
+      seedPendingHint: "A file write approval request was created. Approve it, then seed again.",
       seedFailed: "Evidence template seeding failed.",
       exportPackage: "Export brief package",
       exportReport: "Export report",
@@ -1500,17 +1589,18 @@ export const translations: Record<Language, TranslationSet> = {
       exported: "Briefing work package generated.",
       reportExported: "Operations briefing Markdown report exported to the local export folder.",
       reportPendingHint:
-        "A DriveWrite approval request was created. Approve it, then export again.",
+        "A local folder export approval request was created. Approve it, then export again.",
       reportExportFailed: "Operations briefing report export failed.",
       htmlReportExported: "Operations briefing HTML report exported to the local export folder.",
       htmlReportPendingHint:
-        "A DriveWrite approval request was created. Approve it, then export HTML again.",
+        "A local folder export approval request was created. Approve it, then export HTML again.",
       htmlReportExportFailed: "Operations briefing HTML report export failed.",
       pdfReportExported: "Operations briefing PDF report exported to the local export folder.",
       pdfReportPendingHint:
-        "A DriveWrite approval request was created. Approve it, then export PDF again.",
+        "A local folder export approval request was created. Approve it, then export PDF again.",
       pdfReportExportFailed: "Operations briefing PDF report export failed.",
       latestRun: "Latest Run",
+      runs: "Run Archive",
       noRuns: "No operations briefing runs yet",
       pendingHint: "A pending approval request was created. Approve it, then run again.",
       failed: "Operations briefing run failed.",
@@ -1521,6 +1611,20 @@ export const translations: Record<Language, TranslationSet> = {
       noActions: "No actions",
       evidence: "Evidence",
       archived: "Archived",
+      archiveEvidenceRedacted: "Source evidence handle redacted",
+      contextReceipt: "Context Receipt",
+      contextUserIntent: "User intent",
+      contextLoopMode: "Loop mode",
+      contextWorkflowPolicy: "Workflow policy",
+      contextSelectedEvidence: "Selected evidence",
+      contextSelectedMemories: "Selected memories",
+      contextNoSelectedMemories: "No memory selected for this run",
+      contextModelRoute: "Model route",
+      contextThinkingLevel: "Thinking level",
+      contextTokenCache: "Token / cache",
+      contextValidation: "Validation",
+      contextIntentionalOmissions: "Intentional omissions",
+      contextNoItems: "None",
       status: {
         pending_approval: "Pending",
         draft_ready: "Draft ready",
@@ -1544,16 +1648,29 @@ export const translations: Record<Language, TranslationSet> = {
       previewNewTasks: "New tasks",
       previewSkippedTasks: "Skipped tasks",
       previewMemoryCandidates: "Memory candidates",
+      previewNewMemoryCandidates: "New memory candidates",
+      previewSkippedMemoryCandidates: "Skipped memory candidates",
       previewMemoryCandidateHint:
         "Memory candidates import into local review and do not write long-term memory.",
+      previewMemoryCandidateReviewSupported: "Memory candidates can enter local review.",
+      previewMemoryCandidateReviewUnsupported:
+        "This version cannot review these memory candidates.",
       previewArchivedRuns: "Brief archives",
+      previewNewArchivedRuns: "New brief archives",
+      previewSkippedArchivedRuns: "Skipped brief archives",
       previewArchiveHint:
         "Briefing runs import as read-only archives and do not rerun tools.",
+      previewArchiveReplaySupported: "Brief archives can be replayed locally in read-only mode.",
+      previewArchiveReplayUnsupported: "This version cannot replay these brief archives.",
       previewWorkflowTemplates: "Workflow templates",
       previewNewWorkflowTemplates: "New templates",
       previewSkippedWorkflowTemplates: "Skipped templates",
       previewWorkflowTemplateHint:
         "Workflow template packages import as local available assets and do not write user folders.",
+      previewWorkflowTemplateImportSupported:
+        "Workflow templates can be registered as local available assets.",
+      previewWorkflowTemplateImportUnsupported:
+        "This version cannot import these workflow templates.",
       packageJson: "Work package JSON",
       importJson: "Import JSON",
       emptyTitle: "Add a task title first.",
@@ -1639,9 +1756,26 @@ export const translations: Record<Language, TranslationSet> = {
       replaced: "Memory candidate accepted and replaced memories archived.",
       replaceFailed: "Memory candidate replace failed.",
       linkAndAccept: "Link and accept",
+      linkRelation: "Link relation",
+      linkExisting: "Link existing memories",
+      linkingExisting: "Linking",
+      linkSource: "Source memory",
+      linkTarget: "Target memory",
+      linkExistingNote: "Why these memories are linked",
+      emptyExistingLink: "Choose two different long-term memories.",
+      existingLinked: "Long-term memories linked.",
+      existingLinkFailed: "Long-term memory link failed.",
       linked: "Memory candidate accepted and linked to overlapping memories.",
       linkFailed: "Memory candidate link failed.",
       linkedMemories: (count) => `Linked to ${count} ${count === 1 ? "memory" : "memories"}`,
+      linkNote: "Link note",
+      searchMatchedBy: "Matched by",
+      searchMatchUnknown: "linked memory",
+      searchMatchOptions: {
+        direct: "Direct match",
+        linked_memory_title: "Linked title",
+        linked_memory_body: "Linked body",
+      },
       updatedAt: "Updated",
       candidateStatus: {
         pending: "Pending",
@@ -1669,6 +1803,12 @@ export const translations: Record<Language, TranslationSet> = {
         active: "Active",
         archived: "Archived",
         expires: "Expires",
+      },
+      relationOptions: {
+        related: "Related",
+        updates: "Updates",
+        extends: "Extends",
+        derives: "Derives",
       },
     },
     audit: {
@@ -1707,35 +1847,35 @@ export const translations: Record<Language, TranslationSet> = {
       failed: "Browse failed.",
     },
     browserSubmitTool: {
-      title: "Browser Submit Boundary",
+      title: "Browser form submission approval",
       urlPlaceholder: "Target form URL",
       summaryPlaceholder: "Submission action summary",
       requestSubmit: "Request submit",
       requestingSubmit: "Requesting",
       pendingHint:
-        "A BrowserSubmit approval request was created. v1 will not submit any form.",
+        "A browser form submission approval request was created. This preview will not submit any form.",
       blocked:
-        "BrowserSubmit v1 only records approval and audit evidence. No form was submitted.",
-      failed: "BrowserSubmit request failed.",
+        "Browser form submission keeps a permission review record. No form was submitted.",
+      failed: "Browser form submission request failed.",
     },
     networkSearchTool: {
-      title: "Network Search Boundary",
+      title: "Web search approval",
       queryPlaceholder: "Search query",
       scopePlaceholder: "Source scope, for example: public web",
       requestSearch: "Request search",
       requestingSearch: "Requesting",
       pendingHint:
-        "A NetworkSearch approval request was created. It will not access the network before approval.",
-      completed: "NetworkSearch ran and recorded source links.",
+        "A web search approval request was created. It will not access the network before approval.",
+      completed: "Web search ran and recorded source links.",
       blocked:
-        "NetworkSearch did not complete. Check recent tool output for the failure reason.",
-      failed: "NetworkSearch request failed.",
-      sourceModelRequiredTitle: "NetworkSearch source model required",
+        "Web search did not complete. Check recent tool output for the failure reason.",
+      failed: "Web search request failed.",
+      sourceModelRequiredTitle: "Web search source model required",
       sourceModelRequiredBody:
-        "This open-source alpha uses a free source adapter for live search. Choose a source model first so auditable links are preserved; local-browser and aggregator presets currently share the source-backed HTTP adapter.",
-      sourceModelPlaceholder: "Choose a free source model",
-      sourceModelMissing: "Choose a NetworkSearch source model first.",
-      routeNotEnabled: "The current NetworkSearch route is not enabled for live search.",
+        "This open-source alpha uses source-linked web search for live results. Choose a free source-linked web-search option first so auditable links are preserved; some early options currently share the same local search implementation.",
+      sourceModelPlaceholder: "Choose a free source-linked web-search option",
+      sourceModelMissing: "Choose a web search source model first.",
+      routeNotEnabled: "The current web search route is not enabled for live search.",
     },
     fileTool: {
       title: "File Tool",
@@ -1746,16 +1886,16 @@ export const translations: Record<Language, TranslationSet> = {
       failed: "File read failed.",
     },
     fileWriteTool: {
-      title: "File Write Boundary",
+      title: "File write approval",
       pathPlaceholder: "Target file path",
       summaryPlaceholder: "Write or change summary",
       contentPlaceholder: "File content",
       requestWrite: "Request write",
       requestingWrite: "Requesting",
-      pendingHint: "A FileWrite approval request was created. Approve it, then submit again.",
+      pendingHint: "A file write approval request was created. Approve it, then submit again.",
       completed: "File written to the local workspace.",
-      blocked: "FileWrite did not execute.",
-      failed: "FileWrite request failed.",
+      blocked: "File write did not execute.",
+      failed: "File write request failed.",
     },
     folderTool: {
       title: "Evidence Folder",
@@ -1772,16 +1912,16 @@ export const translations: Record<Language, TranslationSet> = {
       running: "Running",
       pendingHint: "A pending approval request was created. Approve it, then run again.",
       failed: "Terminal read command failed.",
-      writeTitle: "Terminal Write Boundary",
+      writeTitle: "Terminal write approval",
       writeCommandLabel: "Write command for approval",
       writePlaceholder: "Example: npm install",
       requestWrite: "Request",
       requestingWrite: "Requesting",
       writePendingHint:
-        "A TerminalWrite approval request was created. v1 will not execute write commands directly.",
+        "A terminal write approval request was created. This preview will not execute write commands directly.",
       writeBlocked:
-        "TerminalWrite v1 only records approval and audit evidence. No command was run.",
-      writeFailed: "TerminalWrite request failed.",
+        "Terminal write keeps a permission review record. No command was run.",
+      writeFailed: "Terminal write request failed.",
       options: {
         pwd: "Current directory",
         "git status --short": "Git status",
@@ -1790,7 +1930,7 @@ export const translations: Record<Language, TranslationSet> = {
       },
     },
     computerTool: {
-      title: "Screenshot Boundary",
+      title: "Screen inspection approval",
       capture: "Inspect screen",
       capturing: "Inspecting",
       pendingHint:
@@ -1801,8 +1941,8 @@ export const translations: Record<Language, TranslationSet> = {
       failed: "Screenshot request failed.",
     },
     computerControlTool: {
-      title: "Computer Control Boundary",
-      unlockTitle: "Local Computer Control Unlock",
+      title: "Computer control approval",
+      unlockTitle: "Local computer control unlock",
       unlockChallengeLabel: "Local code",
       unlockTokenPlaceholder: "Enter local code",
       unlockControl: "Unlock",
@@ -1816,71 +1956,71 @@ export const translations: Record<Language, TranslationSet> = {
       requestControl: "Request control",
       requestingControl: "Requesting",
       pendingHint:
-        "A ComputerControl approval request was created. After approval, retry to execute the structured action.",
-      executed: "ComputerControl executed and recorded approval and audit evidence.",
+        "A computer control approval request was created. After approval, retry once to execute the structured action.",
+      executed: "Computer control executed and saved a permission review record.",
       blocked:
-        "ComputerControl was not executed. Check action format, OS permission, or the local input backend.",
-      failed: "ComputerControl request failed.",
+        "Computer control was not executed. Check action format, OS permission, or the local input route.",
+      failed: "Computer control request failed.",
     },
     emailTool: {
-      title: "Email Send Boundary",
+      title: "Email send approval",
       toPlaceholder: "Recipient",
       subjectPlaceholder: "Subject",
       bodyPlaceholder: "Body",
       requestSend: "Request send",
       requestingSend: "Requesting",
       pendingHint:
-        "An EmailSend approval request was created. After approval, retry once; v1 will not send email directly.",
-      blocked: "EmailSend v1 only records approval and audit evidence. No email was sent.",
-      failed: "EmailSend request failed.",
+        "An email send approval request was created. After approval, retry once; this preview will not send email directly.",
+      blocked: "Email send keeps a permission review record. No email was sent.",
+      failed: "Email send request failed.",
     },
     emailDraftTool: {
-      title: "Email Draft Boundary",
+      title: "Email draft approval",
       toPlaceholder: "Draft recipient",
       subjectPlaceholder: "Draft subject",
       bodyPlaceholder: "Draft body",
       requestDraft: "Request draft",
       requestingDraft: "Requesting",
       pendingHint:
-        "An EmailDraft approval request was created. v1 will not create mailbox drafts.",
+        "An email draft approval request was created. This preview will not create mailbox drafts.",
       blocked:
-        "EmailDraft v1 only records approval and audit evidence. No mailbox draft was created.",
-      failed: "EmailDraft request failed.",
+        "Email draft keeps a permission review record. No mailbox draft was created.",
+      failed: "Email draft request failed.",
     },
     emailReadTool: {
-      title: "Email Read Boundary",
+      title: "Email read approval",
       mailboxPlaceholder: "Mailbox or folder",
       queryPlaceholder: "Read query or evidence clue",
       requestRead: "Request read",
       requestingRead: "Requesting",
       pendingHint:
-        "An EmailRead approval request was created. v1 will not read a real mailbox.",
-      blocked: "EmailRead v1 only records approval and audit evidence. No mailbox was read.",
-      failed: "EmailRead request failed.",
+        "An email read approval request was created. This preview will not read a real mailbox.",
+      blocked: "Email read keeps a permission review record. No mailbox was read.",
+      failed: "Email read request failed.",
     },
     driveReadTool: {
-      title: "Drive Read Local Folder",
+      title: "Local folder read",
       locationPlaceholder: "Local folder path",
       queryPlaceholder: "File name or content keyword",
       requestRead: "Request read",
       requestingRead: "Requesting",
       pendingHint:
-        "A DriveRead approval request was created. After approval, it will read a local folder.",
-      completed: "DriveRead read the local folder and recorded the result.",
-      blocked: "DriveRead did not complete. Check recent tool output for the failure reason.",
-      failed: "DriveRead request failed.",
+        "A local folder read approval request was created. After approval, it will read the selected local folder.",
+      completed: "Local folder read completed and recorded the result.",
+      blocked: "Local folder read did not complete. Check recent tool output for the failure reason.",
+      failed: "Local folder read request failed.",
     },
     driveWriteTool: {
-      title: "Drive Export Package",
+      title: "Work package export",
       locationPlaceholder: "Target local export folder",
       summaryPlaceholder: "Export package summary",
       requestWrite: "Export package",
       requestingWrite: "Requesting",
       pendingHint:
-        "A DriveWrite approval request was created. After approval, it will export the current work package JSON.",
-      completed: "DriveWrite exported the current work package JSON to the local folder.",
-      blocked: "DriveWrite did not complete. Check recent tool output for the failure reason.",
-      failed: "DriveWrite request failed.",
+        "A local folder export approval request was created. After approval, it will export the current work package JSON.",
+      completed: "Work package exported to the local folder.",
+      blocked: "Work package export did not complete. Check recent tool output for the failure reason.",
+      failed: "Work package export request failed.",
     },
     inspector: {
       title: "Runtime Controls",

@@ -82,9 +82,14 @@ function lineNumberForIndex(value, index) {
 
 function runCheckSelfTests() {
   const fakeKey = "sk-" + "1234567890abcdef";
+  const envKey = "DEEPSEEK_API_KEY";
   const cases = [
     {
-      content: `DEEPSEEK_API_KEY=${fakeKey}`,
+      content: `${envKey}=${fakeKey}`,
+      expected: true,
+    },
+    {
+      content: `$env:${envKey} = "${fakeKey}"`,
       expected: true,
     },
     {
@@ -92,7 +97,7 @@ function runCheckSelfTests() {
       expected: true,
     },
     {
-      content: "DEEPSEEK_API_KEY=",
+      content: `${envKey}=`,
       expected: false,
     },
     {

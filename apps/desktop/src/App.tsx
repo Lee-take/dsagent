@@ -25,7 +25,7 @@ import {
   TerminalSquare,
   X,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ChangeEvent, FormEvent } from "react";
 import { translations } from "./i18n";
 import type {
@@ -51,7 +51,9 @@ import type {
   MemoryLifecycle,
   MemoryRecord,
   MemoryRecordDeletion,
+  MemorySearchMatch,
   MemoryRecordUpdate,
+  MemoryRelationKind,
   MemoryScope,
   MemorySensitivity,
   MemoryType,
@@ -71,7 +73,7 @@ import type {
 } from "./types";
 
 const fallbackState: FoundationState = {
-  app_name: "DeepSeek Agent OS",
+  app_name: "DS Agent",
   large_model_provider: "deepseek",
   model_route: "auto",
   thinking_level: "auto",
@@ -103,6 +105,12 @@ const fallbackDeepSeekChatCacheState: DeepSeekChatCacheState = {
   entries: 0,
 };
 
+const defaultMemorySearchMatch: MemorySearchMatch = {
+  source: "direct",
+  linked_memory_id: null,
+  relation: null,
+};
+
 const fallbackNetworkSearchRouteStatus: NetworkSearchRouteStatus = {
   backend: "source_backed_model",
   execution_mode: "permission_audit_only",
@@ -111,43 +119,41 @@ const fallbackNetworkSearchRouteStatus: NetworkSearchRouteStatus = {
   deepseek_orchestration_ready: false,
   requires_user_confirmation: true,
   note:
-    "The selected large model does not provide source-backed NetworkSearch; choose a free NetworkSearch source model before running search.",
+    "The selected model route needs a separate source-linked web-search option before search can run.",
 };
 
 const fallbackComputerUseBackendStatus: ComputerUseBackendStatus = {
   screenshot_backend: "local_windows_screen_capture",
   screenshot_available: true,
-  screenshot_note:
-    "screen pixels are routed through the local Windows screen capture library",
+  screenshot_note: "Screen inspection uses the local Windows screen route.",
   screenshot_permission_required: false,
   screenshot_permission_note:
     "Local Windows desktop capture usually runs without a separate OS permission prompt, but secure desktops and protected windows can block pixels.",
   control_backend: "local_windows_input_control",
   control_available: true,
   control_requires_approval: true,
-  control_note:
-    "mouse and keyboard control is routed through the local Windows input library",
+  control_note: "Mouse and keyboard control uses the local Windows input route.",
   control_permission_required: false,
   control_permission_note:
     "Local Windows input control runs against the foreground desktop and can be blocked by secure desktop prompts or elevated target windows.",
   codex_bridge: {
     required: false,
-    transport_env_var: "DEEPSEEK_AGENT_OS_CODEX_BRIDGE_TRANSPORT",
+    transport_env_var: "DEEPSEEK_AGENT_OS_BRIDGE_TRANSPORT",
     transport: null,
     transport_decision_required: false,
     transport_options: [
       {
         value: "http",
-        label: "External HTTP bridge",
+        label: "Local HTTP bridge service",
         note:
-          "Use an external loopback HTTP service with health, screenshot, control, and network-search endpoints.",
+          "Use a user-started local HTTP service with health, screenshot, control, and web-search endpoints.",
       },
     ],
-    endpoint_env_var: "DEEPSEEK_AGENT_OS_CODEX_BRIDGE_URL",
+    endpoint_env_var: "DEEPSEEK_AGENT_OS_BRIDGE_URL",
     endpoint_configured: false,
     connected: false,
     note:
-      "Codex bridge runtime is not required for the selected local Computer Use route.",
+      "Selected local Computer Use route does not need the local bridge service.",
   },
 };
 
@@ -166,19 +172,19 @@ const fallbackModelDrivenToolStrategy: ModelDrivenToolStrategy = {
     {
       value: "free_web_source",
       label: "Free web source model",
-      note: "Use a free source-backed web-search adapter for evidence and citations.",
+      note: "Use a free source-linked web-search option for evidence and citations.",
     },
     {
       value: "free_local_browser",
       label: "Free local browser search (alpha)",
       note:
-        "Alpha preset: currently uses the shared source-backed HTTP adapter; reserved for local browser/search-page retrieval.",
+        "Alpha preset: currently uses the same local search implementation; reserved for local browser/search-page retrieval.",
     },
     {
       value: "free_source_aggregator",
       label: "Free source aggregator (alpha)",
       note:
-        "Alpha preset: currently uses the shared source-backed HTTP adapter; reserved for pluggable source aggregation.",
+        "Alpha preset: currently uses the same local search implementation; reserved for pluggable source aggregation.",
     },
   ],
   network_search_backend: "source_backed_model",
@@ -187,7 +193,7 @@ const fallbackModelDrivenToolStrategy: ModelDrivenToolStrategy = {
   runtime_platform: "windows",
   macos_supported: true,
   note:
-    "Selected large model needs a separate source-backed NetworkSearch model before NetworkSearch can run.",
+    "Selected model route needs a separate source-linked web-search option before search can run.",
 };
 
 const fallbackLocalDirectoryState: LocalDirectoryState = {
@@ -238,6 +244,8 @@ type MemoryEditDraft = {
   lifecycle: MemoryLifecycle;
   expires_at: string;
 };
+
+type NavSection = "workbench" | "memory" | "approvals";
 
 function isoToDateInputValue(value: string | null): string {
   return value ? value.slice(0, 10) : "";
@@ -330,6 +338,10 @@ export function App() {
     useState<DeepSeekPricingState>(fallbackDeepSeekPricingState);
   const [language, setLanguage] = useState<Language>(readInitialLanguage);
   const [themeStyle, setThemeStyle] = useState<ThemeStyle>(readInitialThemeStyle);
+  const [activeNavSection, setActiveNavSection] = useState<NavSection>("workbench");
+  const workbenchSectionRef = useRef<HTMLElement | null>(null);
+  const memorySectionRef = useRef<HTMLElement | null>(null);
+  const approvalsSectionRef = useRef<HTMLDivElement | null>(null);
   const [taskRecords, setTaskRecords] = useState<TaskRecord[]>([]);
   const [memoryRecords, setMemoryRecords] = useState<MemoryRecord[]>([]);
   const [memoryCandidateRecords, setMemoryCandidateRecords] = useState<MemoryCandidateRecord[]>([]);
@@ -347,6 +359,12 @@ export function App() {
     useState<MemorySensitivity>("normal");
   const [candidateLifecycle, setCandidateLifecycle] = useState<MemoryLifecycle>("active");
   const [candidateExpiresAt, setCandidateExpiresAt] = useState("");
+  const [memoryLinkSourceId, setMemoryLinkSourceId] = useState("");
+  const [memoryLinkTargetId, setMemoryLinkTargetId] = useState("");
+  const [memoryExistingLinkRelation, setMemoryExistingLinkRelation] =
+    useState<MemoryRelationKind>("related");
+  const [memoryExistingLinkNote, setMemoryExistingLinkNote] = useState("");
+  const [memoryExistingLinkPending, setMemoryExistingLinkPending] = useState(false);
   const [memoryEditDraft, setMemoryEditDraft] = useState<MemoryEditDraft | null>(null);
   const [memoryMergePreview, setMemoryMergePreview] =
     useState<MemoryCandidateMergePreview | null>(null);
@@ -451,6 +469,7 @@ export function App() {
     useState<string | null>(null);
   const [memoryReplacePreviewPending, setMemoryReplacePreviewPending] =
     useState<string | null>(null);
+  const [memoryLinkRelation, setMemoryLinkRelation] = useState<MemoryRelationKind>("extends");
   const [memoryUpdatePending, setMemoryUpdatePending] = useState<string | null>(null);
   const [memoryDeletionPending, setMemoryDeletionPending] = useState<string | null>(null);
   const [browserPending, setBrowserPending] = useState(false);
@@ -959,6 +978,8 @@ export function App() {
   const linkMemoryCandidateToConflicts = async (
     candidateId: string,
     linkedMemoryIds: string[],
+    relation: MemoryRelationKind,
+    note: string,
   ) => {
     setMemoryCandidateResolutionPending(candidateId);
     setMemoryCandidateError("");
@@ -968,7 +989,8 @@ export function App() {
       await invoke("link_memory_candidate_to_conflicts", {
         candidateId,
         linkedMemoryIds,
-        note: copy.memory.linkAndAccept,
+        relation,
+        note,
       });
       const [memories] = await Promise.all([
         loadMemoryRecords(memoryQuery),
@@ -982,6 +1004,35 @@ export function App() {
       setMemoryCandidateError(String(error) || copy.memory.linkFailed);
     } finally {
       setMemoryCandidateResolutionPending(null);
+    }
+  };
+
+  const linkExistingMemoryRecords = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!memoryLinkSourceId || !memoryLinkTargetId || memoryLinkSourceId === memoryLinkTargetId) {
+      setMemoryError(copy.memory.emptyExistingLink);
+      return;
+    }
+
+    setMemoryExistingLinkPending(true);
+    setMemoryError("");
+    setMemoryNotice("");
+
+    try {
+      await invoke<MemoryRecord[]>("link_memory_records", {
+        sourceMemoryId: memoryLinkSourceId,
+        targetMemoryId: memoryLinkTargetId,
+        relation: memoryExistingLinkRelation,
+        note: memoryExistingLinkNote,
+      });
+      const memories = await loadMemoryRecords(memoryQuery);
+      setMemoryRecords(memories);
+      setMemoryNotice(copy.memory.existingLinked);
+      setMemoryExistingLinkNote("");
+    } catch (error) {
+      setMemoryError(String(error) || copy.memory.existingLinkFailed);
+    } finally {
+      setMemoryExistingLinkPending(false);
     }
   };
 
@@ -2047,6 +2098,19 @@ export function App() {
     (record) => record.effective_status === "pending_approval",
   );
   const latestOperationsBriefingRun = operationsBriefingRuns[0];
+  const navItemClassName = (section: NavSection) =>
+    activeNavSection === section ? "nav-item active" : "nav-item";
+  const scrollToNavSection = (section: NavSection) => {
+    setActiveNavSection(section);
+    const target =
+      section === "memory"
+        ? memorySectionRef.current
+        : section === "approvals"
+          ? approvalsSectionRef.current
+          : workbenchSectionRef.current;
+
+    target?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
 
   return (
     <main className="app-shell">
@@ -2080,13 +2144,28 @@ export function App() {
           </div>
         </div>
         <nav className="nav-list" aria-label={copy.navLabel}>
-          <button className="nav-item active" type="button">
+          <button
+            className={navItemClassName("workbench")}
+            type="button"
+            aria-current={activeNavSection === "workbench" ? "page" : undefined}
+            onClick={() => scrollToNavSection("workbench")}
+          >
             <FolderOpen size={18} /> {copy.nav.workbench}
           </button>
-          <button className="nav-item" type="button">
+          <button
+            className={navItemClassName("memory")}
+            type="button"
+            aria-current={activeNavSection === "memory" ? "page" : undefined}
+            onClick={() => scrollToNavSection("memory")}
+          >
             <Database size={18} /> {copy.nav.memory}
           </button>
-          <button className="nav-item" type="button">
+          <button
+            className={navItemClassName("approvals")}
+            type="button"
+            aria-current={activeNavSection === "approvals" ? "page" : undefined}
+            onClick={() => scrollToNavSection("approvals")}
+          >
             <ShieldCheck size={18} /> {copy.nav.approvals}
           </button>
         </nav>
@@ -2128,7 +2207,7 @@ export function App() {
           </select>
         </header>
 
-        <section className="workbench">
+        <section className="workbench" ref={workbenchSectionRef}>
           <div className="timeline">
             <p className="eyebrow">{copy.workbench.stage}</p>
             <h1>{copy.workbench.title}</h1>
@@ -2345,102 +2424,223 @@ export function App() {
               {briefingError ? <p className="package-error">{briefingError}</p> : null}
 
               <div className="workflow-run-list" aria-live="polite">
-                {!latestOperationsBriefingRun ? (
+                {operationsBriefingRuns.length === 0 ? (
                   <p className="empty-state">{copy.operationsBriefing.noRuns}</p>
                 ) : (
-                  <article className="workflow-run">
-                    <header className="workflow-run-header">
-                      <div>
-                        <span>{copy.operationsBriefing.latestRun}</span>
-                        <strong>{latestOperationsBriefingRun.title}</strong>
-                      </div>
-                      <span className={`access-status ${latestOperationsBriefingRun.status}`}>
-                        {copy.operationsBriefing.status[latestOperationsBriefingRun.status]}
-                      </span>
-                    </header>
-                    <p>{latestOperationsBriefingRun.summary}</p>
-                    {latestOperationsBriefingRun.warnings.length > 0 ? (
-                      <p>{latestOperationsBriefingRun.warnings.join(" ")}</p>
-                    ) : null}
-                    <footer>
-                      <span>{formatTaskDate(latestOperationsBriefingRun.created_at, language)}</span>
-                      {latestOperationsBriefingRun.archived_from_package ? (
-                        <span className="archive-label">{copy.operationsBriefing.archived}</span>
-                      ) : null}
-                      {latestOperationsBriefingRun.evidence_folder_path ? (
-                        <span>
-                          {copy.operationsBriefing.evidence}:{" "}
-                          {latestOperationsBriefingRun.evidence_folder_path}
-                        </span>
-                      ) : null}
-                    </footer>
-                    <div className="workflow-run-sections">
-                      <section>
-                        <strong>{copy.operationsBriefing.anomalies}</strong>
-                        {latestOperationsBriefingRun.anomalies.length === 0 ? (
-                          <p className="empty-state">{copy.operationsBriefing.noAnomalies}</p>
-                        ) : (
-                          <ul>
-                            {latestOperationsBriefingRun.anomalies.map((anomaly) => (
-                              <li key={`${latestOperationsBriefingRun.id}-${anomaly.area}`}>
-                                <span>{anomaly.area}</span>
-                                {anomaly.signal}
-                              </li>
-                            ))}
-                          </ul>
-                        )}
-                      </section>
-                      <section>
-                        <strong>{copy.operationsBriefing.actions}</strong>
-                        {latestOperationsBriefingRun.action_plan.length === 0 ? (
-                          <p className="empty-state">{copy.operationsBriefing.noActions}</p>
-                        ) : (
-                          <ul>
-                            {latestOperationsBriefingRun.action_plan.map((action) => (
-                              <li key={`${latestOperationsBriefingRun.id}-${action.owner}`}>
-                                <span>{action.owner}</span>
-                                {action.action}
-                              </li>
-                            ))}
-                          </ul>
-                        )}
-                      </section>
+                  <>
+                    <div className="queue-heading">
+                      <strong>{copy.operationsBriefing.runs}</strong>
+                      <span>{operationsBriefingRuns.length}</span>
                     </div>
-                    <div className="workflow-run-actions">
-                      <button
-                        type="button"
-                        onClick={exportOperationsBriefingPackage}
-                        disabled={briefingPending || packagePending}
-                      >
-                        <PackageOpen size={14} aria-hidden="true" />
-                        {copy.operationsBriefing.exportPackage}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void exportOperationsBriefingReport()}
-                        disabled={briefingPending}
-                      >
-                        <FileText size={14} aria-hidden="true" />
-                        {copy.operationsBriefing.exportReport}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void exportOperationsBriefingHtmlReport()}
-                        disabled={briefingPending}
-                      >
-                        <FileText size={14} aria-hidden="true" />
-                        {copy.operationsBriefing.exportHtmlReport}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void exportOperationsBriefingPdfReport()}
-                        disabled={briefingPending}
-                      >
-                        <FileText size={14} aria-hidden="true" />
-                        {copy.operationsBriefing.exportPdfReport}
-                      </button>
-                    </div>
-                  </article>
+                    {operationsBriefingRuns.map((operationsBriefingRun, runIndex) => (
+                      <article className="workflow-run" key={operationsBriefingRun.id}>
+                        <header className="workflow-run-header">
+                          <div>
+                            <span>
+                              {runIndex === 0
+                                ? copy.operationsBriefing.latestRun
+                                : copy.operationsBriefing.runs}
+                            </span>
+                            <strong>{operationsBriefingRun.title}</strong>
+                          </div>
+                          <span className={`access-status ${operationsBriefingRun.status}`}>
+                            {copy.operationsBriefing.status[operationsBriefingRun.status]}
+                          </span>
+                        </header>
+                        <p>{operationsBriefingRun.summary}</p>
+                        {operationsBriefingRun.warnings.length > 0 ? (
+                          <p>{operationsBriefingRun.warnings.join(" ")}</p>
+                        ) : null}
+                        <footer>
+                          <span>{formatTaskDate(operationsBriefingRun.created_at, language)}</span>
+                          {operationsBriefingRun.archived_from_package ? (
+                            <span className="archive-label">{copy.operationsBriefing.archived}</span>
+                          ) : null}
+                          {operationsBriefingRun.evidence_folder_path ? (
+                            <span>
+                              {copy.operationsBriefing.evidence}:{" "}
+                              {operationsBriefingRun.evidence_folder_path}
+                            </span>
+                          ) : null}
+                          {operationsBriefingRun.archived_from_package && !operationsBriefingRun.evidence_folder_path ? (
+                            <span className="archive-evidence-note">
+                              {copy.operationsBriefing.archiveEvidenceRedacted}
+                            </span>
+                          ) : null}
+                        </footer>
+                        <section
+                          className="context-receipt"
+                          aria-label={copy.operationsBriefing.contextReceipt}
+                        >
+                          <strong>{copy.operationsBriefing.contextReceipt}</strong>
+                          <dl className="context-receipt-meta">
+                            <div>
+                              <dt>{copy.operationsBriefing.contextUserIntent}</dt>
+                              <dd>{operationsBriefingRun.context_receipt.user_intent}</dd>
+                            </div>
+                            <div>
+                              <dt>{copy.operationsBriefing.contextLoopMode}</dt>
+                              <dd>{operationsBriefingRun.context_receipt.loop_mode}</dd>
+                            </div>
+                            <div>
+                              <dt>{copy.operationsBriefing.contextWorkflowPolicy}</dt>
+                              <dd>{operationsBriefingRun.context_receipt.workflow_policy}</dd>
+                            </div>
+                            <div>
+                              <dt>{copy.operationsBriefing.contextModelRoute}</dt>
+                              <dd>{operationsBriefingRun.context_receipt.model_route}</dd>
+                            </div>
+                            <div>
+                              <dt>{copy.operationsBriefing.contextThinkingLevel}</dt>
+                              <dd>{operationsBriefingRun.context_receipt.thinking_level}</dd>
+                            </div>
+                            <div>
+                              <dt>{copy.operationsBriefing.contextTokenCache}</dt>
+                              <dd>{operationsBriefingRun.context_receipt.token_cache_state}</dd>
+                            </div>
+                          </dl>
+                          <div className="context-receipt-lists">
+                            <div>
+                              <span>{copy.operationsBriefing.contextSelectedEvidence}</span>
+                              {operationsBriefingRun.context_receipt.selected_evidence.length > 0 ? (
+                                <ul>
+                                  {operationsBriefingRun.context_receipt.selected_evidence.map(
+                                    (evidence, evidenceIndex) => (
+                                      <li key={`${operationsBriefingRun.id}-evidence-${evidenceIndex}`}>
+                                        {evidence}
+                                      </li>
+                                    ),
+                                  )}
+                                </ul>
+                              ) : (
+                                <p>{copy.operationsBriefing.contextNoItems}</p>
+                              )}
+                            </div>
+                            <div>
+                              <span>{copy.operationsBriefing.contextSelectedMemories}</span>
+                              {operationsBriefingRun.context_receipt.selected_memories.length > 0 ? (
+                                <ul>
+                                  {operationsBriefingRun.context_receipt.selected_memories.map(
+                                    (memory, memoryIndex) => (
+                                      <li key={`${operationsBriefingRun.id}-memory-${memoryIndex}`}>
+                                        {memory}
+                                      </li>
+                                    ),
+                                  )}
+                                </ul>
+                              ) : (
+                                <p>{copy.operationsBriefing.contextNoSelectedMemories}</p>
+                              )}
+                            </div>
+                            <div>
+                              <span>{copy.operationsBriefing.contextValidation}</span>
+                              {operationsBriefingRun.context_receipt.validation_results.length > 0 ? (
+                                <ul>
+                                  {operationsBriefingRun.context_receipt.validation_results.map(
+                                    (result, resultIndex) => (
+                                      <li key={`${operationsBriefingRun.id}-validation-${resultIndex}`}>
+                                        {result}
+                                      </li>
+                                    ),
+                                  )}
+                                </ul>
+                              ) : (
+                                <p>{copy.operationsBriefing.contextNoItems}</p>
+                              )}
+                            </div>
+                            <div>
+                              <span>{copy.operationsBriefing.contextIntentionalOmissions}</span>
+                              {operationsBriefingRun.context_receipt.intentional_omissions.length > 0 ? (
+                                <ul>
+                                  {operationsBriefingRun.context_receipt.intentional_omissions.map(
+                                    (omission, omissionIndex) => (
+                                      <li key={`${operationsBriefingRun.id}-omission-${omissionIndex}`}>
+                                        {omission}
+                                      </li>
+                                    ),
+                                  )}
+                                </ul>
+                              ) : (
+                                <p>{copy.operationsBriefing.contextNoItems}</p>
+                              )}
+                            </div>
+                          </div>
+                        </section>
+                        <div className="workflow-run-sections">
+                          <section>
+                            <strong>{copy.operationsBriefing.anomalies}</strong>
+                            {operationsBriefingRun.anomalies.length === 0 ? (
+                              <p className="empty-state">{copy.operationsBriefing.noAnomalies}</p>
+                            ) : (
+                              <ul>
+                                {operationsBriefingRun.anomalies.map((anomaly, anomalyIndex) => (
+                                  <li
+                                    key={`${operationsBriefingRun.id}-anomaly-${anomaly.area}-${anomalyIndex}`}
+                                  >
+                                    <span>{anomaly.area}</span>
+                                    {anomaly.signal}
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </section>
+                          <section>
+                            <strong>{copy.operationsBriefing.actions}</strong>
+                            {operationsBriefingRun.action_plan.length === 0 ? (
+                              <p className="empty-state">{copy.operationsBriefing.noActions}</p>
+                            ) : (
+                              <ul>
+                                {operationsBriefingRun.action_plan.map((action, actionIndex) => (
+                                  <li
+                                    key={`${operationsBriefingRun.id}-action-${action.owner}-${actionIndex}`}
+                                  >
+                                    <span>{action.owner}</span>
+                                    {action.action}
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </section>
+                        </div>
+                        {runIndex === 0 ? (
+                          <div className="workflow-run-actions">
+                            <button
+                              type="button"
+                              onClick={exportOperationsBriefingPackage}
+                              disabled={briefingPending || packagePending}
+                            >
+                              <PackageOpen size={14} aria-hidden="true" />
+                              {copy.operationsBriefing.exportPackage}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void exportOperationsBriefingReport()}
+                              disabled={briefingPending}
+                            >
+                              <FileText size={14} aria-hidden="true" />
+                              {copy.operationsBriefing.exportReport}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void exportOperationsBriefingHtmlReport()}
+                              disabled={briefingPending}
+                            >
+                              <FileText size={14} aria-hidden="true" />
+                              {copy.operationsBriefing.exportHtmlReport}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void exportOperationsBriefingPdfReport()}
+                              disabled={briefingPending}
+                            >
+                              <FileText size={14} aria-hidden="true" />
+                              {copy.operationsBriefing.exportPdfReport}
+                            </button>
+                          </div>
+                        ) : null}
+                      </article>
+                    ))}
+                  </>
                 )}
               </div>
             </section>
@@ -2471,7 +2671,11 @@ export function App() {
                 </button>
               </form>
 
-              <section className="memory-panel inline" aria-labelledby="memory-panel-title">
+              <section
+                className="memory-panel inline"
+                aria-labelledby="memory-panel-title"
+                ref={memorySectionRef}
+              >
                 <div className="inspector-header compact">
                   <Database size={18} aria-hidden="true" />
                   <strong id="memory-panel-title">{copy.memory.title}</strong>
@@ -2488,14 +2692,81 @@ export function App() {
                     {copy.memory.search}
                   </button>
                 </form>
+                {memoryRecords.length >= 2 ? (
+                  <form className="memory-link-form" onSubmit={linkExistingMemoryRecords}>
+                    <select
+                      value={memoryLinkSourceId}
+                      aria-label={copy.memory.linkSource}
+                      onChange={(event) => setMemoryLinkSourceId(event.target.value)}
+                      disabled={memoryExistingLinkPending}
+                    >
+                      <option value="">{copy.memory.linkSource}</option>
+                      {memoryRecords.map((memory) => (
+                        <option key={memory.id} value={memory.id}>
+                          {memory.title}
+                        </option>
+                      ))}
+                    </select>
+                    <select
+                      value={memoryLinkTargetId}
+                      aria-label={copy.memory.linkTarget}
+                      onChange={(event) => setMemoryLinkTargetId(event.target.value)}
+                      disabled={memoryExistingLinkPending}
+                    >
+                      <option value="">{copy.memory.linkTarget}</option>
+                      {memoryRecords.map((memory) => (
+                        <option key={memory.id} value={memory.id}>
+                          {memory.title}
+                        </option>
+                      ))}
+                    </select>
+                    <select
+                      value={memoryExistingLinkRelation}
+                      aria-label={copy.memory.linkRelation}
+                      onChange={(event) =>
+                        setMemoryExistingLinkRelation(event.target.value as MemoryRelationKind)
+                      }
+                      disabled={memoryExistingLinkPending}
+                    >
+                      {(Object.keys(copy.memory.relationOptions) as MemoryRelationKind[]).map(
+                        (relation) => (
+                          <option key={relation} value={relation}>
+                            {copy.memory.relationOptions[relation]}
+                          </option>
+                        ),
+                      )}
+                    </select>
+                    <input
+                      value={memoryExistingLinkNote}
+                      aria-label={copy.memory.linkExistingNote}
+                      placeholder={copy.memory.linkExistingNote}
+                      onChange={(event) => setMemoryExistingLinkNote(event.target.value)}
+                      disabled={memoryExistingLinkPending}
+                    />
+                    <button type="submit" disabled={memoryExistingLinkPending}>
+                      <Link2 size={15} aria-hidden="true" />
+                      {memoryExistingLinkPending
+                        ? copy.memory.linkingExisting
+                        : copy.memory.linkExisting}
+                    </button>
+                  </form>
+                ) : null}
                 {memoryNotice ? <p className="package-message">{memoryNotice}</p> : null}
                 {memoryError ? <p className="package-error">{memoryError}</p> : null}
                 {memoryRecords.length === 0 ? (
                   <p className="empty-state">{copy.memory.noMemories}</p>
                 ) : (
                   <div className="memory-list">
-                    {memoryRecords.slice(0, 3).map((memory) => {
+                    {memoryRecords.map((memory) => {
                       const isEditing = memoryEditDraft?.id === memory.id;
+                      const searchMatch = memory.search_match ?? defaultMemorySearchMatch;
+                      const searchLinkedMemory = searchMatch.linked_memory_id
+                        ? memory.linked_memories.find(
+                            (linkedMemory) =>
+                              linkedMemory.id === searchMatch.linked_memory_id,
+                          )
+                        : null;
+                      const showSearchMatch = searchMatch.source !== "direct";
 
                       return (
                         <article className="memory-row" key={memory.id}>
@@ -2640,9 +2911,34 @@ export function App() {
                                   {memory.linked_memories.map((linkedMemory) => (
                                     <span className="memory-link-pill" key={linkedMemory.id}>
                                       <Link2 size={12} aria-hidden="true" />
+                                      <strong>{copy.memory.relationOptions[linkedMemory.relation]}</strong>
                                       {linkedMemory.title}
+                                      {linkedMemory.note ? (
+                                        <span className="memory-link-note">
+                                          {copy.memory.linkNote}: {linkedMemory.note}
+                                        </span>
+                                      ) : null}
                                     </span>
                                   ))}
+                                </div>
+                              ) : null}
+                              {showSearchMatch ? (
+                                <div className="memory-search-match">
+                                  <span>{copy.memory.searchMatchedBy}</span>
+                                  <span className="memory-link-pill">
+                                    <Search size={12} aria-hidden="true" />
+                                    <strong>
+                                      {copy.memory.searchMatchOptions[searchMatch.source]}
+                                    </strong>
+                                    {searchMatch.relation ? (
+                                      <span>
+                                        {copy.memory.relationOptions[searchMatch.relation]}
+                                      </span>
+                                    ) : null}
+                                    <span>
+                                      {searchLinkedMemory?.title ?? copy.memory.searchMatchUnknown}
+                                    </span>
+                                  </span>
                                 </div>
                               ) : null}
                               <div className="candidate-actions">
@@ -2785,7 +3081,7 @@ export function App() {
                     <p className="empty-state">{copy.memory.noCandidates}</p>
                   ) : (
                     <div className="memory-list">
-                      {memoryCandidateRecords.slice(0, 3).map((record) => (
+                      {memoryCandidateRecords.map((record) => (
                         <article className="memory-row candidate-row" key={record.candidate.id}>
                           <div className="candidate-row-header">
                             <strong>{record.candidate.title}</strong>
@@ -2970,21 +3266,42 @@ export function App() {
                                 </button>
                               ) : null}
                               {record.conflicting_memory_ids.length > 0 ? (
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    void linkMemoryCandidateToConflicts(
-                                      record.candidate.id,
-                                      record.conflicting_memory_ids,
-                                    )
-                                  }
-                                  disabled={memoryCandidateResolutionPending !== null}
-                                >
-                                  <Link2 size={14} aria-hidden="true" />
-                                  {memoryCandidateResolutionPending === record.candidate.id
-                                    ? copy.memory.resolving
-                                    : copy.memory.linkAndAccept}
-                                </button>
+                                <>
+                                  <select
+                                    className="memory-relation-select"
+                                    value={memoryLinkRelation}
+                                    aria-label={copy.memory.linkRelation}
+                                    onChange={(event) =>
+                                      setMemoryLinkRelation(event.target.value as MemoryRelationKind)
+                                    }
+                                    disabled={memoryCandidateResolutionPending !== null}
+                                  >
+                                    {(Object.keys(copy.memory.relationOptions) as MemoryRelationKind[]).map(
+                                      (relation) => (
+                                        <option key={relation} value={relation}>
+                                          {copy.memory.relationOptions[relation]}
+                                        </option>
+                                      ),
+                                    )}
+                                  </select>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      void linkMemoryCandidateToConflicts(
+                                        record.candidate.id,
+                                        record.conflicting_memory_ids,
+                                        memoryLinkRelation,
+                                        record.candidate.rationale || copy.memory.linkAndAccept,
+                                      )
+                                    }
+                                    disabled={memoryCandidateResolutionPending !== null}
+                                  >
+                                    <Link2 size={14} aria-hidden="true" />
+                                    {memoryCandidateResolutionPending === record.candidate.id
+                                      ? copy.memory.resolving
+                                      : copy.memory.linkAndAccept}
+                                  </button>
+                                </>
                               ) : null}
                               <button
                                 type="button"
@@ -3088,8 +3405,24 @@ export function App() {
                       {importPreview.memory_candidates.total}
                     </span>
                     <span>
+                      {copy.package.previewNewMemoryCandidates}:{" "}
+                      {importPreview.memory_candidates.new}
+                    </span>
+                    <span>
+                      {copy.package.previewSkippedMemoryCandidates}:{" "}
+                      {importPreview.memory_candidates.skipped}
+                    </span>
+                    <span>
                       {copy.package.previewArchivedRuns}:{" "}
                       {importPreview.operations_briefing_runs.total}
+                    </span>
+                    <span>
+                      {copy.package.previewNewArchivedRuns}:{" "}
+                      {importPreview.operations_briefing_runs.new}
+                    </span>
+                    <span>
+                      {copy.package.previewSkippedArchivedRuns}:{" "}
+                      {importPreview.operations_briefing_runs.skipped}
                     </span>
                     <span>
                       {copy.package.previewWorkflowTemplates}:{" "}
@@ -3105,8 +3438,23 @@ export function App() {
                     </span>
                   </div>
                   <p>{copy.package.previewMemoryCandidateHint}</p>
+                  <p>
+                    {importPreview.memory_candidates.review_supported
+                      ? copy.package.previewMemoryCandidateReviewSupported
+                      : copy.package.previewMemoryCandidateReviewUnsupported}
+                  </p>
                   <p>{copy.package.previewArchiveHint}</p>
+                  <p>
+                    {importPreview.operations_briefing_runs.replay_supported
+                      ? copy.package.previewArchiveReplaySupported
+                      : copy.package.previewArchiveReplayUnsupported}
+                  </p>
                   <p>{copy.package.previewWorkflowTemplateHint}</p>
+                  <p>
+                    {importPreview.workflow_templates.import_supported
+                      ? copy.package.previewWorkflowTemplateImportSupported
+                      : copy.package.previewWorkflowTemplateImportUnsupported}
+                  </p>
                 </section>
               ) : null}
 
@@ -3681,7 +4029,7 @@ export function App() {
                 })}
               </div>
 
-              <div className="approval-queue">
+              <div className="approval-queue" ref={approvalsSectionRef}>
                 <div className="queue-heading">
                   <strong>{copy.capabilities.pendingTitle}</strong>
                   <span>{pendingCapabilityRecords.length}</span>

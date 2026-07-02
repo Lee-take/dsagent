@@ -13,7 +13,10 @@ use crate::kernel::codex_bridge_contract::{
     CodexBridgeScreenshotRequest, CodexBridgeScreenshotResponse, CODEX_BRIDGE_CONTRACT_VERSION,
 };
 use crate::kernel::codex_bridge_http::CodexBridgeHttpClient;
-use crate::kernel::computer_use::{CODEX_BRIDGE_ENDPOINT_ENV_VAR, CODEX_BRIDGE_TRANSPORT_ENV_VAR};
+use crate::kernel::computer_use::{
+    bridge_endpoint_from_env, bridge_transport_from_env, BRIDGE_ENDPOINT_ENV_VAR,
+    BRIDGE_TRANSPORT_ENV_VAR,
+};
 use crate::kernel::models::{AccessMode, LargeModelProvider, NetworkSearchSourceModel};
 use crate::kernel::policy::{
     request_capability_access, CapabilityAccessRequest, CapabilityKind, PolicyDecision,
@@ -743,10 +746,10 @@ impl LocalComputerScreenshotClient {
     ) -> Result<ComputerScreenshot, String> {
         let captured = backend.capture_primary_display()?;
         if captured.width == 0 || captured.height == 0 {
-            return Err("screen capture returned empty dimensions".to_string());
+            return Err("local screen inspection returned empty dimensions".to_string());
         }
         if captured.png_bytes.is_empty() {
-            return Err("screen capture returned empty PNG bytes".to_string());
+            return Err("local screen inspection returned empty PNG bytes".to_string());
         }
 
         let display_label = non_empty_string(captured.display_label)
@@ -777,27 +780,28 @@ struct XcapLocalScreenshotCaptureBackend;
 
 impl LocalScreenshotCaptureBackend for XcapLocalScreenshotCaptureBackend {
     fn capture_primary_display(&self) -> Result<CapturedScreenshotImage, String> {
-        let monitors = xcap::Monitor::all()
-            .map_err(|error| format!("computer screenshot display enumeration failed: {error}"))?;
+        let monitors = xcap::Monitor::all().map_err(|error| {
+            format!("local screen inspection display enumeration failed: {error}")
+        })?;
         let monitor = monitors
             .iter()
             .find(|monitor| monitor.is_primary().unwrap_or(false))
             .or_else(|| monitors.first())
-            .ok_or_else(|| "computer screenshot found no display to capture".to_string())?;
+            .ok_or_else(|| "local screen inspection found no display to inspect".to_string())?;
         let display_label = monitor
             .friendly_name()
             .or_else(|_| monitor.name())
             .unwrap_or_else(|_| "Primary display".to_string());
         let image = monitor
             .capture_image()
-            .map_err(|error| format!("computer screenshot capture failed: {error}"))?;
+            .map_err(|error| format!("local screen inspection failed: {error}"))?;
         let width = image.width();
         let height = image.height();
         let dynamic_image = xcap::image::DynamicImage::ImageRgba8(image);
         let mut buffer = Cursor::new(Vec::new());
         dynamic_image
             .write_to(&mut buffer, xcap::image::ImageFormat::Png)
-            .map_err(|error| format!("computer screenshot PNG encoding failed: {error}"))?;
+            .map_err(|error| format!("local screen inspection PNG encoding failed: {error}"))?;
 
         Ok(CapturedScreenshotImage {
             display_label,
@@ -815,19 +819,19 @@ enum CodexBridgeClientRuntime {
 }
 
 fn codex_bridge_runtime_from_env() -> CodexBridgeClientRuntime {
-    match std::env::var(CODEX_BRIDGE_TRANSPORT_ENV_VAR) {
-        Ok(transport) if transport.trim().eq_ignore_ascii_case("http") => {}
-        Ok(transport) if transport.trim().is_empty() => return CodexBridgeClientRuntime::Unconfigured,
-        Ok(transport) => {
+    match bridge_transport_from_env() {
+        Some(transport) if transport.trim().eq_ignore_ascii_case("http") => {}
+        Some(transport) if transport.trim().is_empty() => return CodexBridgeClientRuntime::Unconfigured,
+        Some(transport) => {
             return CodexBridgeClientRuntime::SetupError(format!(
-                "Codex bridge transport '{transport}' is selected, but this build only executes the HTTP bridge transport"
+                "Local bridge service transport '{transport}' is selected, but this build only executes the HTTP bridge transport"
             ))
         }
-        Err(_) => return CodexBridgeClientRuntime::Unconfigured,
+        None => return CodexBridgeClientRuntime::Unconfigured,
     }
 
-    let endpoint = match std::env::var(CODEX_BRIDGE_ENDPOINT_ENV_VAR) {
-        Ok(endpoint) if !endpoint.trim().is_empty() => endpoint,
+    let endpoint = match bridge_endpoint_from_env() {
+        Some(endpoint) if !endpoint.trim().is_empty() => endpoint,
         _ => return CodexBridgeClientRuntime::Unconfigured,
     };
 
@@ -876,7 +880,7 @@ impl NetworkSearchClient for CodexBridgeNetworkSearchClient {
             CodexBridgeClientRuntime::SetupError(error) => return Err(error.clone()),
             CodexBridgeClientRuntime::Unconfigured => {
                 return Err(format!(
-                    "Native NetworkSearch bridge requires {CODEX_BRIDGE_TRANSPORT_ENV_VAR}=http and {CODEX_BRIDGE_ENDPOINT_ENV_VAR} pointing to a local bridge runtime"
+                    "Selected model web search through the local bridge service requires {BRIDGE_TRANSPORT_ENV_VAR}=http and {BRIDGE_ENDPOINT_ENV_VAR} pointing to a local bridge service"
                 ))
             }
         };
@@ -943,22 +947,22 @@ impl ComputerScreenshotClient for CodexBridgeComputerScreenshotClient {
             CodexBridgeClientRuntime::SetupError(error) => return Err(error.clone()),
             CodexBridgeClientRuntime::Unconfigured => {
                 return Err(format!(
-                    "Codex bridge screen capture requires {CODEX_BRIDGE_TRANSPORT_ENV_VAR}=http and {CODEX_BRIDGE_ENDPOINT_ENV_VAR} pointing to a local bridge runtime"
+                    "Local bridge service screen inspection requires {BRIDGE_TRANSPORT_ENV_VAR}=http and {BRIDGE_ENDPOINT_ENV_VAR} pointing to a local bridge service"
                 ))
             }
         };
         let evidence_base_dir = self.evidence_base_dir.as_ref().ok_or_else(|| {
-            "Codex bridge screen capture requires a local evidence directory".to_string()
+            "Local bridge service screen inspection requires a local evidence directory".to_string()
         })?;
         let response = http_client.screenshot(&CodexBridgeScreenshotRequest::new(None))?;
         validate_codex_bridge_screenshot_response(&response)?;
         let png_bytes = general_purpose::STANDARD
             .decode(response.png_base64.trim())
             .map_err(|error| {
-                format!("codex bridge screenshot PNG base64 could not be decoded: {error}")
+                format!("local bridge service screenshot PNG base64 could not be decoded: {error}")
             })?;
         if png_bytes.is_empty() {
-            return Err("codex bridge screenshot returned empty PNG bytes".to_string());
+            return Err("local bridge service screenshot returned empty PNG bytes".to_string());
         }
         let display_label = response.display_label.trim().to_string();
         let evidence_ref =
@@ -1077,7 +1081,7 @@ impl ComputerControlClient for CodexBridgeComputerControlClient {
             CodexBridgeClientRuntime::SetupError(error) => return Err(error.clone()),
             CodexBridgeClientRuntime::Unconfigured => {
                 return Err(format!(
-                    "Codex bridge input control requires {CODEX_BRIDGE_TRANSPORT_ENV_VAR}=http and {CODEX_BRIDGE_ENDPOINT_ENV_VAR} pointing to a local bridge runtime"
+                    "Local bridge service mouse and keyboard control requires {BRIDGE_TRANSPORT_ENV_VAR}=http and {BRIDGE_ENDPOINT_ENV_VAR} pointing to a local bridge service"
                 ))
             }
         };
@@ -1101,7 +1105,7 @@ struct EnigoLocalComputerControlInputBackend {
 impl EnigoLocalComputerControlInputBackend {
     fn new() -> Result<Self, String> {
         let enigo = enigo::Enigo::new(&enigo::Settings::default())
-            .map_err(|error| format!("computer control input backend setup failed: {error}"))?;
+            .map_err(|error| format!("local mouse and keyboard control setup failed: {error}"))?;
         Ok(Self { enigo })
     }
 }
@@ -1200,7 +1204,7 @@ pub struct HttpBrowserPageClient {
 impl HttpBrowserPageClient {
     pub fn new() -> Result<Self, String> {
         let client = reqwest::blocking::Client::builder()
-            .user_agent("DeepSeek-Agent-OS/0.1 browser-capability")
+            .user_agent("DeepSeek-Agent-OS/0.1.0 browser-capability")
             .timeout(std::time::Duration::from_secs(15))
             .redirect(reqwest::redirect::Policy::limited(5))
             .build()
@@ -1240,7 +1244,7 @@ pub struct HttpNetworkSearchClient {
 impl HttpNetworkSearchClient {
     pub fn new(source_model: NetworkSearchSourceModel) -> Result<Self, String> {
         let client = reqwest::blocking::Client::builder()
-            .user_agent("DeepSeek-Agent-OS/0.1 network-search")
+            .user_agent("DeepSeek-Agent-OS/0.1.0 network-search")
             .timeout(std::time::Duration::from_secs(15))
             .redirect(reqwest::redirect::Policy::limited(5))
             .build()
@@ -2838,16 +2842,16 @@ fn validate_codex_bridge_screenshot_response(
 ) -> Result<(), String> {
     validate_codex_bridge_contract_version(&response.contract_version)?;
     if response.capability != CodexBridgeCapability::ComputerScreenshot {
-        return Err("codex bridge screenshot returned the wrong capability".to_string());
+        return Err("local bridge service screenshot returned the wrong capability".to_string());
     }
     if response.width == 0 || response.height == 0 {
-        return Err("codex bridge screenshot returned empty dimensions".to_string());
+        return Err("local bridge service screenshot returned empty dimensions".to_string());
     }
     if response.display_label.trim().is_empty() {
-        return Err("codex bridge screenshot returned an empty display label".to_string());
+        return Err("local bridge service screenshot returned an empty display label".to_string());
     }
     if response.png_base64.trim().is_empty() {
-        return Err("codex bridge screenshot returned empty PNG base64".to_string());
+        return Err("local bridge service screenshot returned empty PNG base64".to_string());
     }
 
     Ok(())
@@ -2858,10 +2862,10 @@ fn validate_codex_bridge_control_response(
 ) -> Result<(), String> {
     validate_codex_bridge_contract_version(&response.contract_version)?;
     if response.capability != CodexBridgeCapability::ComputerControl {
-        return Err("codex bridge control returned the wrong capability".to_string());
+        return Err("local bridge service control returned the wrong capability".to_string());
     }
     if response.summary.trim().is_empty() {
-        return Err("codex bridge control returned an empty summary".to_string());
+        return Err("local bridge service control returned an empty summary".to_string());
     }
 
     Ok(())
@@ -2872,29 +2876,37 @@ fn validate_codex_bridge_network_search_response(
 ) -> Result<(), String> {
     validate_codex_bridge_contract_version(&response.contract_version)?;
     if response.capability != CodexBridgeCapability::NetworkSearch {
-        return Err("codex bridge network search returned the wrong capability".to_string());
+        return Err(
+            "local bridge service network search returned the wrong capability".to_string(),
+        );
     }
     if response.provider.trim().is_empty() {
-        return Err("codex bridge network search returned an empty provider".to_string());
+        return Err("local bridge service network search returned an empty provider".to_string());
     }
     if response.query.trim().is_empty() {
-        return Err("codex bridge network search returned an empty query".to_string());
+        return Err("local bridge service network search returned an empty query".to_string());
     }
     if response.scope.trim().is_empty() {
-        return Err("codex bridge network search returned an empty scope".to_string());
+        return Err("local bridge service network search returned an empty scope".to_string());
     }
     if !is_http_url(response.search_url.trim()) {
-        return Err("codex bridge network search returned an invalid search URL".to_string());
+        return Err(
+            "local bridge service network search returned an invalid search URL".to_string(),
+        );
     }
     if response.items.is_empty() {
-        return Err("codex bridge network search returned no source links".to_string());
+        return Err("local bridge service network search returned no source links".to_string());
     }
     for item in &response.items {
         if item.title.trim().is_empty() {
-            return Err("codex bridge network search returned an empty source title".to_string());
+            return Err(
+                "local bridge service network search returned an empty source title".to_string(),
+            );
         }
         if !is_http_url(item.url.trim()) {
-            return Err("codex bridge network search returned an invalid source URL".to_string());
+            return Err(
+                "local bridge service network search returned an invalid source URL".to_string(),
+            );
         }
     }
 
@@ -2904,7 +2916,7 @@ fn validate_codex_bridge_network_search_response(
 fn validate_codex_bridge_contract_version(contract_version: &str) -> Result<(), String> {
     if contract_version != CODEX_BRIDGE_CONTRACT_VERSION {
         return Err(format!(
-            "codex bridge contract version mismatch: expected {CODEX_BRIDGE_CONTRACT_VERSION}, got {contract_version}"
+            "local bridge service version mismatch: expected {CODEX_BRIDGE_CONTRACT_VERSION}, got {contract_version}"
         ));
     }
 
@@ -3478,6 +3490,7 @@ mod tests {
     use std::time::Duration;
 
     use base64::{engine::general_purpose, Engine as _};
+    use chrono::{TimeZone, Utc};
 
     use crate::kernel::capability::{
         parse_computer_control_action, run_browser_browse, run_browser_submit_boundary,
@@ -3495,13 +3508,17 @@ mod tests {
         DriveWriteRequest, EmailDraftRequest, EmailReadRequest, EmailSendRequest,
         EvidenceFolderClient, EvidenceFolderFile, EvidenceFolderRequest, FileContent,
         FileContentClient, FileReadRequest, FileWriteRequest, FileWriteResult,
-        LocalComputerControlClient, LocalComputerControlInputBackend,
+        HttpBrowserPageClient, LocalComputerControlClient, LocalComputerControlInputBackend,
         LocalComputerScreenshotClient, LocalDriveFolderClient, LocalScreenshotCaptureBackend,
         LocalWorkspaceFileWriteClient, NetworkSearchClient, NetworkSearchRequest,
         NetworkSearchResult, NetworkSearchResultItem, TerminalCommandOutput, TerminalReadClient,
         TerminalReadRequest, TerminalWriteRequest,
     };
-    use crate::kernel::codex_bridge_contract::CODEX_BRIDGE_CONTRACT_VERSION;
+    use crate::kernel::codex_bridge_contract::{
+        CodexBridgeCapability, CodexBridgeControlResponse, CodexBridgeNetworkSearchItem,
+        CodexBridgeNetworkSearchResponse, CodexBridgeScreenshotResponse,
+        CODEX_BRIDGE_CONTRACT_VERSION,
+    };
     use crate::kernel::models::{AccessMode, LargeModelProvider};
     use crate::kernel::policy::{CapabilityKind, PolicyDecision};
 
@@ -3695,7 +3712,7 @@ mod tests {
     }
 
     fn serve_one_json_response(response_body: String) -> (String, JoinHandle<RecordedHttpRequest>) {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake bridge server");
+        let listener = TcpListener::bind("127.0.1.0:0").expect("bind fake bridge server");
         let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
         let handle = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept fake bridge request");
@@ -3854,7 +3871,7 @@ mod tests {
         fn capture_screenshot(&self) -> Result<ComputerScreenshot, String> {
             self.calls.set(self.calls.get() + 1);
             if self.failing {
-                return Err("capture backend unavailable".to_string());
+                return Err("local screen inspection route unavailable".to_string());
             }
 
             Ok(ComputerScreenshot {
@@ -3876,7 +3893,7 @@ mod tests {
             self.calls.set(self.calls.get() + 1);
             self.last_action.replace(Some(action.clone()));
             if self.failing {
-                return Err("input backend unavailable".to_string());
+                return Err("local mouse and keyboard control route unavailable".to_string());
             }
 
             Ok(ComputerControlExecution {
@@ -4560,7 +4577,7 @@ mod tests {
             .invocation
             .warnings
             .iter()
-            .any(|warning| warning.contains("capture backend unavailable")));
+            .any(|warning| warning.contains("local screen inspection route unavailable")));
     }
 
     #[test]
@@ -4583,7 +4600,7 @@ mod tests {
             .invocation
             .warnings
             .iter()
-            .any(|warning| warning.contains("Codex bridge")));
+            .any(|warning| warning.contains("Local bridge service")));
     }
 
     #[test]
@@ -4787,7 +4804,7 @@ mod tests {
             .invocation
             .warnings
             .iter()
-            .any(|warning| warning.contains("input backend unavailable")));
+            .any(|warning| warning.contains("local mouse and keyboard control route unavailable")));
         assert_eq!(client.calls.get(), 1);
     }
 
@@ -4813,7 +4830,7 @@ mod tests {
             .invocation
             .warnings
             .iter()
-            .any(|warning| warning.contains("Codex bridge")));
+            .any(|warning| warning.contains("Local bridge service")));
     }
 
     #[test]
@@ -5439,6 +5456,23 @@ mod tests {
     }
 
     #[test]
+    fn browser_http_client_uses_current_release_user_agent() {
+        let html = "<html><head><title>Ops</title></head><body>Evidence</body></html>";
+        let (endpoint, handle) = serve_one_json_response(html.to_string());
+        let client = HttpBrowserPageClient::new().expect("browser client");
+
+        let page = client.fetch_page(&endpoint).expect("page fetched");
+        let recorded = handle.join().expect("fake browser server joins");
+        let normalized_headers = recorded.raw.to_ascii_lowercase();
+
+        assert_eq!(page.title, "Ops");
+        assert!(recorded.raw.starts_with("GET / HTTP/1.1"));
+        assert!(
+            normalized_headers.contains("user-agent: deepseek-agent-os/0.1.0 browser-capability")
+        );
+    }
+
+    #[test]
     fn network_search_boundary_waits_for_approval_when_policy_asks() {
         let client = FakeNetworkSearchClient::new();
         let outcome = run_network_search_boundary(
@@ -5538,7 +5572,7 @@ mod tests {
         let response_body = serde_json::json!({
             "contract_version": CODEX_BRIDGE_CONTRACT_VERSION,
             "capability": "network_search",
-            "provider": "codex bridge search",
+            "provider": "external bridge search",
             "query": "hotel ADR",
             "scope": "public web",
             "search_url": "https://bridge.local/search?q=hotel",
@@ -5582,6 +5616,51 @@ mod tests {
         assert!(recorded
             .raw
             .contains("\"large_model_provider\":\"chatgpt\""));
+    }
+
+    #[test]
+    fn local_bridge_runtime_validation_errors_use_service_wording() {
+        let captured_at = Utc.with_ymd_and_hms(2026, 6, 29, 12, 0, 0).unwrap();
+        let errors = vec![
+            super::validate_codex_bridge_screenshot_response(&CodexBridgeScreenshotResponse {
+                contract_version: CODEX_BRIDGE_CONTRACT_VERSION.to_string(),
+                capability: CodexBridgeCapability::ComputerControl,
+                display_label: "Primary".to_string(),
+                width: 1920,
+                height: 1080,
+                png_base64: "iVBORw0KGgo=".to_string(),
+                captured_at,
+            })
+            .expect_err("wrong screenshot capability fails"),
+            super::validate_codex_bridge_control_response(&CodexBridgeControlResponse {
+                contract_version: CODEX_BRIDGE_CONTRACT_VERSION.to_string(),
+                capability: CodexBridgeCapability::ComputerScreenshot,
+                summary: "clicked".to_string(),
+            })
+            .expect_err("wrong control capability fails"),
+            super::validate_codex_bridge_network_search_response(
+                &CodexBridgeNetworkSearchResponse {
+                    contract_version: CODEX_BRIDGE_CONTRACT_VERSION.to_string(),
+                    capability: CodexBridgeCapability::NetworkSearch,
+                    provider: "external bridge search".to_string(),
+                    query: "hotel ADR".to_string(),
+                    scope: "public web".to_string(),
+                    search_url: "https://bridge.local/search?q=hotel".to_string(),
+                    items: vec![CodexBridgeNetworkSearchItem {
+                        title: "".to_string(),
+                        url: "https://example.com/source".to_string(),
+                        snippet: "Source-backed result.".to_string(),
+                    }],
+                },
+            )
+            .expect_err("blank source title fails"),
+        ];
+
+        for error in errors {
+            assert!(error.contains("local bridge service"), "{error}");
+            assert!(!error.contains("external bridge"), "{error}");
+            assert!(!error.contains("codex bridge"), "{error}");
+        }
     }
 
     #[test]

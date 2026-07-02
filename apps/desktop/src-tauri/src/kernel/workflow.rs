@@ -15,6 +15,8 @@ use crate::kernel::policy::{
 };
 
 pub const OPERATIONS_BRIEFING_WORKFLOW_ID: &str = "operations.briefing.v1";
+const OPERATIONS_BRIEFING_REPAIR_RETRY_BUDGET: usize = 1;
+const OPERATIONS_BRIEFING_REPAIR_CONTEXT_MAX_CHARS: usize = 4_000;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -53,6 +55,31 @@ pub struct OperationsBriefingSynthesis {
     pub warnings: Vec<String>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OperationsBriefingContextReceipt {
+    pub user_intent: String,
+    #[serde(default = "default_operations_briefing_loop_mode")]
+    pub loop_mode: String,
+    #[serde(default = "default_operations_briefing_workflow_policy")]
+    pub workflow_policy: String,
+    pub selected_evidence: Vec<String>,
+    pub selected_memories: Vec<String>,
+    pub model_route: String,
+    pub thinking_level: String,
+    pub token_cache_state: String,
+    pub validation_results: Vec<String>,
+    pub intentional_omissions: Vec<String>,
+}
+
+fn default_operations_briefing_loop_mode() -> String {
+    "workflow_pack_run".to_string()
+}
+
+fn default_operations_briefing_workflow_policy() -> String {
+    "Operations Briefing v1: FileRead evidence folder only; raw file bodies omitted; deterministic validators first; bounded model repair retry budget 1."
+        .to_string()
+}
+
 pub trait OperationsBriefingSynthesizer {
     fn synthesize_briefing(
         &self,
@@ -75,6 +102,8 @@ pub struct OperationsBriefingRun {
     pub anomalies: Vec<OperationsBriefingAnomaly>,
     pub action_plan: Vec<OperationsBriefingAction>,
     pub warnings: Vec<String>,
+    #[serde(default)]
+    pub context_receipt: OperationsBriefingContextReceipt,
     pub created_at: DateTime<Utc>,
 }
 
@@ -83,6 +112,12 @@ pub struct OperationsBriefingOutcome {
     pub access_request: CapabilityAccessRequest,
     pub evidence_invocation: CapabilityInvocation,
     pub run: OperationsBriefingRun,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct OperationsBriefingRepairResult {
+    reason: String,
+    succeeded: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -197,7 +232,7 @@ pub fn operations_briefing_workflow_template_package() -> WorkflowTemplatePackag
         "operations.briefing.templates.v1".to_string(),
         OPERATIONS_BRIEFING_WORKFLOW_ID.to_string(),
         "Operations Briefing Evidence Templates".to_string(),
-        "Sample evidence templates for the Operations Briefing workflow.".to_string(),
+        "Blank operator templates for the Operations Briefing workflow.".to_string(),
         OPERATIONS_BRIEFING_EVIDENCE_TEMPLATES
             .iter()
             .map(|template| WorkflowTemplateFile {
@@ -369,7 +404,7 @@ fn run_operations_briefing_internal(
         .clone()
         .unwrap_or_else(|| "No evidence manifest is available yet.".to_string());
 
-    let (status, synthesis) = match evidence_invocation.status {
+    let (status, synthesis, repair_result) = match evidence_invocation.status {
         CapabilityInvocationStatus::PendingApproval => (
             OperationsBriefingRunStatus::PendingApproval,
             OperationsBriefingSynthesis {
@@ -379,6 +414,7 @@ fn run_operations_briefing_internal(
                 action_plan: Vec::new(),
                 warnings: evidence_invocation.warnings.clone(),
             },
+            None,
         ),
         CapabilityInvocationStatus::Failed => (
             OperationsBriefingRunStatus::Failed,
@@ -390,30 +426,38 @@ fn run_operations_briefing_internal(
                 action_plan: Vec::new(),
                 warnings: evidence_invocation.warnings.clone(),
             },
+            None,
         ),
         CapabilityInvocationStatus::Succeeded => {
             let deterministic = deterministic_operations_briefing_synthesis(
                 &manifest_excerpt,
                 evidence_ref.as_deref(),
             );
-            let synthesis = if let Some(synthesizer) = synthesizer {
-                match synthesizer.synthesize_briefing(&manifest_excerpt, evidence_ref.as_deref()) {
-                    Ok(synthesis) => synthesis,
-                    Err(error) => {
-                        let mut synthesis = deterministic;
-                        synthesis
-                            .warnings
-                            .push(format!("model-backed synthesis failed: {error}"));
-                        synthesis
-                    }
-                }
+            let (synthesis, repair_result) = if let Some(synthesizer) = synthesizer {
+                model_operations_briefing_synthesis(
+                    synthesizer,
+                    &manifest_excerpt,
+                    evidence_ref.as_deref(),
+                    deterministic,
+                )
             } else {
-                deterministic
+                (deterministic, None)
             };
 
-            (OperationsBriefingRunStatus::DraftReady, synthesis)
+            (
+                OperationsBriefingRunStatus::DraftReady,
+                synthesis,
+                repair_result,
+            )
         }
     };
+    let context_receipt = operations_briefing_context_receipt(
+        &evidence_invocation,
+        status,
+        &synthesis,
+        synthesizer.is_some(),
+        repair_result.as_ref(),
+    );
 
     Ok(OperationsBriefingOutcome {
         access_request: evidence_outcome.access_request,
@@ -429,10 +473,238 @@ fn run_operations_briefing_internal(
             anomalies: synthesis.anomalies,
             action_plan: synthesis.action_plan,
             warnings: synthesis.warnings,
+            context_receipt,
             created_at: Utc::now(),
         },
         evidence_invocation,
     })
+}
+
+fn model_operations_briefing_synthesis(
+    synthesizer: &dyn OperationsBriefingSynthesizer,
+    manifest_excerpt: &str,
+    evidence_ref: Option<&str>,
+    deterministic: OperationsBriefingSynthesis,
+) -> (
+    OperationsBriefingSynthesis,
+    Option<OperationsBriefingRepairResult>,
+) {
+    match synthesizer.synthesize_briefing(manifest_excerpt, evidence_ref) {
+        Ok(synthesis) => (synthesis, None),
+        Err(error) => {
+            let repair_excerpt =
+                operations_briefing_repair_manifest_excerpt(manifest_excerpt, &error);
+            for _ in 0..OPERATIONS_BRIEFING_REPAIR_RETRY_BUDGET {
+                match synthesizer.synthesize_briefing(&repair_excerpt, evidence_ref) {
+                    Ok(mut synthesis) => {
+                        synthesis.warnings.push(format!(
+                            "bounded repair loop retried model synthesis after failure: {error}"
+                        ));
+                        return (
+                            synthesis,
+                            Some(OperationsBriefingRepairResult {
+                                reason: error,
+                                succeeded: true,
+                            }),
+                        );
+                    }
+                    Err(repair_error) => {
+                        let mut synthesis = deterministic;
+                        synthesis
+                            .warnings
+                            .push(format!("model-backed synthesis failed: {error}"));
+                        synthesis
+                            .warnings
+                            .push(format!("bounded repair loop failed: {repair_error}"));
+                        return (
+                            synthesis,
+                            Some(OperationsBriefingRepairResult {
+                                reason: error,
+                                succeeded: false,
+                            }),
+                        );
+                    }
+                }
+            }
+
+            let mut synthesis = deterministic;
+            synthesis
+                .warnings
+                .push(format!("model-backed synthesis failed: {error}"));
+            (
+                synthesis,
+                Some(OperationsBriefingRepairResult {
+                    reason: error,
+                    succeeded: false,
+                }),
+            )
+        }
+    }
+}
+
+fn operations_briefing_repair_manifest_excerpt(
+    manifest_excerpt: &str,
+    validation_failure: &str,
+) -> String {
+    let compact_manifest = truncate_chars(
+        manifest_excerpt,
+        OPERATIONS_BRIEFING_REPAIR_CONTEXT_MAX_CHARS,
+    );
+    format!(
+        "Repair failed Operations Briefing synthesis.\nValidation failure: {validation_failure}\nEvidence manifest excerpt:\n{compact_manifest}"
+    )
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let mut output = String::new();
+    for (index, character) in value.chars().enumerate() {
+        if index >= max_chars {
+            output.push_str("\n[truncated]");
+            return output;
+        }
+        output.push(character);
+    }
+    output
+}
+
+fn operations_briefing_context_receipt(
+    evidence_invocation: &CapabilityInvocation,
+    status: OperationsBriefingRunStatus,
+    synthesis: &OperationsBriefingSynthesis,
+    model_synthesis_requested: bool,
+    repair_result: Option<&OperationsBriefingRepairResult>,
+) -> OperationsBriefingContextReceipt {
+    OperationsBriefingContextReceipt {
+        user_intent: "Draft an Operations Briefing from selected local evidence.".to_string(),
+        loop_mode: "workflow_pack_run".to_string(),
+        workflow_policy:
+            "Operations Briefing v1: FileRead evidence folder only; raw file bodies omitted; deterministic validators first; bounded model repair retry budget 1."
+                .to_string(),
+        selected_evidence: operations_briefing_selected_evidence(evidence_invocation),
+        selected_memories: Vec::new(),
+        model_route: if model_synthesis_requested {
+            "model-backed synthesis requested".to_string()
+        } else {
+            "local deterministic synthesis".to_string()
+        },
+        thinking_level: "not recorded by workflow kernel".to_string(),
+        token_cache_state: "no model request recorded".to_string(),
+        validation_results: operations_briefing_validation_results(
+            evidence_invocation,
+            status,
+            synthesis,
+            repair_result,
+        ),
+        intentional_omissions: operations_briefing_intentional_omissions(
+            status,
+            model_synthesis_requested,
+            repair_result,
+        ),
+    }
+}
+
+fn operations_briefing_selected_evidence(
+    evidence_invocation: &CapabilityInvocation,
+) -> Vec<String> {
+    if let Some(excerpt) = evidence_invocation.excerpt.as_ref() {
+        return vec![excerpt.clone()];
+    }
+
+    match evidence_invocation.status {
+        CapabilityInvocationStatus::PendingApproval => {
+            vec![
+                "Evidence folder was not scanned because FileRead approval is pending.".to_string(),
+            ]
+        }
+        CapabilityInvocationStatus::Failed => {
+            vec!["Evidence folder ingestion failed before evidence was selected.".to_string()]
+        }
+        CapabilityInvocationStatus::Succeeded => {
+            vec!["Evidence folder scan succeeded without a manifest excerpt.".to_string()]
+        }
+    }
+}
+
+fn operations_briefing_validation_results(
+    evidence_invocation: &CapabilityInvocation,
+    status: OperationsBriefingRunStatus,
+    synthesis: &OperationsBriefingSynthesis,
+    repair_result: Option<&OperationsBriefingRepairResult>,
+) -> Vec<String> {
+    let mut results = Vec::new();
+    match evidence_invocation.status {
+        CapabilityInvocationStatus::PendingApproval => {
+            results.push("evidence folder ingestion pending user approval".to_string());
+        }
+        CapabilityInvocationStatus::Failed => {
+            results.push("evidence folder ingestion failed".to_string());
+        }
+        CapabilityInvocationStatus::Succeeded => {
+            results.push("evidence folder ingestion succeeded".to_string());
+        }
+    }
+
+    match status {
+        OperationsBriefingRunStatus::PendingApproval => {
+            results.push("briefing draft not generated before approval".to_string());
+        }
+        OperationsBriefingRunStatus::Failed => {
+            results.push("briefing draft not generated after evidence failure".to_string());
+        }
+        OperationsBriefingRunStatus::DraftReady => {
+            results.push("briefing summary generated".to_string());
+            results.push(format!(
+                "{} anomaly leads generated",
+                synthesis.anomalies.len()
+            ));
+            results.push(format!(
+                "{} action items generated",
+                synthesis.action_plan.len()
+            ));
+        }
+    }
+
+    if !synthesis.warnings.is_empty() {
+        results.push(format!("{} warnings recorded", synthesis.warnings.len()));
+    }
+
+    if let Some(repair_result) = repair_result {
+        results.push("bounded repair loop retried model synthesis once".to_string());
+        if repair_result.succeeded {
+            results.push("bounded repair loop succeeded".to_string());
+        } else {
+            results.push("bounded repair loop failed".to_string());
+        }
+    }
+
+    results
+}
+
+fn operations_briefing_intentional_omissions(
+    status: OperationsBriefingRunStatus,
+    model_synthesis_requested: bool,
+    repair_result: Option<&OperationsBriefingRepairResult>,
+) -> Vec<String> {
+    let mut omissions = vec![
+        "Raw evidence file bodies are not stored in the context receipt.".to_string(),
+        "Memory records are not selected by this Operations Briefing preview run.".to_string(),
+    ];
+
+    if repair_result.is_none() {
+        omissions.push(
+            "No repair loop was run unless a validation failure required a retry.".to_string(),
+        );
+    }
+
+    if !model_synthesis_requested {
+        omissions.push("Model-backed synthesis was not requested for this run.".to_string());
+    }
+
+    if status != OperationsBriefingRunStatus::DraftReady {
+        omissions.push("Model synthesis was omitted because evidence was not ready.".to_string());
+    }
+
+    omissions
 }
 
 fn deterministic_operations_briefing_synthesis(
@@ -480,6 +752,8 @@ pub fn render_operations_briefing_report(run: &OperationsBriefingRun) -> String 
     if let Some(evidence_invocation_id) = run.evidence_invocation_id {
         let _ = writeln!(report, "- Evidence invocation: {evidence_invocation_id}");
     }
+
+    write_operations_briefing_context_receipt_markdown(&mut report, &run.context_receipt);
 
     let _ = writeln!(report);
     let _ = writeln!(report, "## Summary");
@@ -579,6 +853,8 @@ pub fn render_operations_briefing_html_report(run: &OperationsBriefingRun) -> St
     }
     let _ = writeln!(html, "</section>");
 
+    write_operations_briefing_context_receipt_html(&mut html, &run.context_receipt);
+
     let _ = writeln!(html, "<h2>Summary</h2>");
     let _ = writeln!(html, "<p>{}</p>", escape_html_text(&run.summary));
 
@@ -639,6 +915,86 @@ pub fn render_operations_briefing_html_report(run: &OperationsBriefingRun) -> St
     let _ = writeln!(html, "</body>");
     let _ = writeln!(html, "</html>");
     html
+}
+
+fn write_operations_briefing_context_receipt_markdown(
+    report: &mut String,
+    receipt: &OperationsBriefingContextReceipt,
+) {
+    let _ = writeln!(report);
+    let _ = writeln!(report, "## Context Receipt");
+    let _ = writeln!(report);
+    let _ = writeln!(report, "- User intent: {}", receipt.user_intent);
+    let _ = writeln!(report, "- Loop mode: {}", receipt.loop_mode);
+    let _ = writeln!(report, "- Workflow policy: {}", receipt.workflow_policy);
+    let _ = writeln!(report, "- Model route: {}", receipt.model_route);
+    let _ = writeln!(report, "- Thinking level: {}", receipt.thinking_level);
+    let _ = writeln!(report, "- Token / cache: {}", receipt.token_cache_state);
+    write_markdown_list(report, "Selected evidence", &receipt.selected_evidence);
+    write_markdown_list(report, "Selected memories", &receipt.selected_memories);
+    write_markdown_list(report, "Validation", &receipt.validation_results);
+    write_markdown_list(
+        report,
+        "Intentional omissions",
+        &receipt.intentional_omissions,
+    );
+}
+
+fn write_markdown_list(report: &mut String, title: &str, items: &[String]) {
+    let _ = writeln!(report);
+    let _ = writeln!(report, "### {title}");
+    if items.is_empty() {
+        let _ = writeln!(report, "- None");
+        return;
+    }
+    for item in items {
+        let _ = writeln!(report, "- {item}");
+    }
+}
+
+fn write_operations_briefing_context_receipt_html(
+    html: &mut String,
+    receipt: &OperationsBriefingContextReceipt,
+) {
+    let _ = writeln!(html, "<h2>Context Receipt</h2>");
+    let _ = writeln!(html, "<dl>");
+    write_html_definition(html, "User intent", &receipt.user_intent);
+    write_html_definition(html, "Loop mode", &receipt.loop_mode);
+    write_html_definition(html, "Workflow policy", &receipt.workflow_policy);
+    write_html_definition(html, "Model route", &receipt.model_route);
+    write_html_definition(html, "Thinking level", &receipt.thinking_level);
+    write_html_definition(html, "Token / cache", &receipt.token_cache_state);
+    let _ = writeln!(html, "</dl>");
+    write_html_list(html, "Selected evidence", &receipt.selected_evidence);
+    write_html_list(html, "Selected memories", &receipt.selected_memories);
+    write_html_list(html, "Validation", &receipt.validation_results);
+    write_html_list(
+        html,
+        "Intentional omissions",
+        &receipt.intentional_omissions,
+    );
+}
+
+fn write_html_definition(html: &mut String, label: &str, value: &str) {
+    let _ = writeln!(
+        html,
+        "<dt>{}</dt><dd>{}</dd>",
+        escape_html_text(label),
+        escape_html_text(value)
+    );
+}
+
+fn write_html_list(html: &mut String, title: &str, items: &[String]) {
+    let _ = writeln!(html, "<h3>{}</h3>", escape_html_text(title));
+    if items.is_empty() {
+        let _ = writeln!(html, "<p>None</p>");
+        return;
+    }
+    let _ = writeln!(html, "<ul>");
+    for item in items {
+        let _ = writeln!(html, "<li>{}</li>", escape_html_text(item));
+    }
+    let _ = writeln!(html, "</ul>");
 }
 
 pub fn operations_briefing_html_report_file_name(run: &OperationsBriefingRun) -> String {
@@ -1037,10 +1393,11 @@ mod tests {
     use crate::kernel::models::AccessMode;
     use crate::kernel::workflow::{
         operations_briefing_html_report_file_name, operations_briefing_pdf_report_file_name,
-        render_operations_briefing_html_report, render_operations_briefing_pdf_report,
-        render_operations_briefing_report, run_operations_briefing,
-        run_operations_briefing_template_seed, run_operations_briefing_with_synthesizer,
-        LocalOperationsBriefingTemplateSeeder, OperationsBriefingAction, OperationsBriefingAnomaly,
+        operations_briefing_workflow_template_package, render_operations_briefing_html_report,
+        render_operations_briefing_pdf_report, render_operations_briefing_report,
+        run_operations_briefing, run_operations_briefing_template_seed,
+        run_operations_briefing_with_synthesizer, LocalOperationsBriefingTemplateSeeder,
+        OperationsBriefingAction, OperationsBriefingAnomaly, OperationsBriefingContextReceipt,
         OperationsBriefingRequest, OperationsBriefingRun, OperationsBriefingRunStatus,
         OperationsBriefingSynthesis, OperationsBriefingSynthesizer,
         OperationsBriefingTemplateSeedRequest, OperationsBriefingTemplateSeedResult,
@@ -1053,6 +1410,11 @@ mod tests {
 
     struct FakeOperationsBriefingSynthesizer {
         failing: bool,
+    }
+
+    struct RepairableOperationsBriefingSynthesizer {
+        calls: Cell<u32>,
+        repair_prompt_seen: Cell<bool>,
     }
 
     struct FakeOperationsBriefingTemplateSeeder {
@@ -1124,6 +1486,51 @@ mod tests {
         }
     }
 
+    impl RepairableOperationsBriefingSynthesizer {
+        fn new() -> Self {
+            Self {
+                calls: Cell::new(0),
+                repair_prompt_seen: Cell::new(false),
+            }
+        }
+    }
+
+    impl OperationsBriefingSynthesizer for RepairableOperationsBriefingSynthesizer {
+        fn synthesize_briefing(
+            &self,
+            manifest_excerpt: &str,
+            evidence_ref: Option<&str>,
+        ) -> Result<OperationsBriefingSynthesis, String> {
+            let next_call = self.calls.get() + 1;
+            self.calls.set(next_call);
+            if next_call == 1 {
+                return Err("model returned non-json briefing".to_string());
+            }
+
+            self.repair_prompt_seen.set(
+                manifest_excerpt.contains("Repair failed Operations Briefing synthesis.")
+                    && manifest_excerpt
+                        .contains("Validation failure: model returned non-json briefing")
+                    && manifest_excerpt.contains("Evidence manifest excerpt:"),
+            );
+
+            Ok(OperationsBriefingSynthesis {
+                summary: "Repaired model summary from compact context.".to_string(),
+                anomalies: vec![OperationsBriefingAnomaly {
+                    area: "Evidence review".to_string(),
+                    signal: "Repair retry used the evidence manifest only.".to_string(),
+                    evidence_ref: evidence_ref.map(str::to_string),
+                }],
+                action_plan: vec![OperationsBriefingAction {
+                    owner: "Operations".to_string(),
+                    action: "Review the repaired briefing before sharing.".to_string(),
+                    due_hint: "Next briefing cycle".to_string(),
+                }],
+                warnings: Vec::new(),
+            })
+        }
+    }
+
     impl OperationsBriefingTemplateSeeder for FakeOperationsBriefingTemplateSeeder {
         fn seed_templates(
             &self,
@@ -1168,6 +1575,54 @@ mod tests {
         assert_eq!(outcome.run.anomalies.len(), 1);
         assert_eq!(outcome.run.action_plan.len(), 1);
         assert_eq!(client.calls.get(), 1);
+    }
+
+    #[test]
+    fn operations_briefing_records_context_receipt_for_draft_run() {
+        let client = FakeEvidenceFolderClient::new();
+        let outcome = run_operations_briefing(
+            OperationsBriefingRequest {
+                access_mode: AccessMode::AskOnRisk,
+                evidence_folder_path: "fixtures/evidence".to_string(),
+                approval_granted: false,
+            },
+            &client,
+        )
+        .expect("operations briefing succeeds");
+
+        let run_json = serde_json::to_value(&outcome.run).expect("run serializes");
+        let receipt = run_json
+            .get("context_receipt")
+            .expect("context receipt is serialized");
+
+        assert_eq!(
+            receipt["selected_evidence"][0],
+            "2 text files, 83 bytes: revenue.md (utf-8 text, 35 bytes), complaints.txt (utf-8 text, 48 bytes)"
+        );
+        assert_eq!(receipt["loop_mode"], "workflow_pack_run");
+        assert_eq!(
+            receipt["workflow_policy"],
+            "Operations Briefing v1: FileRead evidence folder only; raw file bodies omitted; deterministic validators first; bounded model repair retry budget 1."
+        );
+        assert_eq!(
+            receipt["selected_memories"]
+                .as_array()
+                .expect("selected memories is an array")
+                .len(),
+            0
+        );
+        assert_eq!(receipt["model_route"], "local deterministic synthesis");
+        assert!(receipt["validation_results"]
+            .as_array()
+            .expect("validation results is an array")
+            .iter()
+            .any(|result| result == "evidence folder ingestion succeeded"));
+        assert!(receipt["intentional_omissions"]
+            .as_array()
+            .expect("intentional omissions is an array")
+            .iter()
+            .any(|omission| omission
+                == "Raw evidence file bodies are not stored in the context receipt."));
     }
 
     #[test]
@@ -1220,6 +1675,54 @@ mod tests {
     }
 
     #[test]
+    fn operations_briefing_repairs_failed_model_synthesis_with_bounded_retry() {
+        let client = FakeEvidenceFolderClient::new();
+        let synthesizer = RepairableOperationsBriefingSynthesizer::new();
+        let outcome = run_operations_briefing_with_synthesizer(
+            OperationsBriefingRequest {
+                access_mode: AccessMode::AskOnRisk,
+                evidence_folder_path: "fixtures/evidence".to_string(),
+                approval_granted: false,
+            },
+            &client,
+            &synthesizer,
+        )
+        .expect("operations briefing repairs model synthesis");
+
+        assert_eq!(synthesizer.calls.get(), 2);
+        assert!(synthesizer.repair_prompt_seen.get());
+        assert_eq!(outcome.run.status, OperationsBriefingRunStatus::DraftReady);
+        assert_eq!(
+            outcome.run.summary,
+            "Repaired model summary from compact context."
+        );
+        assert!(outcome
+            .run
+            .warnings
+            .iter()
+            .any(|warning| warning
+                .contains("bounded repair loop retried model synthesis after failure")));
+        assert!(outcome
+            .run
+            .context_receipt
+            .validation_results
+            .iter()
+            .any(|result| result == "bounded repair loop retried model synthesis once"));
+        assert!(outcome
+            .run
+            .context_receipt
+            .validation_results
+            .iter()
+            .any(|result| result == "bounded repair loop succeeded"));
+        assert!(!outcome
+            .run
+            .context_receipt
+            .intentional_omissions
+            .iter()
+            .any(|omission| omission.contains("No repair loop was run")));
+    }
+
+    #[test]
     fn operations_briefing_waits_for_evidence_approval_without_scanning() {
         let client = FakeEvidenceFolderClient::new();
         let outcome = run_operations_briefing(
@@ -1267,6 +1770,22 @@ mod tests {
                 due_hint: "48 hours".to_string(),
             }],
             warnings: vec!["model-backed synthesis failed: timeout".to_string()],
+            context_receipt: OperationsBriefingContextReceipt {
+                user_intent: "Draft an Operations Briefing from selected local evidence."
+                    .to_string(),
+                loop_mode: "workflow_pack_run".to_string(),
+                workflow_policy: "Operations Briefing v1: FileRead evidence folder only."
+                    .to_string(),
+                selected_evidence: vec!["2 text files selected".to_string()],
+                selected_memories: Vec::new(),
+                model_route: "DeepSeek / Pro".to_string(),
+                thinking_level: "standard".to_string(),
+                token_cache_state: "deepseek-v4: cache miss; 100 tokens".to_string(),
+                validation_results: vec!["evidence folder ingestion succeeded".to_string()],
+                intentional_omissions: vec![
+                    "Raw evidence file bodies are not stored in the context receipt.".to_string(),
+                ],
+            },
             created_at: chrono::Utc::now(),
         };
 
@@ -1282,6 +1801,13 @@ mod tests {
         assert!(report.contains("## Warnings"));
         assert!(report.contains("model-backed synthesis failed"));
         assert!(report.contains("fixtures/evidence"));
+        assert!(report.contains("## Context Receipt"));
+        assert!(report.contains("- Loop mode: workflow_pack_run"));
+        assert!(report
+            .contains("- Workflow policy: Operations Briefing v1: FileRead evidence folder only."));
+        assert!(report.contains("- Model route: DeepSeek / Pro"));
+        assert!(report.contains("- Token / cache: deepseek-v4: cache miss; 100 tokens"));
+        assert!(report.contains("- evidence folder ingestion succeeded"));
     }
 
     #[test]
@@ -1306,6 +1832,18 @@ mod tests {
                 due_hint: "48 hours".to_string(),
             }],
             warnings: vec!["Use <caution>.".to_string()],
+            context_receipt: OperationsBriefingContextReceipt {
+                user_intent: "Draft <briefing>.".to_string(),
+                loop_mode: "workflow_pack_run".to_string(),
+                workflow_policy: "Policy keeps <raw evidence> out of receipts.".to_string(),
+                selected_evidence: vec!["2 <files> selected".to_string()],
+                selected_memories: Vec::new(),
+                model_route: "DeepSeek / Pro".to_string(),
+                thinking_level: "standard".to_string(),
+                token_cache_state: "cache <miss>".to_string(),
+                validation_results: vec!["validation <passed>".to_string()],
+                intentional_omissions: vec!["raw <files> omitted".to_string()],
+            },
             created_at: chrono::Utc::now(),
         };
 
@@ -1319,6 +1857,10 @@ mod tests {
         assert!(html.contains("fixtures/&lt;evidence&gt;"));
         assert!(html.contains("<h2>Action Plan</h2>"));
         assert!(html.contains("<h2>Warnings</h2>"));
+        assert!(html.contains("<h2>Context Receipt</h2>"));
+        assert!(html.contains("workflow_pack_run"));
+        assert!(html.contains("Policy keeps &lt;raw evidence&gt; out of receipts."));
+        assert!(html.contains("validation &lt;passed&gt;"));
         assert!(!html.contains("<script>"));
     }
 
@@ -1336,6 +1878,7 @@ mod tests {
             anomalies: Vec::new(),
             action_plan: Vec::new(),
             warnings: Vec::new(),
+            context_receipt: Default::default(),
             created_at: chrono::Utc::now(),
         };
 
@@ -1367,6 +1910,7 @@ mod tests {
                 due_hint: "48 hours".to_string(),
             }],
             warnings: vec!["model-backed synthesis failed: timeout".to_string()],
+            context_receipt: Default::default(),
             created_at: chrono::Utc::now(),
         };
 
@@ -1431,6 +1975,16 @@ mod tests {
             std::fs::read_to_string(temp_dir.path().join("guest-experience.md"))
                 .expect("guest template written")
                 .contains("# Guest Experience Evidence")
+        );
+    }
+
+    #[test]
+    fn operations_briefing_template_package_describes_blank_operator_templates() {
+        let package = operations_briefing_workflow_template_package();
+
+        assert_eq!(
+            package.description,
+            "Blank operator templates for the Operations Briefing workflow."
         );
     }
 

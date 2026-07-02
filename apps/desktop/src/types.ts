@@ -229,6 +229,13 @@ export type MemorySensitivity = "normal" | "sensitive";
 
 export type MemoryLifecycle = "active" | "archived" | "expires";
 
+export type MemoryRelationKind = "related" | "updates" | "extends" | "derives";
+
+export type MemorySearchMatchSource =
+  | "direct"
+  | "linked_memory_title"
+  | "linked_memory_body";
+
 export type CapabilityKind =
   | "file_read"
   | "file_write"
@@ -315,8 +322,15 @@ export type MemoryRecord = {
   expires_at: string | null;
   linked_memory_ids: string[];
   linked_memories: MemoryRecordLinkSummary[];
+  search_match?: MemorySearchMatch;
   created_at: string;
   updated_at: string;
+};
+
+export type MemorySearchMatch = {
+  source: MemorySearchMatchSource;
+  linked_memory_id: string | null;
+  relation: MemoryRelationKind | null;
 };
 
 export type MemoryRecordLinkSummary = {
@@ -324,6 +338,8 @@ export type MemoryRecordLinkSummary = {
   title: string;
   memory_type: MemoryType;
   scope: MemoryScope;
+  relation: MemoryRelationKind;
+  note: string;
   updated_at: string;
 };
 
@@ -498,6 +514,19 @@ export type OperationsBriefingAction = {
   due_hint: string;
 };
 
+export type OperationsBriefingContextReceipt = {
+  user_intent: string;
+  loop_mode: string;
+  workflow_policy: string;
+  selected_evidence: string[];
+  selected_memories: string[];
+  model_route: string;
+  thinking_level: string;
+  token_cache_state: string;
+  validation_results: string[];
+  intentional_omissions: string[];
+};
+
 export type OperationsBriefingRun = {
   id: string;
   workflow_id: string;
@@ -510,6 +539,7 @@ export type OperationsBriefingRun = {
   anomalies: OperationsBriefingAnomaly[];
   action_plan: OperationsBriefingAction[];
   warnings: string[];
+  context_receipt: OperationsBriefingContextReceipt;
   created_at: string;
 };
 
@@ -568,6 +598,8 @@ export type WorkPackageTaskImportPreview = {
 
 export type WorkPackageOperationsBriefingImportPreview = {
   total: number;
+  new: number;
+  skipped: number;
   replay_supported: boolean;
 };
 

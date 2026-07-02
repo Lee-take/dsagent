@@ -3,6 +3,15 @@
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
+const rawArgs = process.argv.slice(2).filter((arg) => arg !== "--");
+const allowedArgs = new Set(["--help"]);
+validateArgs(rawArgs, allowedArgs, "test:deepseek:briefing");
+
+if (rawArgs.includes("--help")) {
+  console.log("Usage: pnpm test:deepseek:briefing");
+  process.exit(0);
+}
+
 const apiKey = (process.env.DEEPSEEK_API_KEY ?? "").trim();
 const baseUrl = normalizeBaseUrl(
   process.env.DEEPSEEK_API_BASE_URL ?? "https://api.deepseek.com",
@@ -14,7 +23,7 @@ const model = (
 ).trim();
 const evidenceDir =
   process.env.DEEPSEEK_BRIEFING_EVIDENCE_DIR ??
-  path.join("docs", "templates", "operations-briefing-evidence");
+  path.join("docs", "templates", "operations-briefing-smoke-evidence");
 const evidenceLabel = describeEvidenceDir(evidenceDir);
 const maxTokensInput = process.env.DEEPSEEK_BRIEFING_SMOKE_MAX_TOKENS ?? "900";
 const showContent = process.env.DEEPSEEK_SMOKE_SHOW_CONTENT === "1";
@@ -66,7 +75,7 @@ try {
     headers: {
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
-      "User-Agent": "DeepSeek-Agent-OS/0.1 operations-briefing-smoke-test",
+      "User-Agent": "DeepSeek-Agent-OS/0.1.0 operations-briefing-smoke-test",
     },
     body: JSON.stringify(payload),
   });
@@ -213,4 +222,25 @@ function redact(value, secret, localPath) {
     redacted = redacted.split(localPath).join("[local evidence directory]");
   }
   return redacted;
+}
+
+function validateArgs(values, allowed, commandName) {
+  const unknown = values.filter((arg) => !allowed.has(arg));
+  if (unknown.length === 0) {
+    return;
+  }
+
+  console.error(
+    JSON.stringify(
+      {
+        ok: false,
+        command: commandName,
+        error: `Unknown argument(s): ${unknown.join(", ")}`,
+        allowed: Array.from(allowed).sort(),
+      },
+      null,
+      2,
+    ),
+  );
+  process.exit(1);
 }

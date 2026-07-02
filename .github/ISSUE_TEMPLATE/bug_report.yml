@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a bug within the current v0.1-alpha scope.
+description: Report a bug within the current 0.1.0 preview scope.
 title: "[Bug]: "
 labels: ["bug", "needs-triage"]
 body:
@@ -47,7 +47,7 @@ body:
         - Memory Studio
         - Operations Briefing
         - Local files/folders
-        - NetworkSearch
+        - Web search
         - Computer Use
         - Packaging/install
         - Documentation

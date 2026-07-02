@@ -1,17 +1,22 @@
 {
   "name": "deepseek-agent-os",
   "private": true,
-  "version": "0.0.1",
+  "version": "0.1.0",
   "license": "Apache-2.0",
   "description": "Independent desktop Agent OS preview for DeepSeek model support.",
   "scripts": {
     "dev": "node scripts/require-desktop-workspace.mjs && pnpm --filter @deepseek-agent-os/desktop dev",
     "build": "node scripts/require-desktop-workspace.mjs && pnpm --filter @deepseek-agent-os/desktop build",
     "tauri": "node scripts/require-desktop-workspace.mjs && pnpm --filter @deepseek-agent-os/desktop tauri",
+    "stage:webview2-loader": "node scripts/stage-webview2-loader.mjs",
     "test": "node scripts/secret-scan.mjs && node scripts/desktop-test.mjs",
     "test:secrets": "node scripts/secret-scan.mjs",
     "test:deepseek": "node scripts/deepseek-smoke.mjs",
-    "test:deepseek:briefing": "node scripts/deepseek-operations-briefing-smoke.mjs"
+    "test:deepseek:briefing": "node scripts/deepseek-operations-briefing-smoke.mjs",
+    "test:windows-local": "node scripts/windows-local-smoke.mjs",
+    "test:windows-installed-ui": "node scripts/windows-installed-ui-smoke.mjs",
+    "test:release-source": "node scripts/release-source-check.mjs",
+    "test:release-local": "node scripts/release-local-check.mjs"
   },
   "packageManager": "pnpm@9.15.9"
 }

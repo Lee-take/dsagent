@@ -126,15 +126,19 @@ impl CodexBridgeScreenshotResponse {
         captured_at: DateTime<Utc>,
     ) -> Result<Self, String> {
         if width == 0 || height == 0 {
-            return Err("codex bridge screenshot response requires nonzero dimensions".to_string());
+            return Err(
+                "local bridge service screenshot response requires nonzero dimensions".to_string(),
+            );
         }
         let display_label = display_label.trim();
         if display_label.is_empty() {
-            return Err("codex bridge screenshot response requires a display label".to_string());
+            return Err(
+                "local bridge service screenshot response requires a display label".to_string(),
+            );
         }
         let png_base64 = png_base64.trim();
         if png_base64.is_empty() {
-            return Err("codex bridge screenshot response requires PNG base64".to_string());
+            return Err("local bridge service screenshot response requires PNG base64".to_string());
         }
 
         Ok(Self {
@@ -153,11 +157,13 @@ impl CodexBridgeControlRequest {
     pub fn new(target: &str, action: &str) -> Result<Self, String> {
         let target = target.trim();
         if target.is_empty() {
-            return Err("codex bridge control request requires a target".to_string());
+            return Err("local bridge service control request requires a target".to_string());
         }
         let action = action.trim();
         if !is_structured_control_action(action) {
-            return Err("codex bridge control request requires a structured action".to_string());
+            return Err(
+                "local bridge service control request requires a structured action".to_string(),
+            );
         }
 
         Ok(Self {
@@ -173,7 +179,7 @@ impl CodexBridgeControlResponse {
     pub fn new(summary: &str) -> Result<Self, String> {
         let summary = summary.trim();
         if summary.is_empty() {
-            return Err("codex bridge control response requires a summary".to_string());
+            return Err("local bridge service control response requires a summary".to_string());
         }
 
         Ok(Self {
@@ -192,7 +198,7 @@ impl CodexBridgeNetworkSearchRequest {
     ) -> Result<Self, String> {
         let query = query.trim();
         if query.is_empty() {
-            return Err("codex bridge network search request requires a query".to_string());
+            return Err("local bridge service network search request requires a query".to_string());
         }
         let scope = scope.trim();
         let scope = if scope.is_empty() {
@@ -221,32 +227,39 @@ impl CodexBridgeNetworkSearchResponse {
     ) -> Result<Self, String> {
         let provider = provider.trim();
         if provider.is_empty() {
-            return Err("codex bridge network search response requires a provider".to_string());
+            return Err(
+                "local bridge service network search response requires a provider".to_string(),
+            );
         }
         let query = query.trim();
         if query.is_empty() {
-            return Err("codex bridge network search response requires a query".to_string());
+            return Err(
+                "local bridge service network search response requires a query".to_string(),
+            );
         }
         let scope = scope.trim();
         if scope.is_empty() {
-            return Err("codex bridge network search response requires a scope".to_string());
+            return Err(
+                "local bridge service network search response requires a scope".to_string(),
+            );
         }
         let search_url = search_url.trim();
         if !is_http_url(search_url) {
             return Err(
-                "codex bridge network search response requires an HTTP(S) search URL".to_string(),
+                "local bridge service network search response requires an HTTP(S) search URL"
+                    .to_string(),
             );
         }
         if items.is_empty() {
             return Err(
-                "codex bridge network search response requires at least one source link"
+                "local bridge service network search response requires at least one source link"
                     .to_string(),
             );
         }
         for item in &items {
             if !is_http_url(&item.url) {
                 return Err(
-                    "codex bridge network search response item requires an HTTP(S) source URL"
+                    "local bridge service network search response item requires an HTTP(S) source URL"
                         .to_string(),
                 );
             }
@@ -356,6 +369,41 @@ mod tests {
 
         assert_eq!(response.capability, CodexBridgeCapability::NetworkSearch);
         assert_eq!(response.items[0].url, "https://example.com/source");
+    }
+
+    #[test]
+    fn contract_validation_errors_use_local_bridge_service_wording() {
+        let captured_at = Utc.with_ymd_and_hms(2026, 6, 29, 12, 0, 0).unwrap();
+        let errors = [
+            CodexBridgeScreenshotResponse::new("Primary", 0, 1080, "iVBORw0KGgo=", captured_at)
+                .expect_err("zero screenshot dimensions fail"),
+            CodexBridgeScreenshotResponse::new("Primary", 1920, 1080, "", captured_at)
+                .expect_err("empty screenshot PNG fails"),
+            CodexBridgeControlRequest::new("", "click:120,340").expect_err("blank target fails"),
+            CodexBridgeControlRequest::new("browser", "Click the submit button")
+                .expect_err("unstructured action fails"),
+            CodexBridgeControlResponse::new("").expect_err("blank control summary fails"),
+            CodexBridgeNetworkSearchRequest::new(LargeModelProvider::ChatGpt, "", "")
+                .expect_err("blank network search query fails"),
+            CodexBridgeNetworkSearchResponse::new(
+                "",
+                "hotel ADR",
+                "public web",
+                "https://bridge.local/search?q=hotel",
+                vec![CodexBridgeNetworkSearchItem {
+                    title: "Result".to_string(),
+                    url: "https://example.com/source".to_string(),
+                    snippet: "Source-backed result.".to_string(),
+                }],
+            )
+            .expect_err("blank provider fails"),
+        ];
+
+        for error in errors {
+            assert!(error.contains("local bridge service"), "{error}");
+            assert!(!error.contains("external bridge"), "{error}");
+            assert!(!error.contains("codex bridge"), "{error}");
+        }
     }
 
     #[test]

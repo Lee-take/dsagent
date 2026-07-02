@@ -1,0 +1,33 @@
+* text=auto eol=lf
+
+*.ico binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.pdf binary
+*.sqlite3 binary
+*.sqlite3-wal binary
+*.sqlite3-shm binary
+*.sqlite3-journal binary
+*.pfx binary
+*.p12 binary
+*.appimage binary
+*.deb binary
+*.dll binary
+*.dmg binary
+*.exe binary
+*.msi binary
+*.msix binary
+*.nupkg binary
+*.pkg binary
+*.pdb binary
+*.rpm binary
+*.so binary
+*.dylib binary
+*.node binary
+*.zip binary
+*.7z binary
+*.rar binary
+*.tar binary
+*.tgz binary

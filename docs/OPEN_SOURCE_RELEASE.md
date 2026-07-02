@@ -1,6 +1,6 @@
 # Open Source Release Plan
 
-This document defines the `v0.0.1` release goal so the project can become a
+This document defines the `0.1.0` upload checkpoint so the project can keep a
 credible GitHub open-source baseline for DeepSeek-first desktop agent support
 that can run on Windows.
 
@@ -14,29 +14,35 @@ Ship a buildable local-first desktop Agent OS preview that demonstrates:
 - Memory Studio with explicit review and conflict actions;
 - an Operations Briefing workflow pack using local evidence and DeepSeek
   synthesis when configured;
-- Windows debug installer packaging, source build instructions, and a clear
-  path toward reliable Windows launch and first-run behavior.
-- A platform roadmap that completes Windows first, then validates and releases
-  macOS after the Windows baseline is stable.
+- Windows debug installer packaging, source build instructions, and a locally
+  verified Windows build/install/launch/run path through the local release gate
+  and installed UI workflow smoke.
+- A platform roadmap that keeps the Windows checkpoint first, then validates
+  and releases macOS after the Windows checkpoint remains stable.
 
-## Non-Goals Before The Windows 0.0.1 Baseline
+## Non-Goals For The 0.1.0 Upload Candidate
 
 - No new workflow packs.
 - No new model providers beyond the existing abstraction.
 - No real email connector.
 - No real cloud-drive connector.
-- No managed Codex bridge sidecar.
+- No DS Agent-managed local bridge service.
 - No PDF v2 CJK font work.
 - No broader Computer Use automation.
 - No arbitrary third-party executable plugin system.
 
-## Required Before Public GitHub Release
+## Required Before Publication Resumes
 
 - Confirm Apache-2.0 license metadata is present in the repository.
 - Confirm repository visibility and project owner name.
-- Publish `v0.0.1` as source-first unless the maintainer later approves
-  unsigned installer artifacts explicitly.
-- Run final verification on the release branch.
+- Keep the already-published `v0.0.1` source snapshot, tag, and release
+  unchanged.
+- If publication resumes, publish the current hardening snapshot only as a new
+  source-only prerelease.
+- Attach no unsigned installer artifacts unless the maintainer later approves
+  binary distribution explicitly for that specific prerelease.
+- Run final local release-candidate verification on the release branch before
+  any publication decision.
 - Prepare release notes that call out preview limits plainly.
 
 ## Post-Release Maintenance
@@ -47,10 +53,14 @@ Ship a buildable local-first desktop Agent OS preview that demonstrates:
   project version.
 - If post-release hardening commits should become a released source snapshot,
   create a new source-only prerelease tag instead of rewriting an old tag.
+- Maintainer decision on 2026-07-01: keep the already-published `v0.0.1`
+  tag/release unchanged and use a new source-only prerelease tag for the
+  current hardening snapshot.
 - Keep patch prereleases focused on release hygiene, security checks,
   documentation corrections, Windows run reliability, or DeepSeek compatibility
   verification. Do not use patch releases to add broad new product capabilities
-  before the Windows baseline is genuinely usable.
+  outside the existing DeepSeek-first workflows, permissions, memory, Windows
+  setup behavior, and Operations Briefing scope.
 - Do not attach unsigned installer binaries unless the maintainer explicitly
   approves binary distribution for that release.
 
@@ -58,7 +68,7 @@ Ship a buildable local-first desktop Agent OS preview that demonstrates:
 
 - `README.md` explains the independent project positioning, basic functions,
   current limits, and open-source acknowledgements.
-- `CONTRIBUTING.md` explains the `0.0.1` Windows-first preview policy.
+- `CONTRIBUTING.md` explains the `0.1.0` Windows-first preview policy.
 - `SECURITY.md` documents current security boundaries and private reporting
   expectations.
 - GitHub Private Vulnerability Reporting is enabled for sensitive security
@@ -66,13 +76,36 @@ Ship a buildable local-first desktop Agent OS preview that demonstrates:
 - `.github/pull_request_template.md` keeps PRs scoped to existing preview work.
 - `.github/ISSUE_TEMPLATE/bug_report.yml` and
   `.github/ISSUE_TEMPLATE/deepseek_compatibility.yml` collect useful reports
-  without encouraging broad feature requests before the Windows baseline is
-  usable.
+  without encouraging broad feature requests outside the current preview scope.
 - `.github/workflows/ci.yml` verifies the repository secret scan, desktop
-  frontend build, and Rust tests on Windows without requiring secrets.
-- `.env.example` documents local DeepSeek and external bridge environment
+  frontend build, Rust tests, and runs `pnpm test:release-source` on Windows
+  without requiring secrets; it also keeps the workflow token scoped to
+  `permissions: contents: read` and does not upload release assets or artifacts.
+- `scripts/require-desktop-workspace.mjs` keeps root `dev`, `build`, and
+  `tauri` scripts pointed at the desktop workspace in a source checkout instead
+  of silently running against a partial tree.
+- `.gitattributes` keeps source line endings stable across Windows and Unix
+  workstations while preserving binary assets, including local Windows debug
+  symbols, native dynamic libraries, and installer/package artifacts, as
+  binary files.
+- `.gitignore` and the source-only release guard keep local `.env` files,
+  credential, private-key, and certificate files, dependency install
+  directories and frontend/Rust build output, reference repositories and
+  generated Tauri state directories, generated Tauri resource directories,
+  local runtime logs and temporary files, generated app data, SQLite database
+  files, SQLite sidecar files, screenshots, reports, work packages, Tauri bundle
+  directories, release binaries, maintainer handoff notes, decision logs, and
+  internal planning files out of the source-first preview. The same guard also
+  rejects unexpected binary files and oversized source files so accidental local
+  exports or packaged assets do not enter generated source archives.
+- `.env.example` documents local DeepSeek and optional local bridge environment
   variables without storing secret values.
-- `docs/RELEASE_NOTES_v0.0.1.md` is the current release note source.
+- `docs/RELEASE_NOTES_v0.1.0.md` is the current upload-candidate note source.
+
+Maintainer handoff notes, decision logs, and `docs/superpowers/` planning files
+are local-only continuation material. They are useful for project handoff on the
+maintainer machine, but they are not public release docs and must not enter a
+source-only release archive.
 
 ## Open Source Acknowledgement
 
@@ -95,6 +128,7 @@ source and its explicit patent grant.
 - Do not imply official DeepSeek affiliation.
 - Do not claim live web evidence from plain chat-completion text.
 - Do not claim cloud connectors where the implementation is local-folder or
-  approval-boundary only.
+  approval and audit records only.
 - Do not hide high-risk Computer Use limitations.
-- Do not add broad feature work before the Windows baseline is genuinely usable.
+- Do not add broad feature work outside the existing DeepSeek-first workflows,
+  permissions, memory, Windows setup behavior, and Operations Briefing scope.

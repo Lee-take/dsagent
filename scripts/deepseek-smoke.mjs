@@ -1,5 +1,14 @@
 #!/usr/bin/env node
 
+const rawArgs = process.argv.slice(2).filter((arg) => arg !== "--");
+const allowedArgs = new Set(["--help"]);
+validateArgs(rawArgs, allowedArgs, "test:deepseek");
+
+if (rawArgs.includes("--help")) {
+  console.log("Usage: pnpm test:deepseek");
+  process.exit(0);
+}
+
 const apiKey = (process.env.DEEPSEEK_API_KEY ?? "").trim();
 const baseUrl = normalizeBaseUrl(
   process.env.DEEPSEEK_API_BASE_URL ?? "https://api.deepseek.com",
@@ -37,7 +46,7 @@ try {
     headers: {
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
-      "User-Agent": "DeepSeek-Agent-OS/0.1 local-smoke-test",
+      "User-Agent": "DeepSeek-Agent-OS/0.1.0 local-smoke-test",
     },
     body: JSON.stringify(payload),
   });
@@ -109,4 +118,25 @@ function redact(value, secret) {
     return value;
   }
   return value.split(secret).join("[REDACTED]");
+}
+
+function validateArgs(values, allowed, commandName) {
+  const unknown = values.filter((arg) => !allowed.has(arg));
+  if (unknown.length === 0) {
+    return;
+  }
+
+  console.error(
+    JSON.stringify(
+      {
+        ok: false,
+        command: commandName,
+        error: `Unknown argument(s): ${unknown.join(", ")}`,
+        allowed: Array.from(allowed).sort(),
+      },
+      null,
+      2,
+    ),
+  );
+  process.exit(1);
 }

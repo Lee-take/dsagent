@@ -1,5 +1,5 @@
 use crate::kernel::computer_use::{
-    computer_use_backend_status_for_strategy, ComputerUseBackendStatus,
+    computer_use_backend_status_for_strategy_with_codex_bridge_config, ComputerUseBackendStatus,
 };
 use crate::kernel::deepseek::{deepseek_credential_status_from_env, DeepSeekCredentialStatus};
 use crate::kernel::local_directory::LocalDirectoryReadinessStatus;
@@ -8,13 +8,15 @@ use crate::kernel::network_search::{
     network_search_route_status_for_strategy, NetworkSearchRouteStatus,
 };
 use crate::kernel::tool_strategy::{
-    model_driven_tool_strategy_for_current_platform, ModelDrivenToolStrategy,
+    current_runtime_platform, model_driven_tool_strategy_with_native_network_search_bridge,
+    ModelDrivenToolStrategy,
 };
 use crate::kernel::workflow::{
     operations_briefing_workflow_template_package, OperationsBriefingRun, WorkflowTemplatePackage,
 };
 
 pub const WORK_PACKAGE_VERSION: &str = "deepseek-agent-os.work-package.v1";
+const REDACTED_SOURCE_MACHINE_EVIDENCE_HANDLE: &str = "redacted source-machine evidence handle";
 
 #[derive(Debug, Eq, PartialEq, thiserror::Error)]
 pub enum WorkPackageError {
@@ -56,9 +58,11 @@ impl Default for WorkPackageToolReadiness {
     fn default() -> Self {
         let deepseek = deepseek_credential_status_from_env(|_| None);
         let foundation_state = FoundationState::default();
-        let tool_strategy = model_driven_tool_strategy_for_current_platform(
+        let tool_strategy = model_driven_tool_strategy_with_native_network_search_bridge(
             foundation_state.large_model_provider,
             foundation_state.network_search_source_model,
+            current_runtime_platform(),
+            false,
         );
         Self {
             network_search: network_search_route_status_for_strategy(
@@ -66,7 +70,11 @@ impl Default for WorkPackageToolReadiness {
                 deepseek.chat_completion_ready,
             ),
             deepseek,
-            computer_use: computer_use_backend_status_for_strategy(&tool_strategy),
+            computer_use: computer_use_backend_status_for_strategy_with_codex_bridge_config(
+                &tool_strategy,
+                None,
+                None,
+            ),
             local_directories: LocalDirectoryReadinessStatus::default(),
             tool_strategy,
         }
@@ -110,6 +118,8 @@ pub struct WorkPackageTaskImportPreview {
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct WorkPackageOperationsBriefingImportPreview {
     pub total: usize,
+    pub new: usize,
+    pub skipped: usize,
     pub replay_supported: bool,
 }
 
@@ -160,6 +170,11 @@ pub fn export_work_package_with_tool_readiness(
     operations_briefing_runs: Vec<OperationsBriefingRun>,
     tool_readiness: WorkPackageToolReadiness,
 ) -> WorkPackage {
+    let operations_briefing_runs = operations_briefing_runs
+        .into_iter()
+        .map(redact_operations_briefing_run_for_package_export)
+        .collect();
+
     WorkPackage {
         version: WORK_PACKAGE_VERSION.to_string(),
         exported_at: chrono::Utc::now(),
@@ -170,6 +185,145 @@ pub fn export_work_package_with_tool_readiness(
         operations_briefing_runs,
         workflow_templates: vec![operations_briefing_workflow_template_package()],
     }
+}
+
+pub(crate) fn redact_operations_briefing_run_for_package_export(
+    mut run: OperationsBriefingRun,
+) -> OperationsBriefingRun {
+    let evidence_folder_path = run.evidence_folder_path.clone();
+    let evidence_folder_path = evidence_folder_path.as_deref();
+    run.title = redact_source_machine_evidence_text(&run.title, evidence_folder_path);
+    run.summary = redact_source_machine_evidence_text(&run.summary, evidence_folder_path);
+    for anomaly in &mut run.anomalies {
+        anomaly.area = redact_source_machine_evidence_text(&anomaly.area, evidence_folder_path);
+        anomaly.signal = redact_source_machine_evidence_text(&anomaly.signal, evidence_folder_path);
+        if anomaly.evidence_ref.as_deref().is_some_and(|evidence_ref| {
+            should_redact_source_machine_evidence_ref(evidence_ref, evidence_folder_path)
+        }) {
+            anomaly.evidence_ref = Some(REDACTED_SOURCE_MACHINE_EVIDENCE_HANDLE.to_string());
+        }
+    }
+    for action in &mut run.action_plan {
+        action.owner = redact_source_machine_evidence_text(&action.owner, evidence_folder_path);
+        action.action = redact_source_machine_evidence_text(&action.action, evidence_folder_path);
+        action.due_hint =
+            redact_source_machine_evidence_text(&action.due_hint, evidence_folder_path);
+    }
+    run.warnings = run
+        .warnings
+        .into_iter()
+        .map(|warning| redact_source_machine_evidence_text(&warning, evidence_folder_path))
+        .collect();
+    run.context_receipt.user_intent =
+        redact_source_machine_evidence_text(&run.context_receipt.user_intent, evidence_folder_path);
+    run.context_receipt.loop_mode =
+        redact_source_machine_evidence_text(&run.context_receipt.loop_mode, evidence_folder_path);
+    run.context_receipt.workflow_policy = redact_source_machine_evidence_text(
+        &run.context_receipt.workflow_policy,
+        evidence_folder_path,
+    );
+    run.context_receipt.selected_evidence = run
+        .context_receipt
+        .selected_evidence
+        .into_iter()
+        .map(|evidence| redact_source_machine_evidence_text(&evidence, evidence_folder_path))
+        .collect();
+    run.context_receipt.selected_memories = run
+        .context_receipt
+        .selected_memories
+        .into_iter()
+        .map(|memory| redact_source_machine_evidence_text(&memory, evidence_folder_path))
+        .collect();
+    run.context_receipt.model_route =
+        redact_source_machine_evidence_text(&run.context_receipt.model_route, evidence_folder_path);
+    run.context_receipt.thinking_level = redact_source_machine_evidence_text(
+        &run.context_receipt.thinking_level,
+        evidence_folder_path,
+    );
+    run.context_receipt.token_cache_state = redact_source_machine_evidence_text(
+        &run.context_receipt.token_cache_state,
+        evidence_folder_path,
+    );
+    run.context_receipt.validation_results = run
+        .context_receipt
+        .validation_results
+        .into_iter()
+        .map(|result| redact_source_machine_evidence_text(&result, evidence_folder_path))
+        .collect();
+    run.context_receipt.intentional_omissions = run
+        .context_receipt
+        .intentional_omissions
+        .into_iter()
+        .map(|omission| redact_source_machine_evidence_text(&omission, evidence_folder_path))
+        .collect();
+    run.evidence_folder_path = None;
+    run.evidence_invocation_id = None;
+    run
+}
+
+fn redact_source_machine_evidence_text(value: &str, evidence_folder_path: Option<&str>) -> String {
+    let Some(evidence_folder_path) = evidence_folder_path else {
+        return value.to_string();
+    };
+    if !is_source_machine_path_handle(evidence_folder_path) {
+        return value.to_string();
+    }
+
+    source_machine_path_variants(evidence_folder_path)
+        .into_iter()
+        .fold(value.to_string(), |redacted, path| {
+            redacted.replace(&path, REDACTED_SOURCE_MACHINE_EVIDENCE_HANDLE)
+        })
+}
+
+fn should_redact_source_machine_evidence_ref(
+    evidence_ref: &str,
+    evidence_folder_path: Option<&str>,
+) -> bool {
+    let Some(evidence_folder_path) = evidence_folder_path else {
+        return false;
+    };
+    if !is_source_machine_path_handle(evidence_folder_path) {
+        return false;
+    }
+
+    let evidence_ref = normalize_path_handle_for_redaction(evidence_ref);
+    let evidence_folder_path = normalize_path_handle_for_redaction(evidence_folder_path);
+    !evidence_folder_path.is_empty() && evidence_ref.contains(&evidence_folder_path)
+}
+
+fn source_machine_path_variants(value: &str) -> Vec<String> {
+    let trimmed = value.trim().trim_end_matches(['\\', '/']).to_string();
+    let slash_normalized = trimmed.replace('\\', "/");
+    let backslash_normalized = trimmed.replace('/', "\\");
+    let mut variants = Vec::new();
+    for variant in [trimmed, slash_normalized, backslash_normalized] {
+        if !variant.is_empty() && !variants.contains(&variant) {
+            variants.push(variant);
+        }
+    }
+    variants
+}
+
+fn is_source_machine_path_handle(value: &str) -> bool {
+    let value = value.trim();
+    let mut chars = value.chars();
+    let first = chars.next();
+    let second = chars.next();
+    let third = chars.next();
+    matches!((first, second, third), (Some(c), Some(':'), Some('\\' | '/')) if c.is_ascii_alphabetic())
+        || value.starts_with("\\\\")
+        || value.starts_with("//")
+        || value.starts_with('/')
+        || value.starts_with('~')
+}
+
+fn normalize_path_handle_for_redaction(value: &str) -> String {
+    value
+        .trim()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_lowercase()
 }
 
 pub fn parse_work_package_json(package_json: &str) -> Result<WorkPackage, WorkPackageError> {
@@ -187,7 +341,7 @@ pub fn parse_work_package_json(package_json: &str) -> Result<WorkPackage, WorkPa
 mod tests {
     use super::{
         export_work_package, export_work_package_with_tool_readiness, parse_work_package_json,
-        WorkPackageError, WorkPackageToolReadiness,
+        WorkPackageError, WorkPackageToolReadiness, REDACTED_SOURCE_MACHINE_EVIDENCE_HANDLE,
     };
     use crate::kernel::deepseek::{
         deepseek_credential_status_from_env, DeepSeekCredentialStatus, DEEPSEEK_API_KEY_ENV,
@@ -225,6 +379,7 @@ mod tests {
                 due_hint: "Next briefing cycle".to_string(),
             }],
             warnings: vec!["One evidence file was skipped.".to_string()],
+            context_receipt: Default::default(),
             created_at: chrono::Utc::now(),
         }
     }
@@ -262,7 +417,135 @@ mod tests {
             vec![run.clone()],
         );
 
-        assert_eq!(package.operations_briefing_runs, vec![run]);
+        assert_eq!(package.operations_briefing_runs.len(), 1);
+        let exported_run = &package.operations_briefing_runs[0];
+        assert_eq!(exported_run.id, run.id);
+        assert_eq!(exported_run.workflow_id, run.workflow_id);
+        assert_eq!(exported_run.status, run.status);
+        assert_eq!(exported_run.title, run.title);
+        assert_eq!(exported_run.summary, run.summary);
+        assert_eq!(exported_run.anomalies, run.anomalies);
+        assert_eq!(exported_run.action_plan, run.action_plan);
+        assert_eq!(exported_run.warnings, run.warnings);
+        assert_eq!(exported_run.created_at, run.created_at);
+        assert_eq!(exported_run.evidence_folder_path, None);
+        assert_eq!(exported_run.evidence_invocation_id, None);
+    }
+
+    #[test]
+    fn operations_export_package_redacts_local_evidence_handles() {
+        let mut run = sample_operations_briefing_run();
+        run.evidence_folder_path = Some("D:\\operator\\private-evidence".to_string());
+        run.evidence_invocation_id = Some(uuid::Uuid::new_v4());
+        run.anomalies[0].evidence_ref = Some("source file: revenue.md".to_string());
+
+        let package = export_work_package(
+            FoundationState::default(),
+            Vec::new(),
+            Vec::new(),
+            vec![run],
+        );
+        let package_json = serde_json::to_string(&package).expect("package serializes");
+        let exported_run = &package.operations_briefing_runs[0];
+
+        assert_eq!(exported_run.evidence_folder_path, None);
+        assert_eq!(exported_run.evidence_invocation_id, None);
+        assert_eq!(
+            exported_run.anomalies[0].evidence_ref.as_deref(),
+            Some("source file: revenue.md")
+        );
+        assert!(!package_json.contains("private-evidence"));
+        assert!(!package_json.contains(r"D:\\operator"));
+    }
+
+    #[test]
+    fn operations_export_package_redacts_local_anomaly_evidence_refs() {
+        let local_evidence_path = "D:\\operator\\private-evidence".to_string();
+        let mut run = sample_operations_briefing_run();
+        run.evidence_folder_path = Some(local_evidence_path.clone());
+        run.anomalies[0].evidence_ref = Some(format!("{local_evidence_path}\\revenue.md"));
+        run.anomalies.push(OperationsBriefingAnomaly {
+            area: "Service".to_string(),
+            signal: "Guest comments need review.".to_string(),
+            evidence_ref: Some("source file: guest-experience.md".to_string()),
+        });
+
+        let package = export_work_package(
+            FoundationState::default(),
+            Vec::new(),
+            Vec::new(),
+            vec![run],
+        );
+        let package_json = serde_json::to_string(&package).expect("package serializes");
+        let exported_run = &package.operations_briefing_runs[0];
+
+        assert_eq!(
+            exported_run.anomalies[0].evidence_ref.as_deref(),
+            Some("redacted source-machine evidence handle")
+        );
+        assert_eq!(
+            exported_run.anomalies[1].evidence_ref.as_deref(),
+            Some("source file: guest-experience.md")
+        );
+        assert!(!package_json.contains("private-evidence"));
+        assert!(!package_json.contains(r"D:\\operator"));
+    }
+
+    #[test]
+    fn operations_export_package_redacts_local_evidence_path_mentions() {
+        let local_evidence_path = "D:\\operator\\private-evidence".to_string();
+        let mut run = sample_operations_briefing_run();
+        run.evidence_folder_path = Some(local_evidence_path.clone());
+        run.summary = format!("Draft used files from {local_evidence_path}.");
+        run.anomalies[0].signal = format!("Revenue check references {local_evidence_path}.");
+        run.action_plan[0].action = format!("Review exported notes from {local_evidence_path}.");
+        run.action_plan[0].due_hint = format!("Before archiving {local_evidence_path}.");
+        run.warnings = vec![format!("Skipped binary file under {local_evidence_path}.")];
+        run.context_receipt.user_intent =
+            format!("Draft briefing from evidence under {local_evidence_path}.");
+        run.context_receipt.selected_evidence = vec![format!(
+            "2 text files from {local_evidence_path}: revenue.md, risk.md"
+        )];
+        run.context_receipt.validation_results =
+            vec![format!("Validated manifest from {local_evidence_path}.")];
+        run.context_receipt.intentional_omissions = vec![format!(
+            "Raw file bodies from {local_evidence_path} were omitted."
+        )];
+
+        let package = export_work_package(
+            FoundationState::default(),
+            Vec::new(),
+            Vec::new(),
+            vec![run],
+        );
+        let package_json = serde_json::to_string(&package).expect("package serializes");
+        let exported_run = &package.operations_briefing_runs[0];
+
+        assert!(exported_run
+            .summary
+            .contains(REDACTED_SOURCE_MACHINE_EVIDENCE_HANDLE));
+        assert!(exported_run.anomalies[0]
+            .signal
+            .contains(REDACTED_SOURCE_MACHINE_EVIDENCE_HANDLE));
+        assert!(exported_run.action_plan[0]
+            .action
+            .contains(REDACTED_SOURCE_MACHINE_EVIDENCE_HANDLE));
+        assert!(exported_run.action_plan[0]
+            .due_hint
+            .contains(REDACTED_SOURCE_MACHINE_EVIDENCE_HANDLE));
+        assert!(exported_run.warnings[0].contains(REDACTED_SOURCE_MACHINE_EVIDENCE_HANDLE));
+        assert!(exported_run
+            .context_receipt
+            .user_intent
+            .contains(REDACTED_SOURCE_MACHINE_EVIDENCE_HANDLE));
+        assert!(exported_run.context_receipt.selected_evidence[0]
+            .contains(REDACTED_SOURCE_MACHINE_EVIDENCE_HANDLE));
+        assert!(exported_run.context_receipt.validation_results[0]
+            .contains(REDACTED_SOURCE_MACHINE_EVIDENCE_HANDLE));
+        assert!(exported_run.context_receipt.intentional_omissions[0]
+            .contains(REDACTED_SOURCE_MACHINE_EVIDENCE_HANDLE));
+        assert!(!package_json.contains("private-evidence"));
+        assert!(!package_json.contains(r"D:\\operator"));
     }
 
     #[test]
@@ -359,6 +642,13 @@ mod tests {
 
     #[test]
     fn tool_readiness_local_directories_reports_setup_without_serializing_paths() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let workspace_dir = temp_dir.path().join("workspace");
+        let evidence_dir = temp_dir.path().join("evidence");
+        let export_dir = temp_dir.path().join("exports");
+        std::fs::create_dir_all(&workspace_dir).expect("workspace dir");
+        std::fs::create_dir_all(&evidence_dir).expect("evidence dir");
+        std::fs::create_dir_all(&export_dir).expect("export dir");
         let state = LocalDirectoryState {
             app_data_dir: "C:\\Users\\alice\\AppData\\Roaming\\deepseek-agent-os".to_string(),
             settings_file:
@@ -366,9 +656,9 @@ mod tests {
                     .to_string(),
             settings: Some(
                 LocalDirectorySettings::new(
-                    "D:\\Private\\workspace".to_string(),
-                    "D:\\Private\\evidence".to_string(),
-                    "D:\\Private\\exports".to_string(),
+                    workspace_dir.to_string_lossy().to_string(),
+                    evidence_dir.to_string_lossy().to_string(),
+                    export_dir.to_string_lossy().to_string(),
                 )
                 .expect("settings validate"),
             ),
@@ -397,7 +687,7 @@ mod tests {
         assert!(package.tool_readiness.local_directories.evidence_configured);
         assert!(package.tool_readiness.local_directories.export_configured);
         assert!(package.tool_readiness.local_directories.paths_redacted);
-        assert!(!package_json.contains("D:\\Private"));
+        assert!(!package_json.contains(&temp_dir.path().to_string_lossy().to_string()));
         assert!(!package_json.contains("alice"));
     }
 

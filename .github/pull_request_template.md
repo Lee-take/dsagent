@@ -4,7 +4,7 @@
 
 ## Scope
 
-- [ ] Bug fix within existing v0.1-alpha scope
+- [ ] Bug fix within existing 0.1.0 preview scope
 - [ ] Documentation or release hygiene
 - [ ] Test coverage for existing behavior
 - [ ] Security or permission-boundary fix
@@ -19,7 +19,7 @@
 
 - [ ] No secrets, API keys, local user paths, screenshots, mailbox data, or personal data are serialized.
 - [ ] Permission-gated capabilities remain policy-backed and auditable.
-- [ ] NetworkSearch evidence still preserves source links.
+- [ ] Web search evidence still preserves source links.
 
 ## Verification
 

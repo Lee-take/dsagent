@@ -11,9 +11,9 @@ use commands::{
     get_foundation_state, get_local_directory_state, get_model_driven_tool_strategy,
     get_network_search_route_status, get_network_search_route_status_for_model,
     import_work_package, ingest_evidence_folder, link_memory_candidate_to_conflicts,
-    list_capability_access_records, list_capability_catalog, list_capability_invocations,
-    list_deepseek_chat_telemetry, list_memory_candidate_records, list_memory_records,
-    list_operations_briefing_runs, list_pending_capability_access_records,
+    link_memory_records, list_capability_access_records, list_capability_catalog,
+    list_capability_invocations, list_deepseek_chat_telemetry, list_memory_candidate_records,
+    list_memory_records, list_operations_briefing_runs, list_pending_capability_access_records,
     list_permission_audit_entries, list_task_records, merge_memory_candidate_with_conflicts,
     preview_memory_candidate_merge, preview_memory_candidate_replace, preview_work_package_import,
     propose_memory_candidate, read_drive_boundary, read_email_boundary, read_local_file,
@@ -66,6 +66,7 @@ fn main() {
             merge_memory_candidate_with_conflicts,
             replace_memory_candidate_conflicts,
             link_memory_candidate_to_conflicts,
+            link_memory_records,
             update_memory_record,
             delete_memory_record,
             list_capability_catalog,
@@ -103,5 +104,5 @@ fn main() {
             preview_work_package_import
         ])
         .run(tauri::generate_context!())
-        .expect("failed to run DeepSeek Agent OS desktop app");
+        .expect("failed to run DS Agent desktop app");
 }

@@ -1,6 +1,6 @@
 # Operations Briefing Evidence Templates
 
-Use these files as a starting evidence folder for the Operations Briefing workflow.
+Use these blank operator templates as a starting evidence folder for the Operations Briefing workflow.
 The desktop app reads only the local folder selected by the operator and creates a
 bounded manifest from supported text files.
 

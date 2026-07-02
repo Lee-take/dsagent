@@ -1,9 +1,10 @@
 # DeepSeek Agent OS v0.1-alpha Release Notes
 
-Historical note: this release label is superseded by the current `v0.0.1`
-Windows-first preview. Do not treat `v0.1-alpha` as the current project version.
+Historical note: this release label is superseded by the current `0.1.0`
+Windows-first test candidate. Do not treat `v0.1-alpha` as the current project version.
 
-Status: first public source-only alpha.
+Status: historical source-only alpha note, superseded by the current v0.1.0
+Windows-first preview.
 
 ## Positioning
 
@@ -20,15 +21,15 @@ baseline for DeepSeek-first desktop agent support, not a broad feature launch.
 - Local SQLite append-only event store.
 - DeepSeek-first model route defaults, credential readiness, in-session cache
   telemetry, and manual local pricing configuration.
-- Capability permission loop for file, network, browser, email, drive, terminal,
-  and Computer Use surfaces.
-- One-shot approvals for high-consequence actions such as EmailSend and
-  ComputerControl.
-- Source-backed NetworkSearch adapter with preserved source URLs.
-- External loopback HTTP Codex bridge contract for ChatGPT/Codex routed
-  Computer Use and native NetworkSearch paths.
-- Local Windows/macOS Computer Screenshot and ComputerControl backend routing,
-  with explicit approval and unlock boundaries.
+- Permissioned local tools for file, network, browser, email, local folders,
+  terminal, and Computer Use surfaces.
+- One-shot approvals for high-consequence actions such as outbound email and
+  computer control.
+- Source-linked web search with preserved source URLs.
+- Optional loopback bridge support for screen inspection, computer control, and
+  source-linked web search.
+- Local Windows/macOS screen inspection and computer control routes, with
+  explicit approval and unlock boundaries.
 - Memory Studio candidate review, edit/delete/expiration, and explicit
   conflict actions: link, merge, and replace.
 - Operations Briefing workflow pack using local evidence folders and optional
@@ -39,19 +40,19 @@ baseline for DeepSeek-first desktop agent support, not a broad feature launch.
 
 ## Important Alpha Limits
 
-- EmailRead, EmailDraft, and EmailSend are approval/audit boundaries only; they
-  do not connect to a mailbox.
-- DriveRead and DriveWrite use local folders and export packages; they do not
-  connect to cloud-drive accounts.
-- BrowserSubmit records approval/audit boundaries only; it does not submit web
-  forms.
-- TerminalWrite records approval/audit boundaries only; it does not execute
-  mutating shell commands.
+- Email read, draft, and send tools record approval and audit decisions only;
+  they do not connect to a mailbox.
+- Local folder read and work-package export use local folders and export
+  packages; they do not connect to cloud-drive accounts.
+- Browser form submission records approval and audit decisions only; it does
+  not submit web forms.
+- Mutating terminal commands record approval and audit decisions only; they do
+  not execute mutating shell commands.
 - PDF export is lightweight and ASCII-safe. Use Markdown or HTML for full
   Unicode and Chinese report content.
-- The Codex bridge runtime is external loopback HTTP only in v0.1-alpha.
-  Managed sidecar spawning is deferred.
-- NetworkSearch must preserve source links. Plain DeepSeek or ChatGPT text is
+- Optional local bridge use is loopback-only. Local bridge service startup is
+  not included in this historical alpha note.
+- Web search must preserve source links. Plain model response text is
   not treated as verified web evidence.
 - No hosted sync, account system, marketplace, or arbitrary third-party
   executable plugins are included.
@@ -64,8 +65,9 @@ Run on the release branch:
 npx pnpm@9.15.9 install
 npx pnpm@9.15.9 test:secrets
 npx pnpm@9.15.9 --filter @deepseek-agent-os/desktop build
-$env:CARGO_TARGET_DIR='D:\codex-target\deepseek-ui-tauri'; cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
-$env:CARGO_TARGET_DIR='D:\codex-target\deepseek-ui-tauri'; npx pnpm@9.15.9 --filter @deepseek-agent-os/desktop tauri build --debug
+$env:CARGO_TARGET_DIR = Join-Path $env:TEMP 'deepseek_agent_os_cargo_target'
+cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
+npx pnpm@9.15.9 --filter @deepseek-agent-os/desktop tauri build --debug
 git diff --check
 ```
 

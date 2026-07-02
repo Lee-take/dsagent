@@ -7,7 +7,7 @@ const desktopPackagePath = join(scriptDir, "..", "apps", "desktop", "package.jso
 
 if (!existsSync(desktopPackagePath)) {
   console.error(
-    "Desktop workspace has not been created yet. Complete Foundation MVP Task 2 to create apps/desktop/package.json before running root dev, build, or tauri scripts.",
+    "Desktop workspace is missing from this source checkout. Restore apps/desktop/package.json before running root dev, build, or tauri scripts.",
   );
   process.exit(1);
 }

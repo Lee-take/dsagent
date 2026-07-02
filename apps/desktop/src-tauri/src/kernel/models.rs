@@ -144,6 +144,23 @@ pub enum MemoryLifecycle {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum MemoryRelationKind {
+    Related,
+    Updates,
+    Extends,
+    Derives,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemorySearchMatchSource {
+    Direct,
+    LinkedMemoryTitle,
+    LinkedMemoryBody,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum NetworkSearchSourceModel {
     FreeWebSource,
     FreeLocalBrowser,
@@ -239,6 +256,14 @@ fn default_memory_sensitivity() -> MemorySensitivity {
 
 fn default_memory_lifecycle() -> MemoryLifecycle {
     MemoryLifecycle::Active
+}
+
+fn default_memory_relation_kind() -> MemoryRelationKind {
+    MemoryRelationKind::Related
+}
+
+fn default_memory_search_match() -> MemorySearchMatch {
+    MemorySearchMatch::direct()
 }
 
 fn default_large_model_provider() -> LargeModelProvider {
@@ -397,6 +422,11 @@ pub struct MemoryRecord {
     pub linked_memory_ids: Vec<Uuid>,
     #[serde(default)]
     pub linked_memories: Vec<MemoryRecordLinkSummary>,
+    #[serde(
+        default = "default_memory_search_match",
+        skip_serializing_if = "MemorySearchMatch::is_direct"
+    )]
+    pub search_match: MemorySearchMatch,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -424,6 +454,7 @@ impl MemoryRecord {
             expires_at: None,
             linked_memory_ids: Vec::new(),
             linked_memories: Vec::new(),
+            search_match: MemorySearchMatch::direct(),
             created_at: now,
             updated_at: now,
         }
@@ -446,6 +477,7 @@ impl MemoryRecord {
             expires_at: candidate.expires_at,
             linked_memory_ids: Vec::new(),
             linked_memories: Vec::new(),
+            search_match: MemorySearchMatch::direct(),
             created_at: now,
             updated_at: now,
         }
@@ -461,11 +493,50 @@ impl MemoryRecord {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MemorySearchMatch {
+    pub source: MemorySearchMatchSource,
+    pub linked_memory_id: Option<Uuid>,
+    pub relation: Option<MemoryRelationKind>,
+}
+
+impl MemorySearchMatch {
+    pub fn direct() -> Self {
+        Self {
+            source: MemorySearchMatchSource::Direct,
+            linked_memory_id: None,
+            relation: None,
+        }
+    }
+
+    pub fn linked(
+        source: MemorySearchMatchSource,
+        linked_memory_id: Uuid,
+        relation: MemoryRelationKind,
+    ) -> Self {
+        Self {
+            source,
+            linked_memory_id: Some(linked_memory_id),
+            relation: Some(relation),
+        }
+    }
+
+    pub fn is_direct(&self) -> bool {
+        self.source == MemorySearchMatchSource::Direct
+            && self.linked_memory_id.is_none()
+            && self.relation.is_none()
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MemoryRecordLinkSummary {
     pub id: Uuid,
     pub title: String,
     pub memory_type: MemoryType,
     pub scope: MemoryScope,
+    #[serde(default = "default_memory_relation_kind")]
+    pub relation: MemoryRelationKind,
+    #[serde(default)]
+    pub note: String,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -476,8 +547,23 @@ impl From<&MemoryRecord> for MemoryRecordLinkSummary {
             title: record.title.clone(),
             memory_type: record.memory_type,
             scope: record.scope,
+            relation: default_memory_relation_kind(),
+            note: String::new(),
             updated_at: record.updated_at,
         }
+    }
+}
+
+impl MemoryRecordLinkSummary {
+    pub fn with_relation(mut self, relation: MemoryRelationKind) -> Self {
+        self.relation = relation;
+        self
+    }
+
+    pub fn with_link_context(mut self, relation: MemoryRelationKind, note: &str) -> Self {
+        self.relation = relation;
+        self.note = note.trim().to_string();
+        self
     }
 }
 
@@ -487,6 +573,8 @@ pub struct MemoryRecordLink {
     pub source_memory_id: Uuid,
     pub target_memory_id: Uuid,
     pub candidate_id: Option<Uuid>,
+    #[serde(default = "default_memory_relation_kind")]
+    pub relation: MemoryRelationKind,
     pub note: String,
     pub created_at: DateTime<Utc>,
 }
@@ -496,6 +584,7 @@ impl MemoryRecordLink {
         source_memory_id: Uuid,
         target_memory_id: Uuid,
         candidate_id: Option<Uuid>,
+        relation: MemoryRelationKind,
         note: String,
     ) -> Result<Self, String> {
         if source_memory_id == target_memory_id {
@@ -507,6 +596,7 @@ impl MemoryRecordLink {
             source_memory_id,
             target_memory_id,
             candidate_id,
+            relation,
             note: note.trim().to_string(),
             created_at: Utc::now(),
         })
@@ -656,6 +746,7 @@ impl MemoryRecordUpdate {
             expires_at: self.expires_at,
             linked_memory_ids: record.linked_memory_ids.clone(),
             linked_memories: record.linked_memories.clone(),
+            search_match: record.search_match.clone(),
             created_at: record.created_at,
             updated_at: self.updated_at,
         }
@@ -698,7 +789,7 @@ pub struct FoundationState {
 impl Default for FoundationState {
     fn default() -> Self {
         Self {
-            app_name: "DeepSeek Agent OS".to_string(),
+            app_name: "DS Agent".to_string(),
             large_model_provider: default_large_model_provider(),
             model_route: ModelRoute::Auto,
             thinking_level: ThinkingLevel::Auto,
@@ -746,7 +837,7 @@ mod tests {
     fn foundation_state_defaults_to_deepseek_agent_os() {
         let state = FoundationState::default();
 
-        assert_eq!(state.app_name, "DeepSeek Agent OS");
+        assert_eq!(state.app_name, "DS Agent");
         assert_eq!(state.large_model_provider, LargeModelProvider::DeepSeek);
         assert_eq!(state.model_route, ModelRoute::Auto);
         assert_eq!(state.thinking_level, ThinkingLevel::Auto);

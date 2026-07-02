@@ -13,18 +13,19 @@ use crate::kernel::models::{
     KernelEvent, MemoryCandidate, MemoryCandidateMergePreview, MemoryCandidateRecord,
     MemoryCandidateReplacePreview, MemoryCandidateResolution, MemoryCandidateSource,
     MemoryCandidateStatus, MemoryConflictSummary, MemoryRecord, MemoryRecordDeletion,
-    MemoryRecordLink, MemoryRecordLinkSummary, MemoryRecordUpdate, TaskRecord,
+    MemoryRecordLink, MemoryRecordLinkSummary, MemoryRecordUpdate, MemoryRelationKind,
+    MemorySearchMatch, MemorySearchMatchSource, TaskRecord,
 };
 use crate::kernel::policy::{
     capability_risk, CapabilityAccessRecord, CapabilityAccessRequest, CapabilityAccessStatus,
     CapabilityGrantState, CapabilityKind, PermissionAuditEntry, PermissionResolution, RiskLevel,
 };
 use crate::kernel::work_package::{
-    WorkPackage, WorkPackageImportPreview, WorkPackageImportSummary,
-    WorkPackageMemoryCandidateImportPreview, WorkPackageMemoryCandidateImportSummary,
-    WorkPackageOperationsBriefingImportPreview, WorkPackageOperationsBriefingImportSummary,
-    WorkPackageTaskImportPreview, WorkPackageWorkflowTemplateImportPreview,
-    WorkPackageWorkflowTemplateImportSummary,
+    redact_operations_briefing_run_for_package_export, WorkPackage, WorkPackageImportPreview,
+    WorkPackageImportSummary, WorkPackageMemoryCandidateImportPreview,
+    WorkPackageMemoryCandidateImportSummary, WorkPackageOperationsBriefingImportPreview,
+    WorkPackageOperationsBriefingImportSummary, WorkPackageTaskImportPreview,
+    WorkPackageWorkflowTemplateImportPreview, WorkPackageWorkflowTemplateImportSummary,
 };
 use crate::kernel::workflow::{OperationsBriefingRun, WorkflowTemplatePackage};
 
@@ -220,34 +221,43 @@ impl EventStore {
             .into_iter()
             .map(|record| record.id)
             .collect::<std::collections::HashSet<_>>();
-        let skipped = package
-            .task_records
-            .iter()
-            .filter(|record| existing_ids.contains(&record.id))
-            .count();
-        let total = package.task_records.len();
+        let (total, skipped) = preview_import_counts(
+            existing_ids,
+            package.task_records.iter().map(|record| record.id),
+        );
         let existing_candidate_ids = self
             .list_memory_candidates()?
             .into_iter()
             .map(|candidate| candidate.id)
             .collect::<std::collections::HashSet<_>>();
-        let skipped_candidates = package
-            .memory_candidates
-            .iter()
-            .filter(|candidate| existing_candidate_ids.contains(&candidate.id))
-            .count();
-        let total_candidates = package.memory_candidates.len();
+        let (total_candidates, skipped_candidates) = preview_import_counts(
+            existing_candidate_ids,
+            package
+                .memory_candidates
+                .iter()
+                .map(|candidate| candidate.id),
+        );
+        let existing_briefing_run_ids = self
+            .list_operations_briefing_runs()?
+            .into_iter()
+            .map(|run| run.id)
+            .collect::<std::collections::HashSet<_>>();
+        let (total_briefing_runs, skipped_briefing_runs) = preview_import_counts(
+            existing_briefing_run_ids,
+            package.operations_briefing_runs.iter().map(|run| run.id),
+        );
         let existing_template_ids = self
             .list_workflow_template_packages()?
             .into_iter()
             .map(|template| template.id)
             .collect::<std::collections::HashSet<_>>();
-        let skipped_templates = package
-            .workflow_templates
-            .iter()
-            .filter(|template| existing_template_ids.contains(&template.id))
-            .count();
-        let total_templates = package.workflow_templates.len();
+        let (total_templates, skipped_templates) = preview_import_counts(
+            existing_template_ids,
+            package
+                .workflow_templates
+                .iter()
+                .map(|template| template.id.clone()),
+        );
 
         Ok(WorkPackageImportPreview {
             task_records: WorkPackageTaskImportPreview {
@@ -262,7 +272,9 @@ impl EventStore {
                 review_supported: true,
             },
             operations_briefing_runs: WorkPackageOperationsBriefingImportPreview {
-                total: package.operations_briefing_runs.len(),
+                total: total_briefing_runs,
+                new: total_briefing_runs.saturating_sub(skipped_briefing_runs),
+                skipped: skipped_briefing_runs,
                 replay_supported: true,
             },
             workflow_templates: WorkPackageWorkflowTemplateImportPreview {
@@ -334,9 +346,34 @@ impl EventStore {
             }
         }
 
-        let event = KernelEvent::new(MEMORY_RECORD_CREATED_EVENT, record)?;
+        let mut persisted_record = record.clone();
+        persisted_record.linked_memory_ids = Vec::new();
+        persisted_record.linked_memories = Vec::new();
+        persisted_record.search_match = MemorySearchMatch::direct();
+        let event = KernelEvent::new(MEMORY_RECORD_CREATED_EVENT, &persisted_record)?;
         self.append(&event)?;
         Ok(true)
+    }
+
+    fn ensure_memory_record_source_not_already_written(
+        &self,
+        record: &MemoryRecord,
+    ) -> EventStoreResult<()> {
+        if record.source_id.is_none() {
+            return Ok(());
+        }
+
+        let exists = self
+            .list_memory_records()?
+            .into_iter()
+            .any(|memory| memory.source == record.source && memory.source_id == record.source_id);
+        if exists {
+            return Err(EventStoreError::InvalidState(
+                "accepted memory candidate was already written".to_string(),
+            ));
+        }
+
+        Ok(())
     }
 
     pub fn list_memory_records(&self) -> EventStoreResult<Vec<MemoryRecord>> {
@@ -404,8 +441,15 @@ impl EventStore {
             .collect::<std::collections::HashMap<_, _>>();
         let mut linked_ids_by_memory_id: std::collections::HashMap<Uuid, Vec<Uuid>> =
             std::collections::HashMap::new();
+        let mut linked_summaries_by_memory_id: std::collections::HashMap<
+            Uuid,
+            Vec<MemoryRecordLinkSummary>,
+        > = std::collections::HashMap::new();
 
         for link in self.list_memory_record_links()? {
+            if link.source_memory_id == link.target_memory_id {
+                continue;
+            }
             if !visible_memory_ids.contains(&link.source_memory_id)
                 || !visible_memory_ids.contains(&link.target_memory_id)
             {
@@ -422,6 +466,20 @@ impl EventStore {
                 link.target_memory_id,
                 link.source_memory_id,
             );
+            if let Some(summary) = summaries_by_id.get(&link.target_memory_id) {
+                push_unique_link_summary(
+                    &mut linked_summaries_by_memory_id,
+                    link.source_memory_id,
+                    summary.clone().with_link_context(link.relation, &link.note),
+                );
+            }
+            if let Some(summary) = summaries_by_id.get(&link.source_memory_id) {
+                push_unique_link_summary(
+                    &mut linked_summaries_by_memory_id,
+                    link.target_memory_id,
+                    summary.clone().with_link_context(link.relation, &link.note),
+                );
+            }
         }
 
         Ok(memories
@@ -430,10 +488,9 @@ impl EventStore {
                 let linked_memory_ids = linked_ids_by_memory_id
                     .remove(&memory.id)
                     .unwrap_or_default();
-                let linked_memories = linked_memory_ids
-                    .iter()
-                    .filter_map(|id| summaries_by_id.get(id).cloned())
-                    .collect();
+                let linked_memories = linked_summaries_by_memory_id
+                    .remove(&memory.id)
+                    .unwrap_or_default();
                 memory.linked_memory_ids = linked_memory_ids;
                 memory.linked_memories = linked_memories;
                 memory
@@ -521,6 +578,43 @@ impl EventStore {
     }
 
     pub fn append_memory_record_link(&self, link: &MemoryRecordLink) -> EventStoreResult<()> {
+        let visible_memory_ids = self
+            .list_memory_records()?
+            .into_iter()
+            .map(|memory| memory.id)
+            .collect::<std::collections::HashSet<_>>();
+        if !visible_memory_ids.contains(&link.source_memory_id) {
+            return Err(EventStoreError::NotFound(format!(
+                "memory record {} was not found",
+                link.source_memory_id
+            )));
+        }
+        if !visible_memory_ids.contains(&link.target_memory_id) {
+            return Err(EventStoreError::NotFound(format!(
+                "memory record {} was not found",
+                link.target_memory_id
+            )));
+        }
+        if link.source_memory_id == link.target_memory_id {
+            return Err(EventStoreError::InvalidState(
+                "memory record link cannot point to itself".to_string(),
+            ));
+        }
+
+        let duplicate_exists = self
+            .list_memory_record_links()?
+            .into_iter()
+            .any(|existing| {
+                existing.relation == link.relation
+                    && ((existing.source_memory_id == link.source_memory_id
+                        && existing.target_memory_id == link.target_memory_id)
+                        || (existing.source_memory_id == link.target_memory_id
+                            && existing.target_memory_id == link.source_memory_id))
+            });
+        if duplicate_exists {
+            return Ok(());
+        }
+
         let event = KernelEvent::new(MEMORY_RECORD_LINKED_EVENT, link)?;
         self.append(&event)
     }
@@ -550,11 +644,20 @@ impl EventStore {
             return Ok(memories);
         }
 
+        let memory_bodies_by_id = memories
+            .iter()
+            .map(|memory| (memory.id, memory.body.to_lowercase()))
+            .collect::<std::collections::HashMap<_, _>>();
+
         Ok(memories
             .into_iter()
-            .filter(|memory| {
-                memory.title.to_lowercase().contains(&query)
-                    || memory.body.to_lowercase().contains(&query)
+            .filter_map(|mut memory| {
+                memory_record_search_match(&memory, &query, &memory_bodies_by_id).map(
+                    |search_match| {
+                        memory.search_match = search_match;
+                        memory
+                    },
+                )
             })
             .collect())
     }
@@ -586,6 +689,7 @@ impl EventStore {
 
             let mut imported_candidate = candidate.clone();
             imported_candidate.source = MemoryCandidateSource::Import;
+            imported_candidate.source_id = None;
             self.append_memory_candidate(&imported_candidate)?;
             existing_ids.insert(imported_candidate.id);
             summary.imported += 1;
@@ -686,11 +790,22 @@ impl EventStore {
             ));
         }
 
+        let memory = if accepted {
+            let memory = MemoryRecord::from_memory_candidate(&record.candidate);
+            self.ensure_memory_record_source_not_already_written(&memory)?;
+            Some(memory)
+        } else {
+            None
+        };
+
         let resolution = MemoryCandidateResolution::new(candidate_id, accepted, note);
         self.append_memory_candidate_resolution(&resolution)?;
-        if accepted {
-            let memory = MemoryRecord::from_memory_candidate(&record.candidate);
-            self.append_memory_record(&memory)?;
+        if let Some(memory) = memory {
+            if !self.append_memory_record(&memory)? {
+                return Err(EventStoreError::InvalidState(
+                    "accepted memory candidate was already written".to_string(),
+                ));
+            }
         }
         Ok(resolution)
     }
@@ -737,6 +852,11 @@ impl EventStore {
             let memory = visible_memories_by_id.get(memory_id).ok_or_else(|| {
                 EventStoreError::NotFound(format!("memory record {memory_id} was not found"))
             })?;
+            if !record.conflicting_memory_ids.contains(memory_id) {
+                return Err(EventStoreError::InvalidState(format!(
+                    "memory record {memory_id} is not a current candidate conflict"
+                )));
+            }
             push_unique_memory_body(&mut source_bodies, &memory.body);
         }
         push_unique_memory_body(&mut source_bodies, &record.candidate.body);
@@ -796,6 +916,11 @@ impl EventStore {
             let memory = visible_memories_by_id.get(memory_id).ok_or_else(|| {
                 EventStoreError::NotFound(format!("memory record {memory_id} was not found"))
             })?;
+            if !record.conflicting_memory_ids.contains(memory_id) {
+                return Err(EventStoreError::InvalidState(format!(
+                    "memory record {memory_id} is not a current candidate conflict"
+                )));
+            }
             target_memories.push(MemoryConflictSummary::from(*memory));
         }
 
@@ -833,9 +958,6 @@ impl EventStore {
             ));
         }
 
-        let resolution = MemoryCandidateResolution::new(candidate_id, true, note.clone());
-        self.append_memory_candidate_resolution(&resolution)?;
-
         let mut merged_candidate = record.candidate.clone();
         merged_candidate.title = preview.title;
         merged_candidate.body = preview.body;
@@ -845,6 +967,10 @@ impl EventStore {
         merged_candidate.lifecycle = preview.lifecycle;
         merged_candidate.expires_at = preview.expires_at;
         let merged_memory = MemoryRecord::from_memory_candidate(&merged_candidate);
+        self.ensure_memory_record_source_not_already_written(&merged_memory)?;
+
+        let resolution = MemoryCandidateResolution::new(candidate_id, true, note.clone());
+        self.append_memory_candidate_resolution(&resolution)?;
         if !self.append_memory_record(&merged_memory)? {
             return Err(EventStoreError::InvalidState(
                 "accepted memory candidate was already written".to_string(),
@@ -856,6 +982,7 @@ impl EventStore {
                 merged_memory.id,
                 memory_id,
                 Some(candidate_id),
+                MemoryRelationKind::Derives,
                 note.clone(),
             )
             .map_err(EventStoreError::InvalidState)?;
@@ -886,10 +1013,11 @@ impl EventStore {
             ));
         }
 
+        let replacement_memory = MemoryRecord::from_memory_candidate(&record.candidate);
+        self.ensure_memory_record_source_not_already_written(&replacement_memory)?;
+
         let resolution = MemoryCandidateResolution::new(candidate_id, true, note.clone());
         self.append_memory_candidate_resolution(&resolution)?;
-
-        let replacement_memory = MemoryRecord::from_memory_candidate(&record.candidate);
         if !self.append_memory_record(&replacement_memory)? {
             return Err(EventStoreError::InvalidState(
                 "accepted memory candidate was already written".to_string(),
@@ -901,6 +1029,7 @@ impl EventStore {
                 replacement_memory.id,
                 memory_id,
                 Some(candidate_id),
+                MemoryRelationKind::Updates,
                 note.clone(),
             )
             .map_err(EventStoreError::InvalidState)?;
@@ -915,6 +1044,21 @@ impl EventStore {
         &self,
         candidate_id: Uuid,
         linked_memory_ids: Vec<Uuid>,
+        note: String,
+    ) -> EventStoreResult<MemoryCandidateResolution> {
+        self.link_memory_candidate_to_conflicts_with_relation(
+            candidate_id,
+            linked_memory_ids,
+            MemoryRelationKind::Extends,
+            note,
+        )
+    }
+
+    pub fn link_memory_candidate_to_conflicts_with_relation(
+        &self,
+        candidate_id: Uuid,
+        linked_memory_ids: Vec<Uuid>,
+        relation: MemoryRelationKind,
         note: String,
     ) -> EventStoreResult<MemoryCandidateResolution> {
         let mut unique_linked_memory_ids = Vec::new();
@@ -956,17 +1100,36 @@ impl EventStore {
                 )));
             }
         }
+        let conflicting_memory_ids = record
+            .conflicting_memory_ids
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        for memory_id in &unique_linked_memory_ids {
+            if !conflicting_memory_ids.contains(memory_id) {
+                return Err(EventStoreError::InvalidState(format!(
+                    "memory record {memory_id} is not a current candidate conflict"
+                )));
+            }
+        }
+
+        let memory = MemoryRecord::from_memory_candidate(&record.candidate);
+        self.ensure_memory_record_source_not_already_written(&memory)?;
 
         let resolution = MemoryCandidateResolution::new(candidate_id, true, note.clone());
         self.append_memory_candidate_resolution(&resolution)?;
-        let memory = MemoryRecord::from_memory_candidate(&record.candidate);
-        self.append_memory_record(&memory)?;
+        if !self.append_memory_record(&memory)? {
+            return Err(EventStoreError::InvalidState(
+                "accepted memory candidate was already written".to_string(),
+            ));
+        }
 
         for linked_memory_id in unique_linked_memory_ids {
             let link = MemoryRecordLink::new(
                 memory.id,
                 linked_memory_id,
                 Some(candidate_id),
+                relation,
                 note.clone(),
             )
             .map_err(EventStoreError::InvalidState)?;
@@ -1216,7 +1379,7 @@ impl EventStore {
                 continue;
             }
 
-            let mut archived_run = run.clone();
+            let mut archived_run = redact_operations_briefing_run_for_package_export(run.clone());
             archived_run.archived_from_package = true;
             self.append_operations_briefing_run(&archived_run)?;
             existing_ids.insert(archived_run.id);
@@ -1273,6 +1436,20 @@ fn push_unique_link(
     }
 }
 
+fn push_unique_link_summary(
+    summaries_by_memory_id: &mut std::collections::HashMap<Uuid, Vec<MemoryRecordLinkSummary>>,
+    memory_id: Uuid,
+    linked_memory: MemoryRecordLinkSummary,
+) {
+    let summaries = summaries_by_memory_id.entry(memory_id).or_default();
+    if !summaries
+        .iter()
+        .any(|summary| summary.id == linked_memory.id)
+    {
+        summaries.push(linked_memory);
+    }
+}
+
 fn push_unique_memory_body(bodies: &mut Vec<String>, body: &str) {
     let body = body.trim();
     if body.is_empty() || bodies.iter().any(|existing| existing == body) {
@@ -1280,6 +1457,62 @@ fn push_unique_memory_body(bodies: &mut Vec<String>, body: &str) {
     }
 
     bodies.push(body.to_string());
+}
+
+fn preview_import_counts<Id>(
+    mut seen_ids: std::collections::HashSet<Id>,
+    incoming_ids: impl IntoIterator<Item = Id>,
+) -> (usize, usize)
+where
+    Id: Eq + std::hash::Hash,
+{
+    let mut total = 0;
+    let mut skipped = 0;
+
+    for id in incoming_ids {
+        total += 1;
+        if !seen_ids.insert(id) {
+            skipped += 1;
+        }
+    }
+
+    (total, skipped)
+}
+
+fn memory_record_search_match(
+    memory: &MemoryRecord,
+    query: &str,
+    memory_bodies_by_id: &std::collections::HashMap<Uuid, String>,
+) -> Option<MemorySearchMatch> {
+    if memory.title.to_lowercase().contains(query) || memory.body.to_lowercase().contains(query) {
+        return Some(MemorySearchMatch::direct());
+    }
+
+    for linked_memory in &memory.linked_memories {
+        if linked_memory.title.to_lowercase().contains(query) {
+            return Some(MemorySearchMatch::linked(
+                MemorySearchMatchSource::LinkedMemoryTitle,
+                linked_memory.id,
+                linked_memory.relation,
+            ));
+        }
+    }
+
+    for linked_memory in &memory.linked_memories {
+        if memory_bodies_by_id
+            .get(&linked_memory.id)
+            .map(|body| body.contains(query))
+            .unwrap_or(false)
+        {
+            return Some(MemorySearchMatch::linked(
+                MemorySearchMatchSource::LinkedMemoryBody,
+                linked_memory.id,
+                linked_memory.relation,
+            ));
+        }
+    }
+
+    None
 }
 
 fn normalize_memory_text(value: &str) -> String {
@@ -1357,14 +1590,15 @@ mod tests {
     use chrono::{Duration, Utc};
     use uuid::Uuid;
 
-    use super::{EventStore, EventStoreError};
+    use super::{EventStore, EventStoreError, MEMORY_RECORD_LINKED_EVENT};
     use crate::kernel::capability::{CapabilityInvocation, CapabilityInvocationStatus};
     use crate::kernel::deepseek::{DeepSeekChatCacheStatus, DeepSeekChatTelemetry};
     use crate::kernel::models::{AccessMode, FoundationState};
     use crate::kernel::models::{
         KernelEvent, MemoryCandidate, MemoryCandidateSource, MemoryCandidateStatus,
-        MemoryLifecycle, MemoryRecord, MemoryRecordSource, MemoryScope, MemorySensitivity,
-        MemoryType, TaskRecord,
+        MemoryLifecycle, MemoryRecord, MemoryRecordLink, MemoryRecordLinkSummary,
+        MemoryRecordSource, MemoryRelationKind, MemoryScope, MemorySearchMatch,
+        MemorySearchMatchSource, MemorySensitivity, MemoryType, TaskRecord,
     };
     use crate::kernel::policy::{
         request_capability_access, CapabilityAccessStatus, CapabilityGrantState, CapabilityKind,
@@ -1398,6 +1632,7 @@ mod tests {
                 due_hint: "Next briefing cycle".to_string(),
             }],
             warnings: Vec::new(),
+            context_receipt: Default::default(),
             created_at: chrono::Utc::now(),
         }
     }
@@ -1584,6 +1819,38 @@ mod tests {
     }
 
     #[test]
+    fn operations_briefing_import_preview_counts_new_skipped_archives() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let existing_run = sample_operations_briefing_run();
+        let incoming_run = sample_operations_briefing_run();
+        store
+            .append_operations_briefing_run(&existing_run)
+            .expect("existing briefing run appends");
+
+        let package = export_work_package(
+            FoundationState::default(),
+            Vec::new(),
+            Vec::new(),
+            vec![existing_run.clone(), incoming_run],
+        );
+        let preview = store
+            .preview_work_package_import(&package)
+            .expect("preview loads");
+        let preview_json = serde_json::to_value(&preview).expect("preview serializes");
+
+        assert_eq!(preview.operations_briefing_runs.total, 2);
+        assert_eq!(
+            preview_json["operations_briefing_runs"]["new"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            preview_json["operations_briefing_runs"]["skipped"],
+            serde_json::json!(1)
+        );
+        assert!(preview.operations_briefing_runs.replay_supported);
+    }
+
+    #[test]
     fn imported_memory_candidate_imports_new_candidates_as_pending_without_writing_memory() {
         let store = EventStore::open_memory().expect("memory store opens");
         let existing = MemoryCandidate::new(
@@ -1594,11 +1861,12 @@ mod tests {
             "Existing local review candidate.".to_string(),
         )
         .expect("candidate is valid");
+        let source_machine_candidate_source_id = Uuid::new_v4();
         let incoming = MemoryCandidate::new_with_metadata(
             "Imported project context".to_string(),
             "Review this package context before saving it as local memory.".to_string(),
             MemoryCandidateSource::Manual,
-            None,
+            Some(source_machine_candidate_source_id),
             "Imported from a handoff package.".to_string(),
             MemoryType::ProjectContext,
             MemoryScope::Project,
@@ -1627,6 +1895,7 @@ mod tests {
         assert_eq!(summary.skipped, 1);
         assert_eq!(imported.effective_status, MemoryCandidateStatus::Pending);
         assert_eq!(imported.candidate.source, MemoryCandidateSource::Import);
+        assert_eq!(imported.candidate.source_id, None);
         assert_eq!(imported.candidate.memory_type, MemoryType::ProjectContext);
         assert_eq!(imported.candidate.scope, MemoryScope::Project);
         assert_eq!(imported.candidate.sensitivity, MemorySensitivity::Sensitive);
@@ -1671,6 +1940,57 @@ mod tests {
         assert_eq!(preview.workflow_templates.new, 1);
         assert_eq!(preview.workflow_templates.skipped, 1);
         assert!(preview.workflow_templates.import_supported);
+    }
+
+    #[test]
+    fn work_package_import_preview_counts_duplicate_package_ids_as_skipped() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let task = TaskRecord::new(
+            "Duplicate task from package".to_string(),
+            "The work package contains this task twice.".to_string(),
+        )
+        .expect("task is valid");
+        let candidate = MemoryCandidate::new(
+            "Duplicate candidate from package".to_string(),
+            "The work package contains this memory candidate twice.".to_string(),
+            MemoryCandidateSource::Manual,
+            None,
+            "Imported from a duplicated package entry.".to_string(),
+        )
+        .expect("candidate is valid");
+        let run = sample_operations_briefing_run();
+        let template = WorkflowTemplatePackage::new(
+            "operations.duplicate.templates.v1".to_string(),
+            "operations.duplicate.v1".to_string(),
+            "Duplicate Template Package".to_string(),
+            "The work package contains this workflow template twice.".to_string(),
+            Vec::new(),
+        )
+        .expect("template package is valid");
+        let mut package = export_work_package(
+            FoundationState::default(),
+            vec![task.clone(), task],
+            vec![candidate.clone(), candidate],
+            vec![run.clone(), run],
+        );
+        package.workflow_templates = vec![template.clone(), template];
+
+        let preview = store
+            .preview_work_package_import(&package)
+            .expect("preview loads");
+
+        assert_eq!(preview.task_records.total, 2);
+        assert_eq!(preview.task_records.new, 1);
+        assert_eq!(preview.task_records.skipped, 1);
+        assert_eq!(preview.memory_candidates.total, 2);
+        assert_eq!(preview.memory_candidates.new, 1);
+        assert_eq!(preview.memory_candidates.skipped, 1);
+        assert_eq!(preview.operations_briefing_runs.total, 2);
+        assert_eq!(preview.operations_briefing_runs.new, 1);
+        assert_eq!(preview.operations_briefing_runs.skipped, 1);
+        assert_eq!(preview.workflow_templates.total, 2);
+        assert_eq!(preview.workflow_templates.new, 1);
+        assert_eq!(preview.workflow_templates.skipped, 1);
     }
 
     #[test]
@@ -1789,6 +2109,42 @@ mod tests {
     }
 
     #[test]
+    fn accepting_memory_candidate_rejects_already_written_candidate_without_resolution() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let candidate = MemoryCandidate::new(
+            "Preferred report tone".to_string(),
+            "Use concise operating language with clear owners and evidence.".to_string(),
+            MemoryCandidateSource::Manual,
+            None,
+            "User proposed this as reusable guidance.".to_string(),
+        )
+        .expect("candidate is valid");
+        let already_written_memory = MemoryRecord::from_memory_candidate(&candidate);
+
+        store
+            .append_memory_candidate(&candidate)
+            .expect("candidate appends");
+        store
+            .append_memory_record(&already_written_memory)
+            .expect("already-written candidate memory appends");
+        let error = store
+            .resolve_memory_candidate(candidate.id, true, "Looks reusable.".to_string())
+            .expect_err("already-written candidate must not resolve again");
+        let candidate_records = store
+            .list_memory_candidate_records()
+            .expect("candidate records load");
+        let memories = store.list_memory_records().expect("memories load");
+
+        assert!(matches!(error, EventStoreError::InvalidState(_)));
+        assert_eq!(
+            candidate_records[0].effective_status,
+            MemoryCandidateStatus::Pending
+        );
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].id, already_written_memory.id);
+    }
+
+    #[test]
     fn linking_memory_candidate_accepts_candidate_and_keeps_related_memories() {
         let store = EventStore::open_memory().expect("memory store opens");
         let task = TaskRecord::new(
@@ -1841,11 +2197,35 @@ mod tests {
         );
         assert_eq!(memories.len(), 2);
         assert_eq!(links.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&links[0]).expect("link serializes")["relation"],
+            "extends"
+        );
         assert_eq!(links[0].source_memory_id, accepted_memory.id);
         assert_eq!(links[0].target_memory_id, original_memory.id);
         assert_eq!(links[0].candidate_id, Some(candidate.id));
         assert_eq!(accepted_memory.linked_memory_ids, vec![original_memory.id]);
         assert_eq!(original_memory.linked_memory_ids, vec![accepted_memory.id]);
+        assert_eq!(
+            serde_json::to_value(&accepted_memory.linked_memories[0]).expect("summary serializes")
+                ["relation"],
+            "extends"
+        );
+        assert_eq!(
+            serde_json::to_value(&original_memory.linked_memories[0]).expect("summary serializes")
+                ["relation"],
+            "extends"
+        );
+        assert_eq!(
+            serde_json::to_value(&accepted_memory.linked_memories[0]).expect("summary serializes")
+                ["note"],
+            "Keep both memories and mark them related."
+        );
+        assert_eq!(
+            serde_json::to_value(&original_memory.linked_memories[0]).expect("summary serializes")
+                ["note"],
+            "Keep both memories and mark them related."
+        );
         assert_eq!(
             accepted_memory.linked_memories[0].title,
             original_memory.title
@@ -1853,6 +2233,597 @@ mod tests {
         assert_eq!(
             original_memory.linked_memories[0].title,
             accepted_memory.title
+        );
+    }
+
+    #[test]
+    fn linking_memory_candidate_rejects_already_written_candidate_without_resolution() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let conflict_task = TaskRecord::new(
+            "Preferred report tone".to_string(),
+            "Use concise operating language with owners.".to_string(),
+        )
+        .expect("task is valid");
+        let conflict_memory = MemoryRecord::from_task_record(&conflict_task);
+        let candidate = MemoryCandidate::new_with_metadata(
+            "Preferred report tone".to_string(),
+            "Use concise operating language with owners and evidence.".to_string(),
+            MemoryCandidateSource::Manual,
+            None,
+            "User proposed this as reusable guidance.".to_string(),
+            MemoryType::WorkflowRule,
+            MemoryScope::Project,
+            MemorySensitivity::Normal,
+            MemoryLifecycle::Active,
+        )
+        .expect("candidate is valid");
+        let already_written_memory = MemoryRecord::from_memory_candidate(&candidate);
+
+        store
+            .append_memory_record(&conflict_memory)
+            .expect("conflict memory appends");
+        store
+            .append_memory_candidate(&candidate)
+            .expect("candidate appends");
+        store
+            .append_memory_record(&already_written_memory)
+            .expect("duplicate candidate memory appends");
+        let error = store
+            .link_memory_candidate_to_conflicts_with_relation(
+                candidate.id,
+                vec![conflict_memory.id],
+                MemoryRelationKind::Extends,
+                "Link stale unresolved candidate.".to_string(),
+            )
+            .expect_err("already-written candidate must not resolve again");
+
+        assert!(matches!(error, EventStoreError::InvalidState(_)));
+        let candidate_records = store
+            .list_memory_candidate_records()
+            .expect("candidate records load");
+        let links = store.list_memory_record_links().expect("links load");
+        assert_eq!(
+            candidate_records[0].effective_status,
+            MemoryCandidateStatus::Pending
+        );
+        assert!(links.is_empty());
+    }
+
+    #[test]
+    fn linking_memory_candidate_accepts_explicit_relation() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let task = TaskRecord::new(
+            "Preferred report tone".to_string(),
+            "Use concise operating language.".to_string(),
+        )
+        .expect("task is valid");
+        let existing_memory = MemoryRecord::from_task_record(&task);
+        let candidate = MemoryCandidate::new(
+            "Preferred report tone".to_string(),
+            "Use concise operating language with owners and evidence.".to_string(),
+            MemoryCandidateSource::Manual,
+            None,
+            "User wants to keep both instructions as related context.".to_string(),
+        )
+        .expect("candidate is valid");
+
+        store
+            .append_memory_record(&existing_memory)
+            .expect("memory appends");
+        store
+            .append_memory_candidate(&candidate)
+            .expect("candidate appends");
+        store
+            .link_memory_candidate_to_conflicts_with_relation(
+                candidate.id,
+                vec![existing_memory.id],
+                MemoryRelationKind::Related,
+                "Keep both memories as related context.".to_string(),
+            )
+            .expect("candidate links with explicit relation");
+
+        let memories = store.list_memory_records().expect("memories load");
+        let links = store.list_memory_record_links().expect("links load");
+        let accepted_memory = memories
+            .iter()
+            .find(|memory| memory.source_id == Some(candidate.id))
+            .expect("accepted memory is written");
+        let original_memory = memories
+            .iter()
+            .find(|memory| memory.id == existing_memory.id)
+            .expect("original memory is preserved");
+
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].relation, MemoryRelationKind::Related);
+        assert_eq!(
+            accepted_memory.linked_memories[0].relation,
+            MemoryRelationKind::Related
+        );
+        assert_eq!(
+            original_memory.linked_memories[0].relation,
+            MemoryRelationKind::Related
+        );
+    }
+
+    #[test]
+    fn linking_memory_candidate_rejects_non_conflicting_targets() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let task = TaskRecord::new(
+            "Source citation rule".to_string(),
+            "Always keep source traceability visible.".to_string(),
+        )
+        .expect("task is valid");
+        let unrelated_memory = MemoryRecord::from_task_record(&task);
+        let candidate = MemoryCandidate::new(
+            "Preferred report tone".to_string(),
+            "Use concise operating language with owners and evidence.".to_string(),
+            MemoryCandidateSource::Manual,
+            None,
+            "User wants this as reusable guidance.".to_string(),
+        )
+        .expect("candidate is valid");
+
+        store
+            .append_memory_record(&unrelated_memory)
+            .expect("memory appends");
+        store
+            .append_memory_candidate(&candidate)
+            .expect("candidate appends");
+        let error = store
+            .link_memory_candidate_to_conflicts_with_relation(
+                candidate.id,
+                vec![unrelated_memory.id],
+                MemoryRelationKind::Related,
+                "This target is not a current conflict.".to_string(),
+            )
+            .expect_err("non-conflicting target is rejected");
+        let candidate_records = store
+            .list_memory_candidate_records()
+            .expect("candidate records load");
+        let memories = store.list_memory_records().expect("memories load");
+        let links = store.list_memory_record_links().expect("links load");
+
+        assert!(matches!(error, EventStoreError::InvalidState(_)));
+        assert_eq!(
+            candidate_records[0].effective_status,
+            MemoryCandidateStatus::Pending
+        );
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].id, unrelated_memory.id);
+        assert!(links.is_empty());
+    }
+
+    #[test]
+    fn legacy_self_link_events_are_ignored_when_projecting_memory_graph() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let task = TaskRecord::new(
+            "Briefing tone rule".to_string(),
+            "Use concise operating language.".to_string(),
+        )
+        .expect("task is valid");
+        let briefing_memory = MemoryRecord::from_task_record(&task);
+        let legacy_self_link = MemoryRecordLink {
+            id: Uuid::new_v4(),
+            source_memory_id: briefing_memory.id,
+            target_memory_id: briefing_memory.id,
+            candidate_id: None,
+            relation: MemoryRelationKind::Related,
+            note: "Legacy self-loop should not be projected.".to_string(),
+            created_at: Utc::now(),
+        };
+        let event = KernelEvent::new(MEMORY_RECORD_LINKED_EVENT, &legacy_self_link)
+            .expect("legacy self-link event serializes");
+
+        store
+            .append_memory_record(&briefing_memory)
+            .expect("briefing memory appends");
+        store.append(&event).expect("legacy self-link appends");
+        let memories = store.list_memory_records().expect("memories load");
+
+        assert_eq!(
+            store.list_memory_record_links().expect("links load").len(),
+            1
+        );
+        assert_eq!(memories.len(), 1);
+        assert!(memories[0].linked_memory_ids.is_empty());
+        assert!(memories[0].linked_memories.is_empty());
+    }
+
+    #[test]
+    fn appending_memory_record_link_rejects_self_link() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let task = TaskRecord::new(
+            "Briefing tone rule".to_string(),
+            "Use concise operating language.".to_string(),
+        )
+        .expect("task is valid");
+        let briefing_memory = MemoryRecord::from_task_record(&task);
+        let link = MemoryRecordLink {
+            id: Uuid::new_v4(),
+            source_memory_id: briefing_memory.id,
+            target_memory_id: briefing_memory.id,
+            candidate_id: None,
+            relation: MemoryRelationKind::Related,
+            note: "A memory must not link to itself.".to_string(),
+            created_at: Utc::now(),
+        };
+
+        store
+            .append_memory_record(&briefing_memory)
+            .expect("briefing memory appends");
+        let error = store
+            .append_memory_record_link(&link)
+            .expect_err("self-link is rejected");
+
+        assert!(matches!(error, EventStoreError::InvalidState(_)));
+        assert!(store
+            .list_memory_record_links()
+            .expect("links load")
+            .is_empty());
+    }
+
+    #[test]
+    fn appending_memory_record_link_rejects_missing_memory_endpoint() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let task = TaskRecord::new(
+            "Briefing tone rule".to_string(),
+            "Use concise operating language.".to_string(),
+        )
+        .expect("task is valid");
+        let briefing_memory = MemoryRecord::from_task_record(&task);
+        let missing_memory_id = Uuid::new_v4();
+        let link = MemoryRecordLink::new(
+            briefing_memory.id,
+            missing_memory_id,
+            None,
+            MemoryRelationKind::Related,
+            "Missing endpoints must not be persisted as graph edges.".to_string(),
+        )
+        .expect("memory link shape is valid");
+
+        store
+            .append_memory_record(&briefing_memory)
+            .expect("briefing memory appends");
+        let error = store
+            .append_memory_record_link(&link)
+            .expect_err("link with missing target is rejected");
+
+        assert!(matches!(error, EventStoreError::NotFound(_)));
+        assert!(store
+            .list_memory_record_links()
+            .expect("links load")
+            .is_empty());
+    }
+
+    #[test]
+    fn appending_memory_record_link_skips_duplicate_memory_pair() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let briefing_task = TaskRecord::new(
+            "Briefing tone rule".to_string(),
+            "Use concise operating language.".to_string(),
+        )
+        .expect("task is valid");
+        let audit_task = TaskRecord::new(
+            "Audit trail standard".to_string(),
+            "Keep source traceability visible.".to_string(),
+        )
+        .expect("task is valid");
+        let briefing_memory = MemoryRecord::from_task_record(&briefing_task);
+        let audit_memory = MemoryRecord::from_task_record(&audit_task);
+        let first_link = MemoryRecordLink::new(
+            briefing_memory.id,
+            audit_memory.id,
+            None,
+            MemoryRelationKind::Related,
+            "Keep these memories related.".to_string(),
+        )
+        .expect("memory link is valid");
+        let reversed_duplicate = MemoryRecordLink::new(
+            audit_memory.id,
+            briefing_memory.id,
+            None,
+            MemoryRelationKind::Related,
+            "Duplicate relation from the other direction.".to_string(),
+        )
+        .expect("reversed memory link is valid");
+
+        store
+            .append_memory_record(&briefing_memory)
+            .expect("briefing memory appends");
+        store
+            .append_memory_record(&audit_memory)
+            .expect("audit memory appends");
+        store
+            .append_memory_record_link(&first_link)
+            .expect("first memory link appends");
+        store
+            .append_memory_record_link(&reversed_duplicate)
+            .expect("duplicate memory link is idempotent");
+        let links = store.list_memory_record_links().expect("links load");
+
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].source_memory_id, briefing_memory.id);
+        assert_eq!(links[0].target_memory_id, audit_memory.id);
+    }
+
+    #[test]
+    fn appending_memory_record_link_allows_more_specific_relation_for_existing_pair() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let briefing_task = TaskRecord::new(
+            "Briefing tone rule".to_string(),
+            "Use concise operating language.".to_string(),
+        )
+        .expect("task is valid");
+        let audit_task = TaskRecord::new(
+            "Audit trail standard".to_string(),
+            "Keep source traceability visible.".to_string(),
+        )
+        .expect("task is valid");
+        let briefing_memory = MemoryRecord::from_task_record(&briefing_task);
+        let audit_memory = MemoryRecord::from_task_record(&audit_task);
+        let broad_link = MemoryRecordLink::new(
+            briefing_memory.id,
+            audit_memory.id,
+            None,
+            MemoryRelationKind::Related,
+            "Initial broad relation.".to_string(),
+        )
+        .expect("broad memory link is valid");
+        let specific_link = MemoryRecordLink::new(
+            briefing_memory.id,
+            audit_memory.id,
+            None,
+            MemoryRelationKind::Updates,
+            "The audit rule supersedes the older briefing note.".to_string(),
+        )
+        .expect("specific memory link is valid");
+
+        store
+            .append_memory_record(&briefing_memory)
+            .expect("briefing memory appends");
+        store
+            .append_memory_record(&audit_memory)
+            .expect("audit memory appends");
+        store
+            .append_memory_record_link(&broad_link)
+            .expect("broad memory link appends");
+        store
+            .append_memory_record_link(&specific_link)
+            .expect("specific relation appends");
+        let links = store.list_memory_record_links().expect("links load");
+        let memories = store.list_memory_records().expect("memories load");
+        let projected_briefing = memories
+            .iter()
+            .find(|memory| memory.id == briefing_memory.id)
+            .expect("briefing memory is visible");
+
+        assert_eq!(links.len(), 2);
+        assert_eq!(
+            projected_briefing.linked_memories[0].relation,
+            MemoryRelationKind::Updates
+        );
+        assert_eq!(
+            projected_briefing.linked_memories[0].note,
+            "The audit rule supersedes the older briefing note."
+        );
+    }
+
+    #[test]
+    fn search_memory_records_matches_linked_memory_titles() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let briefing_task = TaskRecord::new(
+            "Briefing tone rule".to_string(),
+            "Use concise operating language.".to_string(),
+        )
+        .expect("task is valid");
+        let audit_task = TaskRecord::new(
+            "Audit trail standard".to_string(),
+            "Keep evidence and source traceability visible.".to_string(),
+        )
+        .expect("task is valid");
+        let briefing_memory = MemoryRecord::from_task_record(&briefing_task);
+        let audit_memory = MemoryRecord::from_task_record(&audit_task);
+        let link = MemoryRecordLink::new(
+            briefing_memory.id,
+            audit_memory.id,
+            None,
+            MemoryRelationKind::Related,
+            "Search should follow related memory summaries.".to_string(),
+        )
+        .expect("memory link is valid");
+
+        store
+            .append_memory_record(&briefing_memory)
+            .expect("briefing memory appends");
+        store
+            .append_memory_record(&audit_memory)
+            .expect("audit memory appends");
+        store
+            .append_memory_record_link(&link)
+            .expect("memory link appends");
+
+        let matches = store
+            .search_memory_records("audit trail")
+            .expect("linked memory search works");
+        let matched_ids = matches.iter().map(|memory| memory.id).collect::<Vec<_>>();
+
+        assert_eq!(matches.len(), 2);
+        assert!(matched_ids.contains(&briefing_memory.id));
+        assert!(matched_ids.contains(&audit_memory.id));
+    }
+
+    #[test]
+    fn search_memory_records_matches_linked_memory_bodies() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let briefing_task = TaskRecord::new(
+            "Briefing tone rule".to_string(),
+            "Use concise operating language.".to_string(),
+        )
+        .expect("task is valid");
+        let audit_task = TaskRecord::new(
+            "Audit trail standard".to_string(),
+            "Keep evidence and source traceability visible.".to_string(),
+        )
+        .expect("task is valid");
+        let briefing_memory = MemoryRecord::from_task_record(&briefing_task);
+        let audit_memory = MemoryRecord::from_task_record(&audit_task);
+        let link = MemoryRecordLink::new(
+            briefing_memory.id,
+            audit_memory.id,
+            None,
+            MemoryRelationKind::Related,
+            "Search should follow related memory bodies.".to_string(),
+        )
+        .expect("memory link is valid");
+
+        store
+            .append_memory_record(&briefing_memory)
+            .expect("briefing memory appends");
+        store
+            .append_memory_record(&audit_memory)
+            .expect("audit memory appends");
+        store
+            .append_memory_record_link(&link)
+            .expect("memory link appends");
+
+        let matches = store
+            .search_memory_records("source traceability visible")
+            .expect("linked memory body search works");
+        let matched_ids = matches.iter().map(|memory| memory.id).collect::<Vec<_>>();
+
+        assert_eq!(matches.len(), 2);
+        assert!(matched_ids.contains(&briefing_memory.id));
+        assert!(matched_ids.contains(&audit_memory.id));
+    }
+
+    #[test]
+    fn appending_memory_record_does_not_persist_search_projection() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let task = TaskRecord::new(
+            "Projection-free memory".to_string(),
+            "Search metadata should stay out of append-only memory events.".to_string(),
+        )
+        .expect("task is valid");
+        let mut memory = MemoryRecord::from_task_record(&task);
+        memory.search_match = MemorySearchMatch::linked(
+            MemorySearchMatchSource::LinkedMemoryBody,
+            Uuid::new_v4(),
+            MemoryRelationKind::Related,
+        );
+
+        store.append_memory_record(&memory).expect("memory appends");
+
+        let events = store
+            .list_by_type(super::MEMORY_RECORD_CREATED_EVENT, 10)
+            .expect("memory events load");
+        assert_eq!(events.len(), 1);
+        assert!(
+            !events[0].payload_json.contains("search_match"),
+            "search projection leaked into memory event payload: {}",
+            events[0].payload_json
+        );
+
+        let memories = store.list_memory_records().expect("memories load");
+        assert_eq!(memories.len(), 1);
+        assert_eq!(
+            memories[0].search_match.source,
+            MemorySearchMatchSource::Direct
+        );
+    }
+
+    #[test]
+    fn appending_memory_record_does_not_persist_link_projection() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let task = TaskRecord::new(
+            "Link projection-free memory".to_string(),
+            "Related memory summaries should stay out of append-only memory events.".to_string(),
+        )
+        .expect("task is valid");
+        let mut memory = MemoryRecord::from_task_record(&task);
+        let projected_link_id = Uuid::new_v4();
+        memory.linked_memory_ids = vec![projected_link_id];
+        memory.linked_memories = vec![MemoryRecordLinkSummary {
+            id: projected_link_id,
+            title: "Projected related memory".to_string(),
+            memory_type: MemoryType::WorkflowRule,
+            scope: MemoryScope::Project,
+            relation: MemoryRelationKind::Related,
+            note: String::new(),
+            updated_at: Utc::now(),
+        }];
+
+        store.append_memory_record(&memory).expect("memory appends");
+
+        let events = store
+            .list_by_type(super::MEMORY_RECORD_CREATED_EVENT, 10)
+            .expect("memory events load");
+        let persisted_memory: MemoryRecord =
+            serde_json::from_str(&events[0].payload_json).expect("memory event deserializes");
+        assert!(
+            persisted_memory.linked_memory_ids.is_empty(),
+            "linked memory IDs leaked into memory event payload: {}",
+            events[0].payload_json
+        );
+        assert!(
+            persisted_memory.linked_memories.is_empty(),
+            "linked memory summaries leaked into memory event payload: {}",
+            events[0].payload_json
+        );
+    }
+
+    #[test]
+    fn search_memory_records_reports_linked_body_match_source() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let briefing_task = TaskRecord::new(
+            "Briefing tone rule".to_string(),
+            "Use concise operating language.".to_string(),
+        )
+        .expect("task is valid");
+        let audit_task = TaskRecord::new(
+            "Audit trail standard".to_string(),
+            "Keep evidence and source traceability visible.".to_string(),
+        )
+        .expect("task is valid");
+        let briefing_memory = MemoryRecord::from_task_record(&briefing_task);
+        let audit_memory = MemoryRecord::from_task_record(&audit_task);
+        let link = MemoryRecordLink::new(
+            briefing_memory.id,
+            audit_memory.id,
+            None,
+            MemoryRelationKind::Derives,
+            "Search provenance should explain linked body matches.".to_string(),
+        )
+        .expect("memory link is valid");
+
+        store
+            .append_memory_record(&briefing_memory)
+            .expect("briefing memory appends");
+        store
+            .append_memory_record(&audit_memory)
+            .expect("audit memory appends");
+        store
+            .append_memory_record_link(&link)
+            .expect("memory link appends");
+
+        let matches = store
+            .search_memory_records("source traceability visible")
+            .expect("linked memory body search works");
+        let briefing_match = matches
+            .iter()
+            .find(|memory| memory.id == briefing_memory.id)
+            .expect("briefing memory is matched through linked body");
+
+        assert_eq!(
+            briefing_match.search_match.source,
+            MemorySearchMatchSource::LinkedMemoryBody
+        );
+        assert_eq!(
+            briefing_match.search_match.linked_memory_id,
+            Some(audit_memory.id)
+        );
+        assert_eq!(
+            briefing_match.search_match.relation,
+            Some(MemoryRelationKind::Derives)
         );
     }
 
@@ -2032,6 +3003,138 @@ mod tests {
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].target_memory_id, existing_memory.id);
         assert_eq!(links[0].candidate_id, Some(candidate.id));
+        assert_eq!(
+            serde_json::to_value(&links[0]).expect("link serializes")["relation"],
+            "derives"
+        );
+    }
+
+    #[test]
+    fn merging_memory_candidate_rejects_already_written_candidate_without_resolution() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let task = TaskRecord::new(
+            "Preferred report tone".to_string(),
+            "Use concise operating language.".to_string(),
+        )
+        .expect("task is valid");
+        let existing_memory = MemoryRecord::from_task_record(&task);
+        let candidate = MemoryCandidate::new_with_metadata(
+            "Preferred report tone".to_string(),
+            "Use concise operating language with owners and evidence.".to_string(),
+            MemoryCandidateSource::Manual,
+            None,
+            "User wants a richer reusable instruction.".to_string(),
+            MemoryType::WorkflowRule,
+            MemoryScope::Project,
+            MemorySensitivity::Sensitive,
+            MemoryLifecycle::Active,
+        )
+        .expect("candidate is valid");
+        let already_written_memory = MemoryRecord::from_memory_candidate(&candidate);
+
+        store
+            .append_memory_record(&existing_memory)
+            .expect("memory appends");
+        store
+            .append_memory_candidate(&candidate)
+            .expect("candidate appends");
+        store
+            .append_memory_record(&already_written_memory)
+            .expect("already-written candidate memory appends");
+        let error = store
+            .merge_memory_candidate_with_conflicts(
+                candidate.id,
+                vec![existing_memory.id],
+                "Merge stale unresolved candidate.".to_string(),
+            )
+            .expect_err("already-written candidate must not resolve again");
+        let candidate_records = store
+            .list_memory_candidate_records()
+            .expect("candidate records load");
+        let memories = store.list_memory_records().expect("memories load");
+        let deletions = store
+            .list_memory_record_deletions()
+            .expect("deletions load");
+        let links = store.list_memory_record_links().expect("links load");
+
+        assert!(matches!(error, EventStoreError::InvalidState(_)));
+        assert_eq!(
+            candidate_records[0].effective_status,
+            MemoryCandidateStatus::Pending
+        );
+        assert!(memories
+            .iter()
+            .any(|memory| memory.id == existing_memory.id));
+        assert!(deletions.is_empty());
+        assert!(links.is_empty());
+    }
+
+    #[test]
+    fn merging_memory_candidate_rejects_non_conflicting_sources_without_resolution() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let conflict_task = TaskRecord::new(
+            "Preferred report tone".to_string(),
+            "Use concise operating language.".to_string(),
+        )
+        .expect("task is valid");
+        let unrelated_task = TaskRecord::new(
+            "Source citation rule".to_string(),
+            "Always keep source traceability visible.".to_string(),
+        )
+        .expect("task is valid");
+        let conflict_memory = MemoryRecord::from_task_record(&conflict_task);
+        let unrelated_memory = MemoryRecord::from_task_record(&unrelated_task);
+        let candidate = MemoryCandidate::new_with_metadata(
+            "Preferred report tone".to_string(),
+            "Use concise operating language with owners and evidence.".to_string(),
+            MemoryCandidateSource::Manual,
+            None,
+            "User wants a richer reusable instruction.".to_string(),
+            MemoryType::WorkflowRule,
+            MemoryScope::Project,
+            MemorySensitivity::Sensitive,
+            MemoryLifecycle::Active,
+        )
+        .expect("candidate is valid");
+
+        store
+            .append_memory_record(&conflict_memory)
+            .expect("conflict memory appends");
+        store
+            .append_memory_record(&unrelated_memory)
+            .expect("unrelated memory appends");
+        store
+            .append_memory_candidate(&candidate)
+            .expect("candidate appends");
+        let error = store
+            .merge_memory_candidate_with_conflicts(
+                candidate.id,
+                vec![unrelated_memory.id],
+                "Attempt merge with non-conflicting memory.".to_string(),
+            )
+            .expect_err("non-conflicting merge source is rejected");
+        let candidate_records = store
+            .list_memory_candidate_records()
+            .expect("candidate records load");
+        let memories = store.list_memory_records().expect("memories load");
+        let deletions = store
+            .list_memory_record_deletions()
+            .expect("deletions load");
+        let links = store.list_memory_record_links().expect("links load");
+
+        assert!(matches!(error, EventStoreError::InvalidState(_)));
+        assert_eq!(
+            candidate_records[0].effective_status,
+            MemoryCandidateStatus::Pending
+        );
+        assert!(memories
+            .iter()
+            .any(|memory| memory.id == conflict_memory.id));
+        assert!(memories
+            .iter()
+            .any(|memory| memory.id == unrelated_memory.id));
+        assert!(deletions.is_empty());
+        assert!(links.is_empty());
     }
 
     #[test]
@@ -2094,6 +3197,159 @@ mod tests {
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].target_memory_id, existing_memory.id);
         assert_eq!(links[0].candidate_id, Some(candidate.id));
+        assert_eq!(
+            serde_json::to_value(&links[0]).expect("link serializes")["relation"],
+            "updates"
+        );
+    }
+
+    #[test]
+    fn replacing_memory_candidate_rejects_already_written_candidate_without_resolution() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let task = TaskRecord::new(
+            "Preferred report tone".to_string(),
+            "Use concise operating language.".to_string(),
+        )
+        .expect("task is valid");
+        let existing_memory = MemoryRecord::from_task_record(&task);
+        let candidate = MemoryCandidate::new_with_metadata(
+            "Preferred report tone".to_string(),
+            "Use concise operating language with owners and evidence.".to_string(),
+            MemoryCandidateSource::Manual,
+            None,
+            "User wants the richer instruction to supersede the old one.".to_string(),
+            MemoryType::WorkflowRule,
+            MemoryScope::Project,
+            MemorySensitivity::Sensitive,
+            MemoryLifecycle::Active,
+        )
+        .expect("candidate is valid");
+        let already_written_memory = MemoryRecord::from_memory_candidate(&candidate);
+
+        store
+            .append_memory_record(&existing_memory)
+            .expect("memory appends");
+        store
+            .append_memory_candidate(&candidate)
+            .expect("candidate appends");
+        store
+            .append_memory_record(&already_written_memory)
+            .expect("already-written candidate memory appends");
+        let error = store
+            .replace_memory_candidate_conflicts(
+                candidate.id,
+                vec![existing_memory.id],
+                "Replace stale unresolved candidate.".to_string(),
+            )
+            .expect_err("already-written candidate must not resolve again");
+        let candidate_records = store
+            .list_memory_candidate_records()
+            .expect("candidate records load");
+        let memories = store.list_memory_records().expect("memories load");
+        let deletions = store
+            .list_memory_record_deletions()
+            .expect("deletions load");
+        let links = store.list_memory_record_links().expect("links load");
+
+        assert!(matches!(error, EventStoreError::InvalidState(_)));
+        assert_eq!(
+            candidate_records[0].effective_status,
+            MemoryCandidateStatus::Pending
+        );
+        assert!(memories
+            .iter()
+            .any(|memory| memory.id == existing_memory.id));
+        assert!(deletions.is_empty());
+        assert!(links.is_empty());
+    }
+
+    #[test]
+    fn replacing_memory_candidate_rejects_non_conflicting_targets_without_resolution() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let conflict_task = TaskRecord::new(
+            "Preferred report tone".to_string(),
+            "Use concise operating language.".to_string(),
+        )
+        .expect("task is valid");
+        let unrelated_task = TaskRecord::new(
+            "Source citation rule".to_string(),
+            "Always keep source traceability visible.".to_string(),
+        )
+        .expect("task is valid");
+        let conflict_memory = MemoryRecord::from_task_record(&conflict_task);
+        let unrelated_memory = MemoryRecord::from_task_record(&unrelated_task);
+        let candidate = MemoryCandidate::new_with_metadata(
+            "Preferred report tone".to_string(),
+            "Use concise operating language with owners and evidence.".to_string(),
+            MemoryCandidateSource::Manual,
+            None,
+            "User wants the richer instruction to supersede the old one.".to_string(),
+            MemoryType::WorkflowRule,
+            MemoryScope::Project,
+            MemorySensitivity::Sensitive,
+            MemoryLifecycle::Active,
+        )
+        .expect("candidate is valid");
+
+        store
+            .append_memory_record(&conflict_memory)
+            .expect("conflict memory appends");
+        store
+            .append_memory_record(&unrelated_memory)
+            .expect("unrelated memory appends");
+        store
+            .append_memory_candidate(&candidate)
+            .expect("candidate appends");
+        let error = store
+            .replace_memory_candidate_conflicts(
+                candidate.id,
+                vec![unrelated_memory.id],
+                "Attempt replace with non-conflicting memory.".to_string(),
+            )
+            .expect_err("non-conflicting replace target is rejected");
+        let candidate_records = store
+            .list_memory_candidate_records()
+            .expect("candidate records load");
+        let memories = store.list_memory_records().expect("memories load");
+        let deletions = store
+            .list_memory_record_deletions()
+            .expect("deletions load");
+        let links = store.list_memory_record_links().expect("links load");
+
+        assert!(matches!(error, EventStoreError::InvalidState(_)));
+        assert_eq!(
+            candidate_records[0].effective_status,
+            MemoryCandidateStatus::Pending
+        );
+        assert!(memories
+            .iter()
+            .any(|memory| memory.id == conflict_memory.id));
+        assert!(memories
+            .iter()
+            .any(|memory| memory.id == unrelated_memory.id));
+        assert!(deletions.is_empty());
+        assert!(links.is_empty());
+    }
+
+    #[test]
+    fn legacy_memory_record_links_default_to_related_relation() {
+        let source_memory_id = Uuid::new_v4();
+        let target_memory_id = Uuid::new_v4();
+        let legacy_link: crate::kernel::models::MemoryRecordLink =
+            serde_json::from_value(serde_json::json!({
+                "id": Uuid::new_v4(),
+                "source_memory_id": source_memory_id,
+                "target_memory_id": target_memory_id,
+                "candidate_id": null,
+                "note": "Legacy link event without relation.",
+                "created_at": Utc::now()
+            }))
+            .expect("legacy link deserializes");
+
+        assert_eq!(
+            serde_json::to_value(&legacy_link).expect("link serializes")["relation"],
+            "related"
+        );
     }
 
     #[test]
@@ -2579,6 +3835,7 @@ mod tests {
                 due_hint: "Next briefing cycle".to_string(),
             }],
             warnings: Vec::new(),
+            context_receipt: Default::default(),
             created_at: chrono::Utc::now(),
         };
 
@@ -2620,6 +3877,81 @@ mod tests {
         assert_eq!(summary.skipped, 1);
         assert!(imported.archived_from_package);
         assert!(!existing_after_import.archived_from_package);
+    }
+
+    #[test]
+    fn archive_replay_import_redacts_local_evidence_handles() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let mut incoming = sample_operations_briefing_run();
+        incoming.evidence_folder_path = Some("D:\\operator\\private-evidence".to_string());
+        incoming.evidence_invocation_id = Some(uuid::Uuid::new_v4());
+        incoming.anomalies[0].evidence_ref = Some("source file: revenue.md".to_string());
+
+        store
+            .import_operations_briefing_runs(&[incoming.clone()])
+            .expect("run imports");
+        let runs = store
+            .list_operations_briefing_runs()
+            .expect("operations briefing runs load");
+        let imported = runs
+            .iter()
+            .find(|run| run.id == incoming.id)
+            .expect("incoming run is imported");
+
+        assert!(imported.archived_from_package);
+        assert_eq!(imported.evidence_folder_path, None);
+        assert_eq!(imported.evidence_invocation_id, None);
+        assert_eq!(
+            imported.anomalies[0].evidence_ref.as_deref(),
+            Some("source file: revenue.md")
+        );
+    }
+
+    #[test]
+    fn archive_replay_import_redacts_local_evidence_path_mentions() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let local_evidence_path = "D:\\operator\\private-evidence".to_string();
+        let mut incoming = sample_operations_briefing_run();
+        incoming.evidence_folder_path = Some(local_evidence_path.clone());
+        incoming.evidence_invocation_id = Some(uuid::Uuid::new_v4());
+        incoming.summary = format!("Imported summary referenced {local_evidence_path}.");
+        incoming.anomalies[0].signal =
+            format!("Imported anomaly referenced {local_evidence_path}.");
+        incoming.anomalies[0].evidence_ref = Some(format!("{local_evidence_path}\\revenue.md"));
+        incoming.action_plan[0].action =
+            format!("Imported action referenced {local_evidence_path}.");
+        incoming.warnings = vec![format!(
+            "Imported warning referenced {local_evidence_path}."
+        )];
+
+        store
+            .import_operations_briefing_runs(&[incoming.clone()])
+            .expect("run imports");
+        let runs = store
+            .list_operations_briefing_runs()
+            .expect("operations briefing runs load");
+        let imported = runs
+            .iter()
+            .find(|run| run.id == incoming.id)
+            .expect("incoming run is imported");
+        let imported_json = serde_json::to_string(imported).expect("run serializes");
+
+        assert!(imported
+            .summary
+            .contains("redacted source-machine evidence handle"));
+        assert!(imported.anomalies[0]
+            .signal
+            .contains("redacted source-machine evidence handle"));
+        assert_eq!(
+            imported.anomalies[0].evidence_ref.as_deref(),
+            Some("redacted source-machine evidence handle")
+        );
+        assert!(imported.action_plan[0]
+            .action
+            .contains("redacted source-machine evidence handle"));
+        assert!(imported.warnings[0].contains("redacted source-machine evidence handle"));
+        assert!(!imported_json.contains("private-evidence"));
+        assert!(!imported_json.contains("operator"));
     }
 
     #[test]

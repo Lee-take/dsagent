@@ -12,6 +12,8 @@ use crate::kernel::models::{ComputerControlBackend, ComputerScreenshotBackend};
 use crate::kernel::tool_strategy::model_driven_tool_strategy_for_current_platform;
 use crate::kernel::tool_strategy::ModelDrivenToolStrategy;
 
+pub const BRIDGE_ENDPOINT_ENV_VAR: &str = "DEEPSEEK_AGENT_OS_BRIDGE_URL";
+pub const BRIDGE_TRANSPORT_ENV_VAR: &str = "DEEPSEEK_AGENT_OS_BRIDGE_TRANSPORT";
 pub const CODEX_BRIDGE_ENDPOINT_ENV_VAR: &str = "DEEPSEEK_AGENT_OS_CODEX_BRIDGE_URL";
 pub const CODEX_BRIDGE_TRANSPORT_ENV_VAR: &str = "DEEPSEEK_AGENT_OS_CODEX_BRIDGE_TRANSPORT";
 
@@ -49,11 +51,11 @@ impl Default for CodexBridgeRuntimeStatus {
     fn default() -> Self {
         Self {
             required: false,
-            transport_env_var: CODEX_BRIDGE_TRANSPORT_ENV_VAR.to_string(),
+            transport_env_var: BRIDGE_TRANSPORT_ENV_VAR.to_string(),
             transport: None,
             transport_decision_required: false,
             transport_options: codex_bridge_transport_options(),
-            endpoint_env_var: CODEX_BRIDGE_ENDPOINT_ENV_VAR.to_string(),
+            endpoint_env_var: BRIDGE_ENDPOINT_ENV_VAR.to_string(),
             endpoint_configured: false,
             connected: false,
             note: String::new(),
@@ -92,8 +94,8 @@ pub fn computer_use_backend_status() -> ComputerUseBackendStatus {
 pub fn computer_use_backend_status_for_strategy(
     strategy: &ModelDrivenToolStrategy,
 ) -> ComputerUseBackendStatus {
-    let endpoint = std::env::var(CODEX_BRIDGE_ENDPOINT_ENV_VAR).ok();
-    let transport = std::env::var(CODEX_BRIDGE_TRANSPORT_ENV_VAR).ok();
+    let endpoint = bridge_endpoint_from_env();
+    let transport = bridge_transport_from_env();
     computer_use_backend_status_for_strategy_with_codex_bridge_config(
         strategy,
         endpoint.as_deref(),
@@ -183,34 +185,31 @@ fn codex_bridge_runtime_status(
         .map(|health| health.connected)
         .unwrap_or(false);
     let note = if !required {
-        "Codex bridge runtime is not required for the selected local Computer Use route."
-            .to_string()
+        "Selected route does not need the local bridge service.".to_string()
     } else if transport_decision_required {
-        format!(
-            "Select a Codex bridge transport with {CODEX_BRIDGE_TRANSPORT_ENV_VAR}=http or stdio before ChatGPT/Codex Computer Use can run."
-        )
+        format!("Set {BRIDGE_TRANSPORT_ENV_VAR}=http before bridge-routed Computer Use can run.")
     } else if matches!(transport, Some(CodexBridgeTransport::Http)) && !endpoint_configured {
         format!(
-            "Set {CODEX_BRIDGE_ENDPOINT_ENV_VAR} to a local HTTP Codex bridge endpoint before ChatGPT/Codex Computer Use can run."
+            "Set {BRIDGE_ENDPOINT_ENV_VAR} to the local HTTP bridge service address before bridge-routed Computer Use can run."
         )
     } else if let Some(health) = http_health {
         health.note
     } else if matches!(transport, Some(CodexBridgeTransport::Stdio)) {
-        "Codex bridge stdio sidecar is deferred in this MVP; use an external loopback HTTP bridge runtime instead."
+        "Local bridge stdio route is deferred in this preview; use a local loopback HTTP bridge service instead."
             .to_string()
     } else {
         format!(
-            "Set {CODEX_BRIDGE_ENDPOINT_ENV_VAR} to a local Codex bridge endpoint before ChatGPT/Codex Computer Use can run."
+            "Set {BRIDGE_ENDPOINT_ENV_VAR} to the local bridge service address before bridge-routed Computer Use can run."
         )
     };
 
     CodexBridgeRuntimeStatus {
         required,
-        transport_env_var: CODEX_BRIDGE_TRANSPORT_ENV_VAR.to_string(),
+        transport_env_var: BRIDGE_TRANSPORT_ENV_VAR.to_string(),
         transport,
         transport_decision_required,
         transport_options: codex_bridge_transport_options(),
-        endpoint_env_var: CODEX_BRIDGE_ENDPOINT_ENV_VAR.to_string(),
+        endpoint_env_var: BRIDGE_ENDPOINT_ENV_VAR.to_string(),
         endpoint_configured,
         connected,
         note,
@@ -220,14 +219,26 @@ fn codex_bridge_runtime_status(
 pub fn codex_bridge_transport_options() -> Vec<CodexBridgeTransportOption> {
     vec![CodexBridgeTransportOption {
         value: CodexBridgeTransport::Http,
-        label: "External HTTP bridge".to_string(),
-        note: "Use an external loopback HTTP service with health, screenshot, control, and network-search endpoints.".to_string(),
+        label: "Local HTTP bridge service".to_string(),
+        note: "Use a local loopback HTTP service with health, screen-inspection, computer-control, and web-search endpoints.".to_string(),
     }]
 }
 
 struct CodexBridgeHealthProbe {
     connected: bool,
     note: String,
+}
+
+pub fn bridge_transport_from_env() -> Option<String> {
+    std::env::var(BRIDGE_TRANSPORT_ENV_VAR)
+        .ok()
+        .or_else(|| std::env::var(CODEX_BRIDGE_TRANSPORT_ENV_VAR).ok())
+}
+
+pub fn bridge_endpoint_from_env() -> Option<String> {
+    std::env::var(BRIDGE_ENDPOINT_ENV_VAR)
+        .ok()
+        .or_else(|| std::env::var(CODEX_BRIDGE_ENDPOINT_ENV_VAR).ok())
 }
 
 fn codex_bridge_http_health_status(
@@ -238,7 +249,7 @@ fn codex_bridge_http_health_status(
         Ok(health) => codex_bridge_health_probe_from_response(strategy, health),
         Err(error) => CodexBridgeHealthProbe {
             connected: false,
-            note: format!("Codex bridge HTTP health check failed: {error}"),
+            note: format!("Local bridge HTTP health check failed: {error}"),
         },
     }
 }
@@ -255,7 +266,7 @@ fn codex_bridge_health_probe_from_response(
         return CodexBridgeHealthProbe {
             connected: false,
             note: format!(
-                "Codex bridge HTTP health check returned contract version {}, expected {}.",
+                "Local bridge HTTP health check returned bridge version {}, expected {}.",
                 health.contract_version, CODEX_BRIDGE_CONTRACT_VERSION
             ),
         };
@@ -270,7 +281,7 @@ fn codex_bridge_health_probe_from_response(
         return CodexBridgeHealthProbe {
             connected: false,
             note: format!(
-                "Codex bridge HTTP health check reached {} {}, but required capabilities are unavailable: {}.",
+                "Local bridge HTTP health check reached {} {}, but required routes are unavailable: {}.",
                 health.runtime_name,
                 health.runtime_version,
                 missing.join(", ")
@@ -281,7 +292,7 @@ fn codex_bridge_health_probe_from_response(
     CodexBridgeHealthProbe {
         connected: true,
         note: format!(
-            "Codex bridge HTTP health check connected to {} {}.",
+            "Local bridge HTTP health check connected to {} {}.",
             health.runtime_name, health.runtime_version
         ),
     }
@@ -339,21 +350,21 @@ fn computer_screenshot_note(
 ) -> String {
     match strategy.computer_screenshot_backend {
         ComputerScreenshotBackend::CodexBridgeScreenCapture if codex_bridge_connected => {
-            "screen pixels are routed through the connected Codex bridge contract for the selected large model"
+            "Screen inspection uses the connected local bridge service for the selected model route"
                 .to_string()
         }
         ComputerScreenshotBackend::CodexBridgeScreenCapture => {
-            "screen pixels are routed through the Codex bridge contract for the selected large model, but the bridge runtime is not connected"
+            "Screen inspection uses the local bridge service for the selected model route, but the service is not connected"
                 .to_string()
         }
         ComputerScreenshotBackend::LocalWindowsScreenCapture => {
-            "screen pixels are routed through the local Windows screen capture library".to_string()
+            "Screen inspection uses the local Windows screen route".to_string()
         }
         ComputerScreenshotBackend::LocalMacosScreenCapture => {
-            "screen pixels are routed through the local macOS screen capture library".to_string()
+            "Screen inspection uses the local macOS screen route".to_string()
         }
         ComputerScreenshotBackend::CodexStyleScreenCapture => {
-            "legacy codex-style screen capture backend is configured but not connected".to_string()
+            "Legacy screen inspection route is configured, but the local bridge service is not connected".to_string()
         }
     }
 }
@@ -368,19 +379,19 @@ fn computer_screenshot_permission_required(strategy: &ModelDrivenToolStrategy) -
 fn computer_screenshot_permission_note(strategy: &ModelDrivenToolStrategy) -> String {
     match strategy.computer_screenshot_backend {
         ComputerScreenshotBackend::LocalMacosScreenCapture => {
-            "macOS requires Screen Recording permission for local screen pixel capture."
+            "macOS requires Screen Recording permission for local screen inspection."
                 .to_string()
         }
         ComputerScreenshotBackend::LocalWindowsScreenCapture => {
-            "Local Windows desktop capture usually runs without a separate OS permission prompt, but secure desktops and protected windows can block pixels."
+            "Local Windows desktop screen inspection usually runs without a separate OS permission prompt, but secure desktops and protected windows can block capture."
                 .to_string()
         }
         ComputerScreenshotBackend::CodexBridgeScreenCapture => {
-            "Connect a Codex bridge runtime before requesting bridge-routed screen pixels."
+            "Connect the local bridge service before requesting bridge-routed screen inspection."
                 .to_string()
         }
         ComputerScreenshotBackend::CodexStyleScreenCapture => {
-            "Connect the legacy Codex-style screen capture runtime before requesting screen pixels."
+            "Connect the legacy screen inspection route before requesting screen inspection."
                 .to_string()
         }
     }
@@ -392,22 +403,22 @@ fn computer_control_note(
 ) -> String {
     match strategy.computer_control_backend {
         ComputerControlBackend::CodexBridgeInputControl if codex_bridge_connected => {
-            "mouse and keyboard control is routed through the connected Codex bridge contract for the selected large model"
+            "Mouse and keyboard control uses the connected local bridge service for the selected model route"
                 .to_string()
         }
         ComputerControlBackend::CodexBridgeInputControl => {
-            "mouse and keyboard control is routed through the Codex bridge contract for the selected large model, but the bridge runtime is not connected"
+            "Mouse and keyboard control uses the local bridge service for the selected model route, but the service is not connected"
                 .to_string()
         }
         ComputerControlBackend::LocalWindowsInputControl => {
-            "mouse and keyboard control is routed through the local Windows input library"
+            "Mouse and keyboard control uses the local Windows input route"
                 .to_string()
         }
         ComputerControlBackend::LocalMacosInputControl => {
-            "mouse and keyboard control is routed through the local macOS input library".to_string()
+            "Mouse and keyboard control uses the local macOS input route".to_string()
         }
         ComputerControlBackend::CodexStyleInputControl => {
-            "legacy codex-style mouse and keyboard backend is configured but not connected"
+            "Legacy mouse and keyboard control route is configured, but the local bridge service is not connected"
                 .to_string()
         }
     }
@@ -431,11 +442,11 @@ fn computer_control_permission_note(strategy: &ModelDrivenToolStrategy) -> Strin
                 .to_string()
         }
         ComputerControlBackend::CodexBridgeInputControl => {
-            "Connect a Codex bridge runtime before requesting bridge-routed mouse and keyboard control."
+            "Connect the local bridge service before requesting bridge-routed mouse and keyboard control."
                 .to_string()
         }
         ComputerControlBackend::CodexStyleInputControl => {
-            "Connect the legacy Codex-style input runtime before requesting mouse and keyboard control."
+            "Connect the legacy mouse and keyboard route before requesting mouse and keyboard control."
                 .to_string()
         }
     }
@@ -608,12 +619,12 @@ mod tests {
         assert!(!status.codex_bridge.connected);
         assert_eq!(
             status.codex_bridge.endpoint_env_var,
-            super::CODEX_BRIDGE_ENDPOINT_ENV_VAR
+            super::BRIDGE_ENDPOINT_ENV_VAR
         );
         assert!(status
             .codex_bridge
             .note
-            .contains(super::CODEX_BRIDGE_ENDPOINT_ENV_VAR));
+            .contains(super::BRIDGE_ENDPOINT_ENV_VAR));
     }
 
     #[test]
@@ -631,7 +642,7 @@ mod tests {
         assert!(status
             .codex_bridge
             .transport_env_var
-            .contains("CODEX_BRIDGE_TRANSPORT"));
+            .contains("BRIDGE_TRANSPORT"));
         assert!(status
             .codex_bridge
             .transport_options
@@ -783,15 +794,57 @@ mod tests {
     }
 
     #[test]
+    fn computer_use_status_notes_use_user_facing_route_wording() {
+        let local_strategy = model_driven_tool_strategy(
+            LargeModelProvider::DeepSeek,
+            None,
+            RuntimePlatform::Windows,
+        );
+        let local_status = computer_use_backend_status_for_strategy(&local_strategy);
+
+        assert!(local_status
+            .screenshot_note
+            .contains("Screen inspection uses the local Windows screen route"));
+        assert!(local_status
+            .control_note
+            .contains("Mouse and keyboard control uses the local Windows input route"));
+
+        let bridge_strategy =
+            model_driven_tool_strategy(LargeModelProvider::Codex, None, RuntimePlatform::Windows);
+        let bridge_status =
+            super::computer_use_backend_status_for_strategy_with_codex_bridge_config(
+                &bridge_strategy,
+                None,
+                None,
+            );
+
+        assert!(bridge_status
+            .codex_bridge
+            .note
+            .contains("Set DEEPSEEK_AGENT_OS_BRIDGE_TRANSPORT=http"));
+        assert!(bridge_status.screenshot_note.contains(
+            "Screen inspection uses the local bridge service for the selected model route"
+        ));
+        assert!(bridge_status.control_note.contains(
+            "Mouse and keyboard control uses the local bridge service for the selected model route"
+        ));
+
+        assert!(bridge_status
+            .codex_bridge
+            .note
+            .contains("bridge-routed Computer Use"));
+    }
+
+    #[test]
     fn legacy_computer_use_backend_status_json_defaults_permission_fields() {
         let status = serde_json::from_value::<super::ComputerUseBackendStatus>(serde_json::json!({
             "screenshot_backend": "local_windows_screen_capture",
             "screenshot_available": true,
-            "screenshot_note": "screen pixels are routed through the local Windows screen capture library",
+            "screenshot_note": "Screen inspection uses the local Windows screen route",
             "control_backend": "local_windows_input_control",
             "control_available": true,
             "control_requires_approval": true,
-            "control_note": "mouse and keyboard control is routed through the local Windows input library"
+            "control_note": "Mouse and keyboard control uses the local Windows input route"
         }))
         .expect("legacy status parses");
 

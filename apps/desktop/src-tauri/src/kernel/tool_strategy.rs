@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::kernel::computer_use::{bridge_endpoint_from_env, bridge_transport_from_env};
 use crate::kernel::models::{
     ComputerControlBackend, ComputerScreenshotBackend, LargeModelProvider, NetworkSearchBackend,
     NetworkSearchSourceModel,
@@ -60,12 +61,9 @@ fn native_network_search_bridge_available(provider: LargeModelProvider) -> bool 
         return false;
     }
 
-    let transport = std::env::var("DEEPSEEK_AGENT_OS_CODEX_BRIDGE_TRANSPORT")
-        .ok()
-        .map(|value| value.trim().to_string());
-    let endpoint_configured = std::env::var("DEEPSEEK_AGENT_OS_CODEX_BRIDGE_URL")
-        .ok()
-        .is_some_and(|value| !value.trim().is_empty());
+    let transport = bridge_transport_from_env().map(|value| value.trim().to_string());
+    let endpoint_configured =
+        bridge_endpoint_from_env().is_some_and(|value| !value.trim().is_empty());
 
     transport.is_some_and(|value| value.eq_ignore_ascii_case("http")) && endpoint_configured
 }
@@ -75,19 +73,18 @@ pub fn free_network_search_source_model_options() -> Vec<NetworkSearchSourceMode
         NetworkSearchSourceModelOption {
             value: NetworkSearchSourceModel::FreeWebSource,
             label: "Free web source model".to_string(),
-            note: "Use a free source-backed web-search adapter for evidence and citations."
-                .to_string(),
+            note: "Use source-linked web search for evidence and citations.".to_string(),
         },
         NetworkSearchSourceModelOption {
             value: NetworkSearchSourceModel::FreeLocalBrowser,
             label: "Free local browser search (alpha)".to_string(),
-            note: "Alpha preset: currently uses the shared source-backed HTTP adapter; reserved for local browser/search-page retrieval."
+            note: "Alpha option: currently shares the same local search implementation; reserved for local browser/search-page retrieval."
                 .to_string(),
         },
         NetworkSearchSourceModelOption {
             value: NetworkSearchSourceModel::FreeSourceAggregator,
             label: "Free source aggregator (alpha)".to_string(),
-            note: "Alpha preset: currently uses the shared source-backed HTTP adapter; reserved for pluggable source aggregation."
+            note: "Alpha option: currently shares the same local search implementation; reserved for pluggable source aggregation."
                 .to_string(),
         },
     ]
@@ -143,16 +140,16 @@ pub fn model_driven_tool_strategy_with_native_network_search_bridge(
     let (computer_screenshot_backend, computer_control_backend) =
         computer_backends_for(large_model_provider, runtime_platform);
     let note = if network_search_backend == NetworkSearchBackend::NativeLargeModel {
-        "NetworkSearch will use the selected large model through the native bridge contract and must preserve source links as evidence."
+        "Web search will use the selected model route through the configured local bridge service and must preserve source links as evidence."
             .to_string()
     } else if network_search_source_model.is_some() {
-        "NetworkSearch will use the selected free source-backed adapter and preserve source links as evidence."
+        "Web search will use the selected source-linked web-search option and preserve source links as evidence."
             .to_string()
     } else if large_model_supports_network_search {
-        "Selected large model can support NetworkSearch, but the native bridge is not connected in this alpha; choose a free source-backed adapter before running search."
+        "Selected model route can support source-linked web search after the configured local bridge service is connected; choose a free source-linked web-search option before running search."
             .to_string()
     } else {
-        "Selected large model needs a separate source-backed NetworkSearch model before NetworkSearch can run."
+        "Selected model route needs a separate source-linked web-search option before live search can run."
             .to_string()
     };
 
@@ -199,15 +196,53 @@ fn computer_backends_for(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, OnceLock};
+
+    use crate::kernel::computer_use::{
+        BRIDGE_ENDPOINT_ENV_VAR, BRIDGE_TRANSPORT_ENV_VAR, CODEX_BRIDGE_ENDPOINT_ENV_VAR,
+        CODEX_BRIDGE_TRANSPORT_ENV_VAR,
+    };
     use crate::kernel::models::{
-        ComputerControlBackend, ComputerScreenshotBackend, LargeModelProvider,
+        ComputerControlBackend, ComputerScreenshotBackend, FoundationState, LargeModelProvider,
         NetworkSearchBackend, NetworkSearchSourceModel,
     };
+    use crate::kernel::work_package::parse_work_package_json;
 
     use super::{
         free_network_search_source_model_options, model_driven_tool_strategy,
         model_driven_tool_strategy_with_native_network_search_bridge, RuntimePlatform,
     };
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = self.previous.as_deref() {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
 
     #[test]
     fn deepseek_requires_a_source_backed_network_search_model_on_windows() {
@@ -250,15 +285,15 @@ mod tests {
             .expect("source aggregator option");
 
         assert!(local_browser.label.contains("(alpha)"));
-        assert!(local_browser.note.contains("Alpha preset"));
+        assert!(local_browser.note.contains("Alpha option"));
         assert!(local_browser
             .note
-            .contains("shared source-backed HTTP adapter"));
+            .contains("same local search implementation"));
         assert!(source_aggregator.label.contains("(alpha)"));
-        assert!(source_aggregator.note.contains("Alpha preset"));
+        assert!(source_aggregator.note.contains("Alpha option"));
         assert!(source_aggregator
             .note
-            .contains("shared source-backed HTTP adapter"));
+            .contains("same local search implementation"));
     }
 
     #[test]
@@ -318,7 +353,51 @@ mod tests {
             strategy.network_search_backend,
             NetworkSearchBackend::NativeLargeModel
         );
-        assert!(strategy.note.contains("native"));
+        assert!(strategy.note.contains("configured local bridge service"));
+    }
+
+    #[test]
+    fn native_network_search_bridge_detects_neutral_bridge_env_vars() {
+        let _lock = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env lock");
+        let _transport = EnvVarGuard::set(BRIDGE_TRANSPORT_ENV_VAR, "http");
+        let _endpoint = EnvVarGuard::set(BRIDGE_ENDPOINT_ENV_VAR, "http://127.0.0.1:45999");
+        let _legacy_transport = EnvVarGuard::remove(CODEX_BRIDGE_TRANSPORT_ENV_VAR);
+        let _legacy_endpoint = EnvVarGuard::remove(CODEX_BRIDGE_ENDPOINT_ENV_VAR);
+
+        let strategy = super::model_driven_tool_strategy_for_current_platform(
+            LargeModelProvider::ChatGpt,
+            None,
+        );
+
+        assert!(!strategy.network_search_source_model_required);
+        assert_eq!(
+            strategy.network_search_backend,
+            NetworkSearchBackend::NativeLargeModel
+        );
+
+        let legacy_package_json = serde_json::json!({
+            "version": "deepseek-agent-os.work-package.v1",
+            "exported_at": chrono::Utc::now(),
+            "foundation_state": FoundationState::default(),
+            "task_records": []
+        })
+        .to_string();
+        let package = parse_work_package_json(&legacy_package_json).expect("legacy package parses");
+
+        assert_eq!(
+            package.tool_readiness.computer_use.codex_bridge.transport,
+            None
+        );
+        assert!(
+            !package
+                .tool_readiness
+                .computer_use
+                .codex_bridge
+                .endpoint_configured
+        );
     }
 
     #[test]

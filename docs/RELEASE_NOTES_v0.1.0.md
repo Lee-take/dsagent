@@ -1,10 +1,12 @@
-# DeepSeek Agent OS v0.0.1 Release Notes
+# DeepSeek Agent OS v0.1.0 Candidate Notes
 
-Status: early Windows-first open-source preview.
+Status: Windows-first source-tree test candidate. The code is ready to upload
+for maintainer testing, but no new GitHub tag or release should be created
+until the maintainer finishes manual testing and explicitly resumes publication.
 
-Packaging: source-first release. No public installer binaries are attached for
-this preview unless the maintainer later explicitly approves unsigned binary
-distribution.
+Packaging: source-first release candidate. No public installer binaries are
+attached for this preview unless the maintainer later explicitly approves
+unsigned binary distribution for a specific release.
 
 Maintainer handoff notes, decision logs, and internal planning files are kept as
 local-only continuation material and are intentionally excluded from public
@@ -34,12 +36,13 @@ DeepSeek, and does not claim any DeepSeek ownership, authorization, or
 endorsement. The DeepSeek name is used only to describe compatibility and
 support for DeepSeek models.
 
-## Why 0.0.1
+## Why 0.1.0
 
-The project is not complete. `v0.0.1` is intentionally defined as an early
-preview so the public GitHub release does not overstate product maturity. The
-Windows build/install/launch/run path has been locally validated through the
-repeatable release gate and installed UI workflow smoke.
+The project is not complete. `0.1.0` is intentionally defined as a
+Windows-first test candidate so the source tree can move forward without
+overstating product maturity. The Windows build/install/launch/run path has
+been locally validated through the repeatable release gate and installed UI
+workflow smoke.
 
 After the Windows preview continues to pass local release gates, the next
 platform target is macOS. The repository already contains a macOS Tauri

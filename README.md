@@ -6,7 +6,7 @@ Independent local-first desktop Agent OS for DeepSeek model support.
 
 ### English
 
-DeepSeek Agent OS, also called DS Agent OS in short, is an independent
+DeepSeek Agent OS is packaged locally as DS Agent. It is an independent
 open-source desktop project written to help colleagues use DeepSeek large
 language models more conveniently in daily work. It focuses on local desktop
 agent workflows, permissioned tools, auditable memory, source traceability,
@@ -32,7 +32,7 @@ projects like this possible.
 
 ### 中文
 
-DeepSeek Agent OS，也可以简称 DS Agent OS，是一个独立开源的桌面端项目。写这个项目
+DeepSeek Agent OS 本地安装名为 DS Agent，是一个独立开源的桌面端项目。写这个项目
 的初衷，是为了让同事们在日常工作中更方便地使用 DeepSeek 大模型。项目重点放在本地
 桌面 Agent 工作流、可授权工具、可审计记忆、来源追溯、本地文件和经营管理工作流包。
 
@@ -56,29 +56,32 @@ engineering inspiration, with respect for their licenses and maintainers.
 本仓库不应复制任何私有、泄露或未授权代码。公开开源项目仅作为学习材料和工程参考，
 并尊重原项目许可证和维护者权益。
 
-## 0.0.1 Status / 0.0.1 状态
+## 0.1.0 Status / 0.1.0 状态
 
-Version `0.0.1` is an early Windows-first open-source preview. The codebase is
-not a finished agent product yet. The immediate development priority is to make
-the desktop app reliably build, install, launch, and run on Windows before
-expanding the product surface.
+Version `0.1.0` is the current Windows-first test candidate in the source tree.
+The codebase is not a finished agent product yet. The current Windows
+build/install/launch/run path is locally verified through the repeatable
+release gate and installed UI workflow smoke. This commit is intended for
+maintainer testing before any new GitHub tag or release is published.
 
-After the Windows version is running reliably, the next platform target is
-macOS. A macOS Tauri packaging config already exists in the repository, but
-macOS validation and release work will come after the Windows baseline is
-stable.
+After the Windows preview continues to pass local release gates, the next
+platform target is macOS. A macOS Tauri packaging config already exists in the
+repository, but macOS validation and release work will follow after the Windows
+preview continues to pass local release gates.
 
-`0.0.1` 是早期 Windows 优先的开源预览版本，还不是完整成熟的 Agent 产品。当前最
-重要的开发目标，是先让桌面应用在 Windows 系统下稳定完成构建、安装、启动和运行，然
-后再逐步完善产品能力。
+`0.1.0` 是当前源码树里的 Windows 优先测试候选版本，还不是完整成熟的 Agent 产品。
+当前 Windows 构建、安装、启动和运行路径已经通过本地 release gate 与 installed UI
+workflow smoke 验证。本次先上传代码供维护者人工测试，暂不创建新的 GitHub tag 或
+release。
 
-Windows 版本真正跑通并稳定后，下一步会推进 macOS 版本。仓库里已经保留了 macOS 的
-Tauri 打包配置，但 macOS 的验证和发布会放在 Windows 基线稳定之后。
+Windows 预览版持续通过本地 release gates 后，下一步会推进 macOS 版本。仓库里已经保
+留了 macOS 的 Tauri 打包配置，macOS 的验证和发布会在 Windows 预览版持续通过本地
+release gates 后推进。
 
 License: Apache-2.0.
 
-The public `v0.0.1` release is source-first. Windows installer artifacts can be
-built locally for validation, but public binary distribution should stay
+The public `v0.0.1` release remains unchanged. Windows installer artifacts can
+be built locally for validation, but public binary distribution should stay
 conservative until signing, packaging, and provenance are ready.
 
 ## Basic Functions / 基本功能
@@ -94,21 +97,32 @@ The current codebase is intended to provide these basic functions:
   variable without storing or showing the key value.
 - Optional local DeepSeek smoke tests for Chat Completions and Operations
   Briefing synthesis.
-- Permissioned tool surfaces for file, network, browser, terminal, drive,
-  email, and Computer Use operations.
+- Permissioned tool surfaces for file, network, browser, terminal,
+  local-folder read/export, email read/draft/send approval records, and
+  Computer Use operations.
 - Append-only local audit records for access requests, approvals, tool
   attempts, workflow runs, memory records, and work packages.
-- Memory Studio for reviewable memories, edits, deletion, expiration, and
-  explicit conflict handling.
-- Operations Briefing workflow that reads local evidence, drafts a management
-  brief, and can use DeepSeek synthesis when configured.
-- Local report and package export paths for Markdown, HTML, lightweight PDF,
-  and work-package JSON.
+- Memory Studio for reviewable memories, edits, deletion, expiration, linked
+  memory title/body search, linked memory search match source, linked memory
+  relation notes, manual existing-memory links, and explicit conflict handling.
+- Operations Briefing workflow:
+  - Reads local evidence and drafts a management brief.
+  - Can use DeepSeek synthesis when configured.
+  - Exports Markdown, HTML, lightweight PDF, and work-package JSON to local paths.
+  - Shows context receipts with loop mode, workflow policy, selected evidence,
+    validation, and intentional omissions.
+  - During work-package imports, previews new/skipped workflow templates,
+    new/skipped pending memory candidates, and new/skipped archived briefing runs.
+  - Keeps imported archived runs as read-only replay details while redacted
+    source-machine evidence handles stay visible as a safety boundary.
+  - Uses blank operator templates under
+    `docs/templates/operations-briefing-evidence/` for local evidence-folder
+    seeding.
 - Windows NSIS debug installer build path for local validation.
 
 Current limits are intentional: real mailbox connectors, real cloud-drive
-connectors, managed bridge sidecars, hosted sync, broad plugin execution, and
-polished signed installers are not complete in `0.0.1`.
+connectors, automatic local bridge-service management, hosted sync, broad
+plugin execution, and polished signed installers are not complete in `0.1.0`.
 
 ### 中文
 
@@ -119,36 +133,41 @@ polished signed installers are not complete in `0.0.1`.
 - 通过本地 `DEEPSEEK_API_KEY` 环境变量检测 DeepSeek 可用性，但不保存、不展示密钥
   明文。
 - 可选的本地 DeepSeek 联调脚本，用于 Chat Completions 和经营简报合成验证。
-- 面向文件、网络、浏览器、终端、网盘、本地邮件边界和 Computer Use 的权限化工具
-  入口。
+- 面向文件、网络、浏览器、终端、本地文件夹读取/导出、邮件读取/草稿/发送审批记录和
+  Computer Use 的权限化工具入口。
 - 本地追加式审计记录，用于记录授权请求、审批、工具调用、工作流运行、记忆记录和工
   作包。
-- Memory Studio，用于记忆候选、编辑、删除、过期和冲突处理。
-- Operations Briefing 经营简报工作流，可读取本地证据、生成管理简报，并在配置
-  DeepSeek 后调用模型合成。
-- 本地报告和工作包导出，包括 Markdown、HTML、轻量 PDF 和 work-package JSON。
+- Memory Studio，用于记忆候选、编辑、删除、过期、关联记忆标题/正文搜索、关联记忆搜索命中来源、
+  关联说明、手动关联已有长期记忆和冲突处理。
+- Operations Briefing 经营简报工作流：
+  - 读取本地证据并生成管理简报。
+  - 配置 DeepSeek 后可调用模型合成。
+  - 将 Markdown、HTML、轻量 PDF 和 work-package JSON 导出到本地路径。
+  - 展示上下文回执，包括循环模式、工作流策略、选入证据、验证结果和有意省略内容。
+  - 导入工作包时预览新增/跳过的工作流模板、待审核记忆候选和归档简报运行。
+  - 导入归档运行保持只读回放详情，同时保留已清理的源机器证据句柄作为安全边界。
+  - 使用 `docs/templates/operations-briefing-evidence/` 下的空白运营模板进行本地证据目录初始化。
 - Windows NSIS debug installer 构建路径，便于本地验证安装和运行。
 
-当前限制也要说清楚：`0.0.1` 还没有完成真实邮箱连接器、真实云盘连接器、托管式桥接
-sidecar、云同步、广泛插件执行和正式签名安装包。这一版先把 Windows 本地可运行和
-DeepSeek 基础支持打牢。
+当前限制也要说清楚：`0.1.0` 还没有完成真实邮箱连接器、真实云盘连接器、自动安装或管理本地桥接服务、
+云同步、广泛插件执行和正式签名安装包。这一版先把 Windows 本地可运行和 DeepSeek 基础支持打牢。
 
 Read first:
 
-- `PROJECT_CONTEXT.md`
-- `DECISIONS.md`
-- `SESSION_HANDOFF.md`
 - `docs/INSTALLATION.md`
 - `docs/OPEN_SOURCE_RELEASE.md`
-- `docs/RELEASE_NOTES_v0.0.1.md`
-- `docs/superpowers/specs/2026-06-28-deepseek-agent-os-architecture-design.md`
+- `docs/RELEASE_NOTES_v0.1.0.md`
 - `CONTRIBUTING.md`
 - `SECURITY.md`
 - `.env.example`
 
+Maintainer handoff notes, decision logs, and internal planning files are kept as
+local-only continuation material and are intentionally excluded from public
+source snapshots.
+
 ## Development
 
-Foundation MVP desktop commands:
+Desktop source commands:
 
 ```powershell
 npx pnpm@9.15.9 install
@@ -170,6 +189,48 @@ To run only the repository secret scan before committing or pushing:
 npx pnpm@9.15.9 test:secrets
 ```
 
+Before any publication decision for a new source-only prerelease, run the local
+release-candidate gate:
+
+```powershell
+npx pnpm@9.15.9 test:release-local
+```
+
+This runs the full project test, working-tree and staged diff whitespace checks
+(`git diff --check` and `git diff --cached --check`), and the source-only
+release guard. The source-only guard checks version/name consistency, required
+release docs, generated WebView2 loader ignore coverage, and currently tracked
+or unignored files for accidental installer/binary release artifacts, local
+runtime artifacts, generated workflow exports, unexpected binary files,
+oversized source files, and stale smoke-test release labels.
+The local gate also runs deterministic helper checks for the Windows local
+Operations Briefing smoke helper, the installed UI helper, and the release-local
+helper itself; the Windows local helper self-test does not call DeepSeek or read
+local secrets.
+When `DEEPSEEK_API_KEY` is configured locally, the gate also runs the Windows
+local Operations Briefing smoke test plus both DeepSeek live smoke tests. Use
+`npx pnpm@9.15.9 test:release-local -- --skip-live-deepseek` for an offline
+source-only pass. Use
+`npx pnpm@9.15.9 test:release-local -- --include-installed-ui` when a Windows
+DS Agent install already exists and you also want to smoke-test the installed
+WebView2 UI. Use
+`npx pnpm@9.15.9 test:release-local -- --include-installed-workflow` for the
+stronger installed-app workflow smoke, which exercises the installed app command layer,
+Operations Briefing run, and Markdown/HTML/PDF exports through the installed
+app.
+When a local DeepSeek test key and installed Windows app are available, use the
+strongest local gate before that publication decision:
+
+```powershell
+npx pnpm@9.15.9 test:release-local -- --require-live-deepseek --include-installed-workflow
+```
+
+To run only the source-only release guard:
+
+```powershell
+npx pnpm@9.15.9 test:release-source
+```
+
 `test:deepseek` is an optional local smoke test. It reads `DEEPSEEK_API_KEY`
 from the local environment, calls DeepSeek Chat Completions, and prints only
 secret-safe metadata such as model, finish reason, and token usage. It is not
@@ -180,18 +241,42 @@ npx pnpm@9.15.9 test:deepseek
 ```
 
 `test:deepseek:briefing` is the optional local workflow smoke test. It sends the
-Operations Briefing sample evidence manifest to DeepSeek, validates that the
-response matches the workflow JSON contract, and prints only counts and token
-metadata by default. When a custom evidence directory is an absolute local path,
-the script redacts that path from both the prompt and the output:
+Operations Briefing smoke sample evidence manifest from
+`docs/templates/operations-briefing-smoke-evidence` to DeepSeek, validates that
+the response matches the expected workflow result format, and prints only counts and
+token metadata by default. The bundled smoke files are marked as
+`SMOKE SAMPLE evidence for local verification only` and
+`Replace before operational use`. Replace them before pointing the workflow at
+real business evidence. When a custom evidence directory is an absolute local
+path, the script redacts that path from both the prompt and the output:
 
 ```powershell
 npx pnpm@9.15.9 test:deepseek:briefing
 ```
 
+`test:windows-installed-ui` is an optional local Windows smoke test for the
+installed app. It launches `ds-agent.exe` with a temporary WebView2 DevTools
+port, checks that the installed UI loads at `tauri.localhost`, confirms the
+desktop command layer is available, and writes a screenshot under the OS temp directory:
+
+```powershell
+npx pnpm@9.15.9 test:windows-installed-ui
+```
+
+Add `-- --workflow` to run a stronger installed-app workflow smoke. It saves
+temporary local directory settings, seeds Operations Briefing evidence templates,
+runs the briefing, exports Markdown/HTML/PDF reports, and restores the original
+local directory settings file and app-data event store. When
+`DEEPSEEK_API_KEY` is configured, it also requires a newly recorded DeepSeek
+telemetry event from the installed app process:
+
+```powershell
+npx pnpm@9.15.9 test:windows-installed-ui -- --workflow
+```
+
 Windows builds automatically merge `apps/desktop/src-tauri/tauri.windows.conf.json`
 and produce an NSIS installer under the configured Cargo target directory,
-for example `debug/bundle/nsis/DeepSeek Agent OS_0.0.1_x64-setup.exe`.
+for example `debug/bundle/nsis/DS Agent_0.1.0_x64-setup.exe`.
 
 macOS builds have a separate platform config at
 `apps/desktop/src-tauri/tauri.macos.conf.json` for `.app` and `.dmg` packaging.
@@ -217,60 +302,160 @@ not used as the workspace or data directory.
 
 ## Architecture
 
-The app uses a stable Agent OS Kernel with Workflow Packs. The first implementation slice builds the desktop shell, local event store, policy model, and DeepSeek route model.
+Harness architecture v1 runs through a stable Agent OS Kernel plus Workflow
+Packs. Loop engineering lives in the product surface: it uses permissioned tool
+boundaries, source-linked evidence, bounded workflow runs, selective context
+assembly, and token-efficient DeepSeek routing. The runtime keeps context
+focused instead of loading every available source into each request, so users
+get faster feedback while deeper workflows can still verify their evidence. The
+first public preview brings the desktop shell, local event history, policy
+model, and DeepSeek route model into one buildable Windows app.
 
-Phase 2 has started with the capability permission loop: the kernel now declares built-in file, network, browser, email, drive, terminal, and Computer Use capabilities; access requests are evaluated through policy, persisted as append-only events, and resolved through a visible approval queue in the desktop inspector. Browser browse v1, BrowserSubmit boundary v1, NetworkSearch source adapter v1, FileRead v1, FileWrite local-workspace v1, evidence-folder ingestion v1, TerminalRead v1, TerminalWrite boundary v1, EmailRead boundary v1, EmailDraft boundary v1, EmailSend approval boundary v1, DriveRead local-folder v1, DriveWrite export-package v1, Computer Screenshot boundary v1, and ComputerControl boundary v1 are the first adapters: URL browsing fetches page evidence, BrowserSubmit records high-risk form-submission approval/audit requests without filling or submitting forms, NetworkSearch runs the selected free source-backed adapter after policy approval and records source URLs plus the provider/source-adapter label as evidence, local file reading previews UTF-8 evidence files and records encoding/byte-count metadata, FileWrite writes approved UTF-8 content into the configured local workspace and records encoding/byte-count metadata while rejecting paths outside that workspace, folder ingestion creates a bounded UTF-8 text evidence manifest with encoding/byte-count metadata, TerminalRead runs allowlisted read-only diagnostics and records nonzero exits as failed tool results, TerminalWrite records high-risk approval/audit requests without executing mutating commands, EmailRead records mailbox-read approval/audit requests without reading mail, EmailDraft records draft approval/audit requests without creating mailbox drafts, EmailSend records critical outbound-email approval/audit requests without sending mail, DriveRead scans a bounded local folder for matching UTF-8 text evidence and records encoding/byte-count metadata after policy approval, DriveWrite exports the current work-package JSON into a selected local folder after policy approval and shows the local output file name in the audit excerpt, Computer Screenshot captures local screen pixels after policy approval and saves PNG evidence, ComputerControl executes approved structured mouse/keyboard actions through a local input backend, and recent tool output appears in the inspector.
+Context receipts show loop mode, workflow policy, selected evidence, memory,
+model route, token/cache state, validation results, and intentional omissions.
+Markdown and HTML report exports carry the same context receipt summary.
+Bounded repair loops rerun only the failed step with the smallest useful
+context, so DS Agent can keep ordinary tasks responsive while still leaving a
+reviewable trail for longer workflow runs.
 
-Critical one-shot approvals v1 keeps high-consequence permissions from becoming permanent grants. Non-critical explicit approvals can still be reused where appropriate, but `EmailSend` and `ComputerControl` approvals are consumed by the next same-capability invocation and must be approved again for a later attempt.
+The current 0.1.0 preview includes the permission loop for built-in local
+tools. Built-in local tools cover file, network, browser, email approval
+records, local folders, terminal diagnostics, and Computer Use surfaces; access
+requests are evaluated through policy, persisted as append-only events, and
+resolved through a visible approval queue in the desktop inspector. The first
+tool paths let users browse URLs for source evidence, run source-linked web
+search, preview local text files and evidence folders, create approved
+workspace files, run allowlisted read-only terminal diagnostics, record
+approval and audit decisions for mutating terminal and browser-form actions,
+record approval and audit decisions for email read/draft/send flows, scan local
+folders, export work-package JSON to local folders, capture approved screen
+evidence, execute approved local mouse/keyboard actions behind an unlock
+window, and inspect recent tool output.
 
-Capability grant state v1 makes that permission state visible in the inspector. Capability access records now include a derived `grant_state` so approved grants can be shown as reusable, one-shot available, or consumed without changing the append-only event payloads.
+Permission review clarity v1 keeps high-impact actions explicit. Outbound email
+and desktop control approvals authorize only the next matching attempt, while
+lower-risk approvals can stay reusable when the selected access mode allows it.
 
-Approval traceability v1 adds an optional `approval_request_id` to capability invocations. Critical EmailSend and ComputerControl retries now link the recorded invocation back to the specific approved request that authorized it, while legacy invocations without the field remain readable.
+Permission state visibility v1 shows whether a grant is reusable, ready for one
+use, or already spent, so operators can understand current access without
+reading audit internals.
 
-Recent tool output now surfaces linked approval request IDs when present, so an operator can trace a recorded tool attempt back to the exact approval request from the inspector without opening raw event JSON.
+Approval decision traceability v1 keeps high-impact retries tied to the approval
+that authorized them and keeps earlier audit history readable. Recent tool
+output gives operators a clear path from action back to decision when an
+approval record is present.
 
-Tool backend settings now record the confirmed Phase 2 direction in `FoundationState` and the runtime inspector: NetworkSearch reports the selected large model's capability, uses a native large-model bridge contract when the provider supports NetworkSearch and the local Codex bridge HTTP runtime is configured, and otherwise requires a selected free source-backed adapter before live search can run; EmailRead, EmailDraft, and EmailSend are architecture-only in this version; DriveRead and DriveWrite point to user-selected local folders and export packages instead of a cloud account; Computer Screenshot and ComputerControl use the Codex bridge contract for ChatGPT/Codex providers and local Windows/macOS backends for other providers. No API key or account credential is stored by this settings slice.
+Tool route settings v1 shows the selected model route and available tool paths
+in the runtime inspector. Web search follows the selected model route, uses a
+configured local bridge service when it can return source-linked results, and
+otherwise requires a selected source-linked web-search route before live search
+can run. The current preview keeps email read, draft, and send as approval and audit
+surfaces. It also keeps local folders and export packages separate from cloud
+accounts, while screen inspection and computer control use the configured bridge
+or local Windows/macOS route. No API key or account credential is stored by this
+settings slice.
 
-Setup and local directory contract v1 separates installation, app data, and user work directories. The runtime stores local directory settings under the OS app data directory and treats workspace, evidence, and export locations as user-selected paths on that user's machine. The setup panel uses native folder picker buttons for these paths, and the UI intentionally avoids hardcoded developer-machine paths.
+Setup directory clarity v1 keeps program files, app data, workspace, evidence,
+and export folders separate. It stores setup choices in the current user's app
+data directory and uses native folder pickers for workspace, evidence, and
+export locations.
 
-Windows installer baseline v1 adds a platform-specific Tauri config that builds an NSIS installer on Windows. A macOS `.app`/`.dmg` config is also committed, but it still needs verification on a macOS host.
+Windows packaging clarity v1 builds the local Windows preview as an NSIS
+installer. It keeps macOS packaging configured but pending verification on a
+macOS host.
 
 DeepSeek credential status v1 reads only whether `DEEPSEEK_API_KEY` is present in the local process environment and shows that status in the runtime inspector with the API base URL. DeepSeek Chat API readiness v1 also reports the derived Chat Completions endpoint, selected Flash/Pro model names, and whether local chat-completion requests are ready based on key presence. The key value is never returned to the UI, never serialized into events, and never included in exported work packages.
 
-DeepSeek Chat executor v1 adds an injectable Chat Completions transport and a reqwest-backed implementation for the official endpoint. Tests use a fake transport and never call the live API; executor errors redact the local API key before returning. NetworkSearch evidence is handled by source-backed search adapters, not by treating plain chat completions as verified web evidence.
+DeepSeek model request path v1 calls the official Chat Completions endpoint when a local API key is configured. It keeps automated tests offline, redacts local API keys from request errors, and keeps source-linked web search evidence on dedicated routes that require source URLs instead of treating plain chat completions as verified web evidence.
 
-DeepSeek cache and telemetry v1 adds an in-memory request cache for Operations Briefing DeepSeek synthesis plus append-only, secret-safe telemetry events. The telemetry records a request hash, model, cache hit/miss status, elapsed milliseconds, token usage when the provider returns it, and estimated cost when local pricing is configured; the runtime inspector shows the latest DeepSeek call status, current in-session cache size, and a clear-cache action. DeepSeek pricing config v1 stores a manual USD / 1M token price table in the user's app data directory and never hardcodes public DeepSeek prices into the open-source project.
+DeepSeek cache and usage visibility v1 keeps Operations Briefing synthesis responsive with an in-session request cache and secret-safe usage records. The runtime inspector shows the latest DeepSeek call status, cache hit/miss state, elapsed time, token usage when the provider returns it, estimated cost when local pricing is configured, current cache size, and a clear-cache action. Local pricing stays in the user's app data directory, and public source does not hardcode live DeepSeek prices.
 
-NetworkSearch route status v1 makes that product decision visible in the runtime inspector: the selected provider, native/source-model support, selected source model, execution mode, live-network status, and evidence policy are shown before a search runs. When a free source model is selected, the route switches to source-adapter execution with source links required. When a supported large model has the local native bridge configured, the route switches to native bridge contract execution with the same source-link evidence requirement.
+Web search evidence clarity v1 shows the selected search route before a web
+search runs. The app uses source-linked search when the selected model route
+cannot provide verified web results, requires source URLs before search output
+is treated as evidence, keeps approval gates in place and avoids live network
+requests while approval is pending. Reserved alpha presets disclose when they
+share the same local search implementation until separate local-browser or
+aggregator routes are ready.
 
-NetworkSearch source adapter v1 adds a source-backed HTTP client for the free source-model path. The Tauri command requires a selected source model only when the native bridge route is unavailable, preserves the existing approval gate, avoids network requests while approval is pending, and records the search URL, first result URL, and provider/source-adapter label as durable evidence when search succeeds. In the alpha, reserved free options such as local browser search and source aggregator explicitly disclose that they currently share the source-backed HTTP adapter until separate implementations are confirmed.
+Optional local web-search bridge readiness v1 uses only a configured local loopback
+bridge for supported providers and maps returned source URLs into the same
+evidence and audit trail, so ordinary chat-completion text is not treated as web
+evidence.
 
-Native NetworkSearch bridge contract v1 adds a loopback-only Codex bridge `/network-search` route for supported large-model providers. Bridge responses must include source URLs, and the app maps those URLs into the existing NetworkSearch evidence/audit boundary instead of treating ordinary chat completion text as web evidence.
+Desktop automation route clarity v1 shows whether screen inspection and desktop
+control will use the selected local route or a configured local bridge. It keeps
+desktop control visibly approval-gated before any mouse or keyboard action can
+run, and it does not silently switch routes when a configured bridge is
+unavailable.
 
-Computer Use backend status v1 exposes the selected model-driven backend direction in the runtime inspector: ChatGPT/Codex select Codex bridge screen/input contracts, other providers select local Windows/macOS screen/input backends, and ComputerControl remains visibly approval-gated before any mouse/keyboard executor can run. The current desktop build does not silently fall back from an unconnected Codex bridge to local input.
+Desktop prerequisite clarity v1 shows local screen and input prerequisites
+before a tool runs. macOS lists Screen Recording and Accessibility requirements,
+while Windows calls out foreground-desktop and secure-desktop limits instead of
+pretending every window can be inspected or controlled.
 
-Computer Use OS permission guidance v1 makes local desktop prerequisites visible in the same runtime inspector and exported tool-readiness snapshot. macOS local capture reports the Screen Recording permission requirement, macOS local control reports the Accessibility requirement, and Windows local backends report foreground-desktop and secure-desktop limitations instead of pretending every window can be inspected or controlled.
+Local bridge evidence safety v1 only accepts local loopback bridge endpoints. It keeps
+screen evidence, control actions, and source-linked web search inside the same
+approval and audit path, stores returned screen evidence in the selected evidence
+folder, and does not expose local file paths through bridge responses.
 
-Codex bridge runtime readiness v1 makes ChatGPT/Codex Computer Use routes explicit before execution. The runtime inspector and exported tool-readiness snapshot show whether a Codex bridge is required, whether `DEEPSEEK_AGENT_OS_CODEX_BRIDGE_TRANSPORT=http` has selected the MVP external HTTP runtime, whether `DEEPSEEK_AGENT_OS_CODEX_BRIDGE_URL` is configured for loopback HTTP routes, and whether the bridge is connected.
+Work-package readiness summary v1 adds a secret-safe readiness snapshot to
+exported work packages. It shows whether DeepSeek requests, source-linked web
+search, desktop automation, local folders, and selected tool routes are ready.
+The snapshot is built without storing API keys, user machine paths, running live
+model calls, capturing screens, or controlling the desktop during export.
 
-Codex bridge contract schema v1 defines a transport-neutral JSON contract with version `deepseek-agent-os.codex-bridge.v1` for health, screenshot, and control messages. Screenshot responses carry display metadata plus PNG base64 rather than local file paths, and control requests still require the same structured action strings used by the local executor.
+Audited desktop input safety v1 keeps real desktop input inside a small reviewed action set, keeps desktop control experimental and visibly gated, and requires a one-shot approval plus a local in-memory unlock code before any mouse or keyboard action can run.
 
-Codex bridge HTTP runtime v1 implements the approved external HTTP runtime for ChatGPT/Codex Computer Use routes. The desktop client only accepts loopback HTTP endpoints, posts `/health`, `/screenshot`, `/control`, and `/network-search` using the shared contract, marks bridge-routed backends available only when health reports the required capabilities, writes returned screenshot PNG bytes into the local evidence folder, and treats `stdio` sidecar spawning as deferred hardening work rather than an MVP runtime option.
+Local computer control unlock window v1 adds a short local unlock window after approval. The local operator unlocks computer control for five minutes in the inspector, computer control stays locked when the local unlock window is not active, and the unlock code stays out of audit events and exported work packages.
 
-Work-package tool readiness v1 now adds a secret-safe `tool_readiness` snapshot to exported work packages. The snapshot carries DeepSeek API readiness, NetworkSearch route/evidence gate status, Computer Use backend availability flags, local-directory setup readiness, and the model-driven tool strategy without serializing API key values or user machine paths, calling the live DeepSeek API, capturing pixels during export, or controlling the desktop.
+Computer tool route selection v1 keeps screen inspection and desktop control on
+the route users see before approval. It reports an unavailable bridge as a clear
+error, keeps DeepSeek and custom-model routes on local Windows/macOS desktop
+automation paths, and avoids silent route switching before an approved screen or
+control action runs.
 
-ComputerControl structured action v1 limits real desktop input to a small audited protocol: `click:x,y[,button]`, `move:x,y`, `type:text`, `press:key`, `hotkey:key+key`, and `scroll:delta[,axis]`. The local backend uses `enigo` and still requires a one-shot ComputerControl approval plus a local in-memory unlock code before executing any mouse or keyboard action.
+Screen evidence clarity v1 keeps approved screenshots as local evidence files
+with readable audit references. It keeps pending and failed attempts in the
+approval trail so users can see why screen inspection did not run.
 
-ComputerControl local unlock token v1 adds a second local gate around approved desktop input. At app startup the runtime generates a short in-memory challenge code, the inspector lets the local operator unlock ComputerControl for five minutes, and approved execution fails before any invocation is recorded if the local unlock window is not active. The code is not persisted into events or exported work packages.
+Screen inspection consent v1 treats screen capture as a sensitive desktop read.
+It asks for approval before capture in the default risk-aware mode, and allows
+medium-risk reads only after policy evaluation in limited automation mode.
 
-Computer tool model-aware routing v1 passes the selected large-model provider into screenshot/control commands. ChatGPT/Codex routes use Codex bridge contract clients and record a clear failure when no bridge runtime is connected; DeepSeek/custom routes use the local Windows/macOS screenshot and input clients.
+Local screenshot storage clarity v1 saves approved PNG screenshots under
+`computer-screenshots/`. It uses the selected evidence folder, or app data before
+first-run setup, and records portable relative references for export and audit.
 
-Computer Screenshot evidence-ref v1 separates the human display label from the durable evidence reference. Successful screenshot invocations now use screenshot evidence refs for audit output, while pending and failed invocations keep the existing approval/failure trail.
+Operations Briefing clarity v1 turns approved local evidence into a management
+brief. It drafts a summary, anomaly leads, and action items from approved local
+evidence, can use DeepSeek synthesis when configured and falls back to a local
+draft with a visible warning.
 
-Computer Screenshot risk-gate v1 reclassifies screen pixel capture as a medium-risk Computer Use read. The default `ask_on_risk` access mode now creates a pending approval before screen inspection, while `limited_auto` can still auto-run medium-risk reads after policy evaluation.
+Report export clarity v1 exports Markdown, standalone HTML, lightweight PDF,
+and work-package JSON through an approved local export flow. Markdown and HTML
+preserve full Unicode, while the preview PDF stays lightweight and ASCII-safe.
 
-Computer Screenshot local capture backend v1 wires `xcap` for local screen capture. The Tauri command prefers the user-selected evidence directory from first-run setup and falls back to OS app data before setup, then saves PNG files under `computer-screenshots/` and records a relative evidence ref for the audit trail.
+Briefing handoff safety v1 keeps imported briefing runs read-only and
+reviewable, keeps source-machine evidence handles redacted in exported work
+packages, keeps pending memory candidates reviewable, and keeps resolved memory
+candidates out of exported packages. For handoff safety, exported work packages
+redact source-machine evidence handles, and resolved memory candidates stay out
+of exported work packages. Evidence-template seeding uses blank operator
+templates without overwriting existing local evidence files.
 
-The first Operations Management workflow is also wired: Operations Briefing runs through FileRead-backed evidence-folder ingestion, records an append-only workflow run, and shows a draft with summary, anomaly leads, and action items. When the selected large model is DeepSeek and `DEEPSEEK_API_KEY` is configured in the local process environment, the workflow uses the DeepSeek Chat executor for model-backed JSON synthesis after evidence ingestion succeeds; model failures fall back to the deterministic local draft with a warning. Exported work packages carry persisted briefing runs for handoff, workflow template packages for reuse, and pending memory candidates for review; imported runs are replayed as read-only archives, and imported workflow templates are registered locally without writing user folders. The latest run can be exported as Markdown, standalone HTML, or PDF through the DriveWrite approval loop. Markdown and HTML preserve full Unicode; PDF v1 is intentionally lightweight and ASCII-safe until an open CJK font or OS-font discovery strategy is approved. Sample evidence templates live under `docs/templates/operations-briefing-evidence/`, and the desktop UI can seed those templates into the user's local evidence folder through the FileWrite approval loop without overwriting existing files.
+Memory review clarity v1 keeps memory writes explicit and reviewable. It lets
+users propose, accept, reject, edit, expire, and delete long-term memories.
 
-Memory Studio now has candidate review plus metadata v1: users can propose candidate memories with type, scope, sensitivity, lifecycle tags, and expiration dates; accept or reject them; and only accepted candidates become long-term memory records with those tags preserved. Candidate conflict surfacing v1 shows likely overlap with existing visible long-term memories before acceptance, and conflict details v1 shows the overlapping memory title, body, metadata, and update time so review is inspectable. Conflict actions are explicit: `Link and accept` saves the candidate as a separate long-term memory and records append-only links; `Merge and accept` writes the previewed merged draft as a new memory and tombstones selected source memories; `Replace and accept` writes the candidate as the replacement memory and tombstones selected target memories. Long-term memory edit v1 appends `memory_record.updated` events and shows the latest version in list/search without rewriting original events. Long-term memory expiration v1 hides expired memories from normal list/search while keeping original events readable. Long-term memory delete v1 appends a `memory_record.deleted` tombstone and hides deleted memories from list/search. Work-package imports now have a read-only preview for new/skipped task records, pending memory candidates, and archived briefing runs; imported candidates stay in local review and do not write long-term memory until accepted. Older task-record auto memory and legacy event payloads remain readable through default metadata.
+Memory conflict clarity v1 surfaces likely overlaps before acceptance and
+supports link, merge, and replace decisions with inspectable relation notes.
+Linked memory title/body search, linked memory search match source, and linked
+memory relation notes stay visible so related records are understandable during
+review. Manual existing-memory links let users connect already accepted
+long-term memories without waiting for a new candidate conflict.
+
+Memory import safety v1 keeps imported memory candidates in local review without
+writing long-term memory until accepted. It ensures imported memory candidates
+drop source-machine source links, and package-internal duplicate ids are counted
+as skipped. Older task-derived memories remain readable without exposing local
+source links.

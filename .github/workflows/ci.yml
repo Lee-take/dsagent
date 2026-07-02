@@ -6,6 +6,9 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   desktop:
     name: Desktop build and Rust tests
@@ -45,3 +48,6 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}\deepseek-agent-os-cargo-target
         run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
+
+      - name: Run source-only release guard
+        run: pnpm test:release-source

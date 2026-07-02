@@ -20,10 +20,10 @@ impl CodexBridgeHttpClient {
     pub fn new(endpoint: &str, timeout: Duration) -> Result<Self, String> {
         let endpoint = normalize_http_endpoint(endpoint)?;
         let client = reqwest::blocking::Client::builder()
-            .user_agent("DeepSeek-Agent-OS/0.1 codex-bridge")
+            .user_agent("DeepSeek-Agent-OS/0.1.0 external-bridge")
             .timeout(timeout)
             .build()
-            .map_err(|error| format!("codex bridge HTTP client setup failed: {error}"))?;
+            .map_err(|error| format!("local bridge service HTTP client setup failed: {error}"))?;
 
         Ok(Self { endpoint, client })
     }
@@ -68,22 +68,23 @@ impl CodexBridgeHttpClient {
             .post(url)
             .json(request)
             .send()
-            .map_err(|error| format!("codex bridge HTTP request failed: {error}"))?;
+            .map_err(|error| format!("local bridge service HTTP request failed: {error}"))?;
         let status = response.status();
-        let body = response
-            .text()
-            .map_err(|error| format!("codex bridge HTTP response could not be read: {error}"))?;
+        let body = response.text().map_err(|error| {
+            format!("local bridge service HTTP response could not be read: {error}")
+        })?;
 
         if !status.is_success() {
             return Err(format!(
-                "codex bridge HTTP request returned HTTP {}: {}",
+                "local bridge service HTTP request returned HTTP {}: {}",
                 status.as_u16(),
                 truncate_for_error(&body, 240)
             ));
         }
 
-        serde_json::from_str(&body)
-            .map_err(|error| format!("codex bridge HTTP response could not be parsed: {error}"))
+        serde_json::from_str(&body).map_err(|error| {
+            format!("local bridge service HTTP response could not be parsed: {error}")
+        })
     }
 
     fn route_url(&self, route: &str) -> Result<String, String> {
@@ -91,28 +92,28 @@ impl CodexBridgeHttpClient {
         let url = format!("{}/{route}", self.endpoint);
         reqwest::Url::parse(&url)
             .map(|parsed| parsed.to_string())
-            .map_err(|error| format!("codex bridge HTTP route URL is invalid: {error}"))
+            .map_err(|error| format!("local bridge service HTTP route URL is invalid: {error}"))
     }
 }
 
 fn normalize_http_endpoint(endpoint: &str) -> Result<String, String> {
     let endpoint = endpoint.trim().trim_end_matches('/');
     if endpoint.is_empty() {
-        return Err("codex bridge HTTP endpoint is required".to_string());
+        return Err("local bridge service HTTP endpoint is required".to_string());
     }
     let url = reqwest::Url::parse(endpoint)
-        .map_err(|error| format!("codex bridge HTTP endpoint is invalid: {error}"))?;
+        .map_err(|error| format!("local bridge service HTTP endpoint is invalid: {error}"))?;
     match url.scheme() {
         "http" | "https" => {}
         scheme => {
             return Err(format!(
-                "codex bridge HTTP endpoint must use http or https, got '{scheme}'"
+                "local bridge service HTTP endpoint must use http or https, got '{scheme}'"
             ))
         }
     }
     if !is_loopback_url(&url) {
         return Err(
-            "codex bridge HTTP endpoint must use a loopback host such as 127.0.0.1 or localhost"
+            "local bridge service HTTP endpoint must use a loopback host such as 127.0.1.0 or localhost"
                 .to_string(),
         );
     }
@@ -158,6 +159,9 @@ mod tests {
         .expect_err("remote endpoint should be rejected");
 
         assert!(error.contains("loopback"));
+        assert!(error.contains("local bridge service"));
+        assert!(!error.contains("external bridge"));
+        assert!(!error.contains("codex bridge"));
     }
 
     #[test]
@@ -165,7 +169,7 @@ mod tests {
         let response_body = serde_json::json!({
             "contract_version": CODEX_BRIDGE_CONTRACT_VERSION,
             "capability": "network_search",
-            "provider": "codex bridge search",
+            "provider": "external bridge search",
             "query": "hotel ADR",
             "scope": "public web",
             "search_url": "https://bridge.local/search?q=hotel",
@@ -192,6 +196,10 @@ mod tests {
 
         assert_eq!(response.items[0].url, "https://example.com/source");
         assert!(recorded.raw.starts_with("POST /network-search "));
+        let headers = recorded.raw.split("\r\n\r\n").next().unwrap_or_default();
+        let normalized_headers = headers.to_ascii_lowercase();
+        assert!(normalized_headers.contains("user-agent: deepseek-agent-os/0.1.0 external-bridge"));
+        assert!(!headers.contains("codex-bridge"));
         assert!(recorded.raw.contains("\"capability\":\"network_search\""));
         assert!(recorded
             .raw
@@ -204,7 +212,7 @@ mod tests {
     }
 
     fn serve_one_json_response(response_body: String) -> (String, JoinHandle<RecordedHttpRequest>) {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake bridge server");
+        let listener = TcpListener::bind("127.0.1.0:0").expect("bind fake bridge server");
         let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
         let handle = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept fake bridge request");

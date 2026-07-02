@@ -1,7 +1,14 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "beforeBuildCommand": "npx pnpm@9.15.9 build && npx pnpm@9.15.9 stage:webview2-loader",
+    "beforeBundleCommand": "npx pnpm@9.15.9 stage:webview2-loader"
+  },
   "bundle": {
     "active": true,
-    "targets": ["nsis"]
+    "targets": ["nsis"],
+    "resources": {
+      "generated/windows/WebView2Loader.dll": "WebView2Loader.dll"
+    }
   }
 }

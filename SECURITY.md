@@ -1,14 +1,15 @@
 # Security Policy
 
-DeepSeek Agent OS is an alpha local-first desktop project. Security reports are
-welcome, especially around local credentials, permission gates, audit records,
-Computer Use boundaries, and package import/export behavior.
+DeepSeek Agent OS is an alpha local-first desktop project. The 0.1.0 preview is
+a source-first public preview and is not an official DeepSeek product. Security
+reports are welcome, especially around local credentials, permission gates,
+audit records, Computer Use boundaries, and package import/export behavior.
 
 ## Supported Version
 
 | Version | Supported |
 | --- | --- |
-| 0.0.1 | Security reports accepted; no stability guarantee |
+| 0.1.0 | Security reports accepted; no stability guarantee |
 
 ## Reporting A Vulnerability
 
@@ -34,10 +35,11 @@ Include:
   candidate values.
 - Manual DeepSeek pricing settings are local configuration, not live price
   claims.
-- ComputerControl requires explicit approval plus a short local unlock window.
-- ChatGPT/Codex Computer Use routes require an external loopback HTTP bridge in
-  MVP; managed sidecar spawning is deferred.
-- NetworkSearch evidence must preserve source URLs.
+- Computer Use remains experimental and high-risk. Computer control requires
+  explicit approval plus a short local unlock window.
+- Optional local desktop bridge use requires a user-started local loopback bridge
+  in this preview.
+- Web search evidence must preserve source URLs.
 - Import writes memories as reviewable candidates, not automatic long-term
   memory.
 
@@ -45,5 +47,5 @@ Include:
 
 - Hosted cloud sync.
 - Real email sending or cloud-drive modification.
-- Managed Codex bridge sidecar installation or supervision.
+- DS Agent does not install, launch, or supervise local bridge services.
 - Arbitrary third-party executable plugins.

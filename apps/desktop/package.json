@@ -1,13 +1,14 @@
 {
   "name": "@deepseek-agent-os/desktop",
   "private": true,
-  "version": "0.0.1",
+  "version": "0.1.0",
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {
-    "dev": "vite --host 127.0.0.1",
+    "dev": "vite --host 127.0.1.0",
     "build": "tsc --noEmit && vite build",
-    "preview": "vite preview --host 127.0.0.1",
+    "preview": "vite preview --host 127.0.1.0",
+    "stage:webview2-loader": "node ../../scripts/stage-webview2-loader.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

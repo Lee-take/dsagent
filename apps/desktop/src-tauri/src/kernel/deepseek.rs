@@ -215,7 +215,7 @@ pub struct DeepSeekOperationsBriefingSynthesizer<'a, T: DeepSeekChatCompletionTr
 impl HttpDeepSeekChatCompletionTransport {
     pub fn new() -> Result<Self, String> {
         let client = reqwest::blocking::Client::builder()
-            .user_agent("DeepSeek-Agent-OS/0.1 deepseek-chat")
+            .user_agent("DeepSeek-Agent-OS/0.1.0 deepseek-chat")
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(|error| format!("deepseek chat client setup failed: {error}"))?;
@@ -603,6 +603,9 @@ mod tests {
     use crate::kernel::models::{ModelRoute, ThinkingLevel};
     use crate::kernel::workflow::OperationsBriefingSynthesizer;
     use std::cell::RefCell;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread::JoinHandle;
 
     use super::{
         build_deepseek_chat_completion_request, deepseek_credential_status_from_env,
@@ -611,8 +614,9 @@ mod tests {
         DeepSeekChatCompletionCache, DeepSeekChatCompletionResponse,
         DeepSeekChatCompletionTransport, DeepSeekChatCompletionUsage,
         DeepSeekMemoryChatCompletionCache, DeepSeekOperationsBriefingSynthesizer,
-        DeepSeekThinkingMode, DEEPSEEK_API_BASE_URL, DEEPSEEK_API_KEY_ENV,
-        DEEPSEEK_CHAT_COMPLETIONS_PATH, DEEPSEEK_FLASH_MODEL, DEEPSEEK_PRO_MODEL,
+        DeepSeekThinkingMode, HttpDeepSeekChatCompletionTransport, DEEPSEEK_API_BASE_URL,
+        DEEPSEEK_API_KEY_ENV, DEEPSEEK_CHAT_COMPLETIONS_PATH, DEEPSEEK_FLASH_MODEL,
+        DEEPSEEK_PRO_MODEL,
     };
 
     #[derive(Clone, Debug, Eq, PartialEq)]
@@ -622,6 +626,10 @@ mod tests {
         model: String,
         system_prompt: String,
         user_prompt: String,
+    }
+
+    struct RecordedHttpRequest {
+        raw: String,
     }
 
     #[derive(Default)]
@@ -673,6 +681,67 @@ mod tests {
                 .clone()
                 .ok_or_else(|| "missing fake response".to_string())
         }
+    }
+
+    fn serve_one_deepseek_response(
+        response_body: String,
+    ) -> (String, JoinHandle<RecordedHttpRequest>) {
+        let listener = TcpListener::bind("127.0.1.0:0").expect("bind fake deepseek server");
+        let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept fake deepseek request");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .expect("set read timeout");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            loop {
+                match stream.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(bytes_read) => {
+                        request.extend_from_slice(&buffer[..bytes_read]);
+                        if http_request_is_complete(&request) {
+                            break;
+                        }
+                    }
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            || error.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        break;
+                    }
+                    Err(error) => panic!("read request failed: {error}"),
+                }
+            }
+            let raw = String::from_utf8(request).expect("request utf8");
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write fake deepseek response");
+            RecordedHttpRequest { raw }
+        });
+
+        (endpoint, handle)
+    }
+
+    fn http_request_is_complete(request: &[u8]) -> bool {
+        let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+            return false;
+        };
+        let header_text = String::from_utf8_lossy(&request[..header_end]);
+        let content_length = header_text
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("content-length:")
+                    .or_else(|| line.strip_prefix("Content-Length:"))
+            })
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        request.len() >= header_end + 4 + content_length
     }
 
     #[test]
@@ -807,6 +876,41 @@ mod tests {
         assert_eq!(calls[0].api_key, "test-secret-token");
         assert_eq!(calls[0].model, DEEPSEEK_PRO_MODEL);
         assert_eq!(response.first_text(), Some("done"));
+    }
+
+    #[test]
+    fn http_deepseek_transport_uses_current_release_user_agent() {
+        let request = build_deepseek_chat_completion_request(
+            ModelRoute::Pro,
+            ThinkingLevel::Fast,
+            "You are concise.",
+            "Return ok.",
+        )
+        .expect("request builds");
+        let response_body = serde_json::json!({
+            "model": "deepseek-chat",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "ok"
+                    }
+                }
+            ]
+        })
+        .to_string();
+        let (endpoint, handle) = serve_one_deepseek_response(response_body);
+        let transport = HttpDeepSeekChatCompletionTransport::new().expect("http transport");
+
+        let response = transport
+            .post_chat_completion(&endpoint, "test-secret-token", &request)
+            .expect("fake deepseek response");
+        let recorded = handle.join().expect("fake deepseek server joins");
+        let normalized_headers = recorded.raw.to_ascii_lowercase();
+
+        assert_eq!(response.first_text(), Some("ok"));
+        assert!(recorded.raw.starts_with("POST / HTTP/1.1"));
+        assert!(normalized_headers.contains("user-agent: deepseek-agent-os/0.1.0 deepseek-chat"));
     }
 
     #[test]
