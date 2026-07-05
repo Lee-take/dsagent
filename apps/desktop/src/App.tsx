@@ -70,6 +70,7 @@ import type {
   AgentChatMissingPrerequisite,
   AgentChatResponse,
   AgentContextReceipt,
+  AppUpdateDownloadResult,
   AppUpdateInstallResult,
   AppUpdateStatus,
   CapabilityAccessRecord,
@@ -850,6 +851,8 @@ export function App() {
   const [setupError, setSetupError] = useState("");
   const [appUpdateNotice, setAppUpdateNotice] = useState("");
   const [appUpdateError, setAppUpdateError] = useState("");
+  const [downloadedAppUpdate, setDownloadedAppUpdate] =
+    useState<AppUpdateDownloadResult | null>(null);
   const [deepSeekCacheNotice, setDeepSeekCacheNotice] = useState("");
   const [deepSeekCacheError, setDeepSeekCacheError] = useState("");
   const [deepSeekPricingNotice, setDeepSeekPricingNotice] = useState("");
@@ -885,7 +888,8 @@ export function App() {
   const [computerControlUnlockPending, setComputerControlUnlockPending] = useState(false);
   const [briefingPending, setBriefingPending] = useState(false);
   const [setupPending, setSetupPending] = useState(false);
-  const [appUpdatePending, setAppUpdatePending] = useState(false);
+  const [appUpdateDownloadPending, setAppUpdateDownloadPending] = useState(false);
+  const [appUpdateInstallPending, setAppUpdateInstallPending] = useState(false);
   const [deepSeekCachePending, setDeepSeekCachePending] = useState(false);
   const [deepSeekPricingPending, setDeepSeekPricingPending] = useState(false);
   const [deepSeekBalancePending, setDeepSeekBalancePending] = useState(false);
@@ -895,6 +899,7 @@ export function App() {
   const queuedAgentGuidanceRef = useRef("");
   const agentStopRequestedRef = useRef(false);
   const agentChatRunTokenRef = useRef(0);
+  const appUpdateDownloadKeyRef = useRef("");
   const copy = translations[language];
   const exposePluginsSidebarEntry = shouldExposePluginsSidebarEntry();
   const settingsPanelItemCount = settingsPanelItems.length;
@@ -917,6 +922,21 @@ export function App() {
   const networkSearchSourceModelMissing =
     modelToolStrategy.network_search_source_model_required &&
     !state.network_search_source_model;
+  const appUpdateVersionLabel =
+    appUpdateStatus.latest_version ?? downloadedAppUpdate?.latest_version ?? copy.appUpdate.update;
+  const downloadedAppUpdateReady =
+    downloadedAppUpdate !== null &&
+    appUpdateStatus.update_available &&
+    (appUpdateStatus.latest_version === null ||
+      downloadedAppUpdate.latest_version === appUpdateStatus.latest_version) &&
+    (appUpdateStatus.asset_name === null ||
+      downloadedAppUpdate.asset_name === appUpdateStatus.asset_name);
+  const appUpdateBusy = appUpdateDownloadPending || appUpdateInstallPending;
+  const appUpdateButtonLabel = appUpdateInstallPending
+    ? copy.appUpdate.installing
+    : appUpdateDownloadPending || !downloadedAppUpdateReady
+      ? copy.appUpdate.downloading
+      : copy.appUpdate.install;
   const latestDeepSeekTelemetry = deepSeekTelemetry[0] ?? null;
   const latestDeepSeekTelemetryCacheLabel = latestDeepSeekTelemetry
     ? latestDeepSeekTelemetry.cache_status === "hit"
@@ -1042,6 +1062,59 @@ export function App() {
         setDeepSeekPricingError(copy.deepSeekPricing.loadFailed);
       });
   }, []);
+
+  useEffect(() => {
+    if (!hasDesktopRuntime()) {
+      return;
+    }
+
+    if (!appUpdateStatus.update_available) {
+      appUpdateDownloadKeyRef.current = "";
+      setDownloadedAppUpdate(null);
+      return;
+    }
+
+    const updateKey = `${appUpdateStatus.latest_version ?? ""}|${appUpdateStatus.asset_name ?? ""}`;
+    if (appUpdateDownloadKeyRef.current === updateKey) {
+      return;
+    }
+
+    appUpdateDownloadKeyRef.current = updateKey;
+    let active = true;
+    setDownloadedAppUpdate(null);
+    setAppUpdateDownloadPending(true);
+    setAppUpdateError("");
+    setAppUpdateNotice("");
+
+    void invoke<AppUpdateDownloadResult>("download_app_update")
+      .then((result) => {
+        if (!active) {
+          return;
+        }
+        setDownloadedAppUpdate(result);
+        setAppUpdateNotice(copy.appUpdate.downloadReady(result.latest_version));
+      })
+      .catch((error) => {
+        if (!active) {
+          return;
+        }
+        setAppUpdateError(String(error) || copy.appUpdate.downloadFailed);
+      })
+      .finally(() => {
+        if (active) {
+          setAppUpdateDownloadPending(false);
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [
+    appUpdateStatus.asset_name,
+    appUpdateStatus.latest_version,
+    appUpdateStatus.update_available,
+    copy.appUpdate,
+  ]);
 
   useEffect(() => {
     if (!hasDesktopRuntime()) {
@@ -1789,17 +1862,22 @@ export function App() {
   };
 
   const installAvailableAppUpdate = async () => {
-    setAppUpdatePending(true);
+    if (!downloadedAppUpdateReady || downloadedAppUpdate === null) {
+      return;
+    }
+
+    setAppUpdateInstallPending(true);
     setAppUpdateError("");
     setAppUpdateNotice("");
 
     try {
-      const result = await invoke<AppUpdateInstallResult>("install_app_update");
-      setAppUpdateNotice(copy.appUpdate.installStarted(result.latest_version));
+      await invoke<AppUpdateInstallResult>("install_app_update", {
+        installerPath: downloadedAppUpdate.installer_path,
+      });
+      setAppUpdateNotice(copy.appUpdate.installStarted(downloadedAppUpdate.latest_version));
     } catch (error) {
       setAppUpdateError(String(error) || copy.appUpdate.installFailed);
-    } finally {
-      setAppUpdatePending(false);
+      setAppUpdateInstallPending(false);
     }
   };
 
@@ -3691,8 +3769,30 @@ export function App() {
     <main className="app-shell">
       <aside className="sidebar">
         <header className="sidebar-header">
-          <div className="brand" title={state.app_name}>
-            <img className="brand-mark-image" src="/ds-agent-mark.png" alt={state.app_name} />
+          <div className="brand-row">
+            <div className="brand" title={state.app_name}>
+              <img className="brand-mark-image" src="/ds-agent-mark.png" alt={state.app_name} />
+            </div>
+            <div className="app-update-slot brand-update-slot">
+              {appUpdateStatus.update_available ? (
+                <button
+                  className="app-update-button"
+                  type="button"
+                  title={
+                    appUpdateStatus.latest_version
+                      ? `${state.app_name} ${appUpdateVersionLabel}`
+                      : copy.appUpdate.update
+                  }
+                  disabled={appUpdateBusy || !downloadedAppUpdateReady}
+                  onClick={() => void installAvailableAppUpdate()}
+                >
+                  <Download size={14} aria-hidden="true" />
+                  {appUpdateButtonLabel}
+                </button>
+              ) : null}
+              {appUpdateNotice ? <span className="app-update-feedback">{appUpdateNotice}</span> : null}
+              {appUpdateError ? <span className="app-update-feedback error">{appUpdateError}</span> : null}
+            </div>
           </div>
           <div className="language-switch" role="group" aria-label={copy.controls.language}>
             <button
@@ -3713,26 +3813,6 @@ export function App() {
             </button>
           </div>
         </header>
-        <div className="app-update-slot">
-          {appUpdateStatus.update_available ? (
-            <button
-              className="app-update-button"
-              type="button"
-              title={
-                appUpdateStatus.latest_version
-                  ? `${state.app_name} ${appUpdateStatus.latest_version}`
-                  : copy.appUpdate.update
-              }
-              disabled={appUpdatePending}
-              onClick={() => void installAvailableAppUpdate()}
-            >
-              <Download size={14} aria-hidden="true" />
-              {appUpdatePending ? copy.appUpdate.installing : copy.appUpdate.update}
-            </button>
-          ) : null}
-          {appUpdateNotice ? <span className="app-update-feedback">{appUpdateNotice}</span> : null}
-          {appUpdateError ? <span className="app-update-feedback error">{appUpdateError}</span> : null}
-        </div>
         <nav className="conversation-rail" aria-label={copy.nav.conversations}>
           <button className="nav-item new-chat-item" type="button" onClick={startNewAgentConversation}>
             <Pencil size={18} /> {copy.nav.newChat}

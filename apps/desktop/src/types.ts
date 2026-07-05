@@ -76,10 +76,15 @@ export type AppUpdateStatus = {
   message: string | null;
 };
 
-export type AppUpdateInstallResult = {
+export type AppUpdateDownloadResult = {
   latest_version: string;
   asset_name: string;
   installer_path: string;
+};
+
+export type AppUpdateInstallResult = {
+  installer_path: string;
+  restart_scheduled: boolean;
 };
 
 export type ToolBackendSettings = {

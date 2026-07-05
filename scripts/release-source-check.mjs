@@ -566,6 +566,12 @@ function checkWindowsAppIconPackaging() {
   checkTextIncludes(
     "apps/desktop/src-tauri/src/main.rs",
     mainSource,
+    '#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]',
+    "desktop release binary uses Windows GUI subsystem",
+  );
+  checkTextIncludes(
+    "apps/desktop/src-tauri/src/main.rs",
+    mainSource,
     'include_bytes!("../icons/icon.ico")',
     "desktop runtime window icon embeds checked-in app icon",
   );
@@ -1666,6 +1672,36 @@ function checkPublicReleaseCopyPositioning() {
     'APP_UPDATE_CURRENT_RELEASE_TAG: &str = "v0.1.0-rc.6"',
     "app updater current release tag rc.6",
   );
+  checkTextIncludes(
+    "apps/desktop/src-tauri/src/commands.rs",
+    readText("apps/desktop/src-tauri/src/commands.rs"),
+    'pub fn download_app_update() -> Result<AppUpdateDownloadResult, String>',
+    "app updater has background download command",
+  );
+  checkTextIncludes(
+    "apps/desktop/src-tauri/src/commands.rs",
+    readText("apps/desktop/src-tauri/src/commands.rs"),
+    'args: vec!["/S".to_string()]',
+    "app updater uses silent NSIS installer flag",
+  );
+  checkTextIncludes(
+    "apps/desktop/src/App.tsx",
+    readText("apps/desktop/src/App.tsx"),
+    'invoke<AppUpdateDownloadResult>("download_app_update")',
+    "app update UI downloads update before install click",
+  );
+  checkTextIncludes(
+    "apps/desktop/src/App.tsx",
+    readText("apps/desktop/src/App.tsx"),
+    "copy.appUpdate.downloading",
+    "app update UI shows downloading state",
+  );
+  checkTextIncludes(
+    "apps/desktop/src/App.tsx",
+    readText("apps/desktop/src/App.tsx"),
+    "copy.appUpdate.install",
+    "app update UI shows install-ready state",
+  );
   checkTextIncludesCollapsed(
     "docs/RELEASE_NOTES_v0.1.0.md",
     releaseNotes,
@@ -1962,6 +1998,8 @@ function checkChatFirstCenterWorkbenchUi() {
     "className=\"sidebar-tool settings-tool\"",
     "copy.skills.title",
     "className=\"skill-plugin-card\"",
+    "className=\"brand-row\"",
+    "className=\"app-update-slot brand-update-slot\"",
     "renderLegacyCenterManagementPanels",
     "className=\"agent-chat-panel\"",
     "aria-label={copy.chatWorkbench.title}",
@@ -1997,6 +2035,8 @@ function checkChatFirstCenterWorkbenchUi() {
 
   for (const snippet of [
     ".sidebar-controls",
+    ".brand-row",
+    ".brand-update-slot",
     ".sidebar-tools",
     ".sidebar-tool",
     ".sidebar-record-row",

@@ -124,6 +124,14 @@ textarea {
   min-width: 0;
 }
 
+.brand-row {
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto;
+  gap: 8px;
+  min-width: 0;
+}
+
 .brand {
   display: flex;
   align-items: center;
@@ -145,6 +153,7 @@ textarea {
 .app-update-slot {
   display: flex;
   align-items: center;
+  gap: 6px;
   min-height: 0;
   min-width: 0;
 }
@@ -153,18 +162,26 @@ textarea {
   display: none;
 }
 
+.brand-update-slot {
+  flex: 0 1 auto;
+}
+
 .app-update-button {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   min-height: 28px;
-  border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+  border-color: color-mix(in srgb, var(--accent) 74%, var(--border));
   border-radius: 7px;
-  background: color-mix(in srgb, var(--surface-active) 76%, transparent);
+  background: color-mix(in srgb, var(--accent-soft) 76%, var(--surface));
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--accent) 32%, transparent),
+    0 0 14px color-mix(in srgb, var(--accent) 16%, transparent);
   color: var(--text);
   padding: 0 10px;
   font-size: 12px;
   font-weight: 700;
+  white-space: nowrap;
 }
 
 .app-update-button svg {

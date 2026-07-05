@@ -59,7 +59,11 @@ type TranslationSet = {
   appUpdate: {
     update: string;
     checking: string;
+    downloading: string;
+    install: string;
     installing: string;
+    downloadReady: (version: string) => string;
+    downloadFailed: string;
     installStarted: (version: string) => string;
     installFailed: string;
   };
@@ -744,8 +748,12 @@ export const translations: Record<Language, TranslationSet> = {
     appUpdate: {
       update: "更新",
       checking: "检查更新",
+      downloading: "下载更新",
+      install: "安装更新",
       installing: "正在更新",
-      installStarted: (version) => `已启动 ${version} 安装程序`,
+      downloadReady: (version) => `${version} 已下载，点击安装更新`,
+      downloadFailed: "更新下载失败",
+      installStarted: (version) => `正在静默安装 ${version} 并重启 DS Agent`,
       installFailed: "更新启动失败",
     },
     settingsPanel: {
@@ -1609,8 +1617,12 @@ export const translations: Record<Language, TranslationSet> = {
     appUpdate: {
       update: "Update",
       checking: "Checking",
+      downloading: "Download update",
+      install: "Install update",
       installing: "Updating",
-      installStarted: (version) => `Started installer for ${version}`,
+      downloadReady: (version) => `${version} downloaded. Click to install.`,
+      downloadFailed: "Update download failed",
+      installStarted: (version) => `Installing ${version} silently and restarting DS Agent`,
       installFailed: "Update failed to start",
     },
     settingsPanel: {

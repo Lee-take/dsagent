@@ -4,6 +4,9 @@ use std::process::Command;
 use std::sync::Mutex;
 use std::time::Instant;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 use base64::{engine::general_purpose, Engine as _};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -130,6 +133,8 @@ const APP_UPDATE_RELEASE_DOWNLOAD_PREFIX: &str =
     "https://github.com/Lee-take/deepseek-agent-os/releases/download/";
 const APP_UPDATE_USER_AGENT: &str = "DS-Agent-Updater/0.1.0";
 const APP_UPDATE_CURRENT_RELEASE_TAG: &str = "v0.1.0-rc.6";
+#[cfg(windows)]
+const WINDOWS_CREATE_NO_WINDOW: u32 = 0x08000000;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AgentChatRequest {
@@ -265,10 +270,22 @@ pub struct AppUpdateStatus {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct AppUpdateInstallResult {
+pub struct AppUpdateDownloadResult {
     pub latest_version: String,
     pub asset_name: String,
     pub installer_path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AppUpdateInstallResult {
+    pub installer_path: String,
+    pub restart_scheduled: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SilentUpdateInstallCommand {
+    program: PathBuf,
+    args: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -874,13 +891,17 @@ fn safe_update_asset_file_name(asset_name: &str) -> String {
     }
 }
 
+fn app_update_dir() -> PathBuf {
+    std::env::temp_dir().join("ds-agent-updates")
+}
+
 fn download_release_asset(asset: &GithubReleaseAsset) -> Result<PathBuf, String> {
     if !release_asset_is_trusted(&asset.browser_download_url) {
         return Err("update asset URL is not trusted".to_string());
     }
 
     let file_name = safe_update_asset_file_name(&asset.name);
-    let update_dir = std::env::temp_dir().join("ds-agent-updates");
+    let update_dir = app_update_dir();
     fs::create_dir_all(&update_dir)
         .map_err(|error| format!("failed to prepare update directory: {error}"))?;
     let installer_path = update_dir.join(file_name);
@@ -895,6 +916,126 @@ fn download_release_asset(asset: &GithubReleaseAsset) -> Result<PathBuf, String>
     fs::write(&installer_path, bytes)
         .map_err(|error| format!("failed to save update installer: {error}"))?;
     Ok(installer_path)
+}
+
+fn validate_downloaded_update_installer_path(installer_path: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(installer_path);
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "update installer path has no file name".to_string())?;
+    if !is_windows_installer_asset(file_name) {
+        return Err("downloaded update is not a Windows installer".to_string());
+    }
+
+    let update_dir = app_update_dir();
+    fs::create_dir_all(&update_dir)
+        .map_err(|error| format!("failed to prepare update directory: {error}"))?;
+    let canonical_dir = fs::canonicalize(&update_dir)
+        .map_err(|error| format!("failed to verify update directory: {error}"))?;
+    let canonical_path = fs::canonicalize(&path)
+        .map_err(|error| format!("downloaded update installer is unavailable: {error}"))?;
+    if !canonical_path.starts_with(&canonical_dir) {
+        return Err("downloaded update installer is outside the update directory".to_string());
+    }
+
+    Ok(canonical_path)
+}
+
+fn silent_update_install_command(installer_path: &Path) -> SilentUpdateInstallCommand {
+    let extension = installer_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    if extension == "msi" {
+        return SilentUpdateInstallCommand {
+            program: PathBuf::from("msiexec.exe"),
+            args: vec![
+                "/i".to_string(),
+                installer_path.display().to_string(),
+                "/quiet".to_string(),
+                "/norestart".to_string(),
+            ],
+        };
+    }
+
+    SilentUpdateInstallCommand {
+        program: installer_path.to_path_buf(),
+        args: vec!["/S".to_string()],
+    }
+}
+
+fn powershell_single_quoted(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn app_update_runner_script(
+    installer_path: &Path,
+    app_path: &Path,
+    current_process_id: u32,
+) -> String {
+    let install_command = silent_update_install_command(installer_path);
+    let install_args = install_command
+        .args
+        .iter()
+        .map(|argument| powershell_single_quoted(argument))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    format!(
+        concat!(
+            "$ErrorActionPreference = 'Stop'\n",
+            "$parentPid = {current_process_id}\n",
+            "try {{ Wait-Process -Id $parentPid -Timeout 30 -ErrorAction SilentlyContinue }} catch {{ }}\n",
+            "$process = Start-Process -FilePath {installer_program} -ArgumentList @({install_args}) -Wait -PassThru -WindowStyle Hidden\n",
+            "if ($process.ExitCode -eq 0) {{\n",
+            "  Start-Process -FilePath {app_path}\n",
+            "}}\n"
+        ),
+        current_process_id = current_process_id,
+        installer_program = powershell_single_quoted(&install_command.program.display().to_string()),
+        install_args = install_args,
+        app_path = powershell_single_quoted(&app_path.display().to_string()),
+    )
+}
+
+#[cfg(windows)]
+fn spawn_silent_update_runner(installer_path: &Path) -> Result<(), String> {
+    let app_path =
+        std::env::current_exe().map_err(|error| format!("failed to locate DS Agent: {error}"))?;
+    let update_dir = app_update_dir();
+    fs::create_dir_all(&update_dir)
+        .map_err(|error| format!("failed to prepare update directory: {error}"))?;
+    let runner_path = update_dir.join("install-and-restart-ds-agent.ps1");
+    fs::write(
+        &runner_path,
+        app_update_runner_script(installer_path, &app_path, std::process::id()),
+    )
+    .map_err(|error| format!("failed to prepare silent update runner: {error}"))?;
+
+    let mut command = Command::new("powershell.exe");
+    command
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-File",
+        ])
+        .arg(&runner_path)
+        .creation_flags(WINDOWS_CREATE_NO_WINDOW);
+    command
+        .spawn()
+        .map_err(|error| format!("failed to start silent update runner: {error}"))?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn spawn_silent_update_runner(_installer_path: &Path) -> Result<(), String> {
+    Err("silent app updates are only supported on Windows".to_string())
 }
 
 fn pending_memory_candidates_for_work_package(
@@ -4981,7 +5122,7 @@ pub fn check_app_update() -> Result<AppUpdateStatus, String> {
 }
 
 #[tauri::command]
-pub fn install_app_update() -> Result<AppUpdateInstallResult, String> {
+pub fn download_app_update() -> Result<AppUpdateDownloadResult, String> {
     let releases = fetch_github_releases()?;
     let release = latest_installable_update_release(&releases, app_update_current_version())
         .ok_or_else(|| "DS Agent is already up to date".to_string())?;
@@ -4989,15 +5130,27 @@ pub fn install_app_update() -> Result<AppUpdateInstallResult, String> {
     let asset = release_installable_asset(&release)
         .ok_or_else(|| "latest release has no Windows installer asset".to_string())?;
     let installer_path = download_release_asset(asset)?;
-    Command::new(&installer_path)
-        .spawn()
-        .map_err(|error| format!("failed to start update installer: {error}"))?;
 
-    Ok(AppUpdateInstallResult {
+    Ok(AppUpdateDownloadResult {
         latest_version,
         asset_name: asset.name.clone(),
         installer_path: installer_path.display().to_string(),
     })
+}
+
+#[tauri::command]
+pub fn install_app_update(
+    app: AppHandle,
+    installer_path: String,
+) -> Result<AppUpdateInstallResult, String> {
+    let installer_path = validate_downloaded_update_installer_path(&installer_path)?;
+    spawn_silent_update_runner(&installer_path)?;
+    let result = AppUpdateInstallResult {
+        installer_path: installer_path.display().to_string(),
+        restart_scheduled: true,
+    };
+    app.exit(0);
+    Ok(result)
 }
 
 #[tauri::command]
@@ -6786,7 +6939,8 @@ pub fn preview_work_package_import(
 mod tests {
     use super::{
         is_newer_version, is_windows_installer_asset, release_installable_asset,
-        update_status_from_release, update_status_from_releases, GithubRelease, GithubReleaseAsset,
+        silent_update_install_command, update_status_from_release, update_status_from_releases,
+        GithubRelease, GithubReleaseAsset,
     };
     use crate::commands::{
         agent_chat_api_key_candidates_from_sources, agent_chat_api_key_from_sources,
@@ -6963,6 +7117,21 @@ mod tests {
 
         let asset = release_installable_asset(&release).expect("installer asset");
         assert_eq!(asset.name, "DS Agent_9.9.9_x64-setup.exe");
+    }
+
+    #[test]
+    fn app_update_silent_installer_command_uses_nsis_s_arg() {
+        let command = silent_update_install_command(std::path::Path::new(
+            r"C:\Users\tester\AppData\Local\Temp\ds-agent-updates\DS.Agent_0.1.0_rc7_x64-setup.exe",
+        ));
+
+        assert_eq!(
+            command.program,
+            std::path::PathBuf::from(
+                r"C:\Users\tester\AppData\Local\Temp\ds-agent-updates\DS.Agent_0.1.0_rc7_x64-setup.exe",
+            )
+        );
+        assert_eq!(command.args, vec!["/S"]);
     }
 
     struct RecordingDeepSeekTransport {

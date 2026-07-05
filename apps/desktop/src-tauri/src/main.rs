@@ -1,10 +1,12 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod commands;
 mod kernel;
 
 use commands::{
     browse_url, capture_computer_screenshot, check_app_update, clear_deepseek_chat_cache,
     control_computer_boundary, create_email_draft_boundary, create_task_record,
-    delete_memory_record, export_operations_briefing_html_report,
+    delete_memory_record, download_app_update, export_operations_briefing_html_report,
     export_operations_briefing_pdf_report, export_operations_briefing_report, export_work_package,
     get_computer_control_unlock_status, get_computer_use_backend_status,
     get_computer_use_backend_status_for_model, get_deepseek_chat_cache_state,
@@ -148,6 +150,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_foundation_state,
             check_app_update,
+            download_app_update,
             install_app_update,
             get_deepseek_credential_status,
             get_network_search_route_status,
