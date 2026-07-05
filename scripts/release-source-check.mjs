@@ -794,8 +794,8 @@ function checkRequiredDocs() {
     "keeps pending and failed attempts in the approval trail so users can see why screen inspection did not run",
     "Screen inspection consent v1",
     "treats screen capture as a sensitive desktop read",
-    "asks for approval before capture in the default risk-aware mode",
-    "allows medium-risk reads only after policy evaluation in limited automation mode",
+    "runs screen capture without an extra prompt in the default full-access mode",
+    "medium-risk reads remain policy-evaluated in limited automation mode",
     "Local screenshot storage clarity v1",
     "saves approved PNG screenshots under `computer-screenshots/`",
     "uses the selected evidence folder, or app data before first-run setup",
@@ -2930,6 +2930,12 @@ function checkComputerUseDocs() {
   } else {
     checks.push("release notes no repeated internal ComputerControl wording");
   }
+  checkTextIncludesCollapsed(
+    "docs/RELEASE_NOTES_v0.1.0.md",
+    releaseNotes,
+    "screen capture follows the selected access-mode policy",
+    "release notes screen-capture access-mode policy",
+  );
   checkTextIncludesCollapsed(
     "docs/RELEASE_NOTES_v0.1.0.md",
     releaseNotes,

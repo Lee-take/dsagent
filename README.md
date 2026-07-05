@@ -437,8 +437,8 @@ with readable audit references. It keeps pending and failed attempts in the
 approval trail so users can see why screen inspection did not run.
 
 Screen inspection consent v1 treats screen capture as a sensitive desktop read.
-It asks for approval before capture in the default risk-aware mode, and allows
-medium-risk reads only after policy evaluation in limited automation mode.
+It runs screen capture without an extra prompt in the default full-access mode,
+while medium-risk reads remain policy-evaluated in limited automation mode.
 
 Local screenshot storage clarity v1 saves approved PNG screenshots under
 `computer-screenshots/`. It uses the selected evidence folder, or app data before

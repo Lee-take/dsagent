@@ -793,7 +793,7 @@ impl Default for FoundationState {
             large_model_provider: default_large_model_provider(),
             model_route: ModelRoute::Auto,
             thinking_level: ThinkingLevel::Auto,
-            access_mode: AccessMode::AskOnRisk,
+            access_mode: AccessMode::FullAccess,
             workspace_scope: WorkspaceScope::Workspace,
             network_search_source_model: None,
             tool_backends: ToolBackendSettings::default(),
@@ -841,7 +841,7 @@ mod tests {
         assert_eq!(state.large_model_provider, LargeModelProvider::DeepSeek);
         assert_eq!(state.model_route, ModelRoute::Auto);
         assert_eq!(state.thinking_level, ThinkingLevel::Auto);
-        assert_eq!(state.access_mode, AccessMode::AskOnRisk);
+        assert_eq!(state.access_mode, AccessMode::FullAccess);
         assert_eq!(state.workspace_scope, WorkspaceScope::Workspace);
         assert_eq!(state.network_search_source_model, None);
     }

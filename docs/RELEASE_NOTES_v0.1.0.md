@@ -63,9 +63,9 @@ Windows preview continues to pass local release gates.
   Computer Use operations.
 - Append-only local audit records for access requests, approvals, tool
   attempts, workflow runs, memory records, and work packages.
-- Computer Use remains experimental and high-risk: screenshot/control paths are
-  approval-gated, computer control also needs a one-shot approval plus a local
-  unlock code, and desktop automation is still subject to
+- Computer Use remains experimental and high-risk: screen capture follows the
+  selected access-mode policy, computer control also needs a one-shot approval
+  plus a local unlock code, and desktop automation is still subject to
   foreground desktop, secure desktop, Screen Recording, and Accessibility
   limitations.
 - Memory Studio for reviewable memories, edits, deletion, expiration, linked

@@ -67,6 +67,13 @@ test("interface style defaults to porcelain and hides the dark default route", (
   assert.doesNotMatch(i18nSource, /深色默认|Deep default/);
 });
 
+test("default access mode gives local computer full control", () => {
+  const appSource = readFileSync(appSourceUrl, "utf8");
+
+  assert.match(appSource, /access_mode:\s*"full_access"/);
+  assert.match(appSource, /computer_control:\s*"local_windows_input_control"/);
+});
+
 test("workspace directory setting auto-saves without a separate save command", () => {
   const workspaceItem = settingsPanelItems.find((item) => item.id === "workspace_directory");
   const appSource = readFileSync(appSourceUrl, "utf8");

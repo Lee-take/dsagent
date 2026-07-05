@@ -103,7 +103,7 @@ const fallbackState: FoundationState = {
   large_model_provider: "deepseek",
   model_route: "auto",
   thinking_level: "auto",
-  access_mode: "ask_on_risk",
+  access_mode: "full_access",
   workspace_scope: "workspace",
   network_search_source_model: null,
   tool_backends: {
