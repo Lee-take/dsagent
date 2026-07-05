@@ -10,7 +10,7 @@ export type WorkspaceScope = "workspace";
 
 export type Language = "zh" | "en";
 
-export type ThemeStyle = "deep" | "ink" | "porcelain";
+export type ThemeStyle = "ink" | "porcelain";
 
 export type TaskRecordStatus = "active" | "done" | "blocked";
 
@@ -55,6 +55,7 @@ export type RuntimePlatform = "windows" | "macos" | "other";
 
 export type LocalDirectorySettings = {
   workspace_dir: string;
+  workspace_name: string;
   evidence_dir: string;
   export_dir: string;
 };
@@ -64,6 +65,21 @@ export type LocalDirectoryState = {
   settings_file: string;
   settings: LocalDirectorySettings | null;
   needs_setup: boolean;
+};
+
+export type AppUpdateStatus = {
+  current_version: string;
+  latest_version: string | null;
+  update_available: boolean;
+  asset_name: string | null;
+  release_url: string | null;
+  message: string | null;
+};
+
+export type AppUpdateInstallResult = {
+  latest_version: string;
+  asset_name: string;
+  installer_path: string;
 };
 
 export type ToolBackendSettings = {
@@ -102,6 +118,69 @@ export type DeepSeekChatTelemetry = {
 
 export type DeepSeekChatCacheState = {
   entries: number;
+};
+
+export type DeepSeekUserBalanceInfo = {
+  currency: string;
+  total_balance: string;
+  granted_balance: string;
+  topped_up_balance: string;
+};
+
+export type DeepSeekUserBalanceResponse = {
+  is_available: boolean;
+  balance_infos: DeepSeekUserBalanceInfo[];
+};
+
+export type AgentChatResponse = {
+  id: string;
+  role: "assistant";
+  content: string;
+  protocol_version: string;
+  proposed_actions: AgentChatActionProposal[];
+  missing_prerequisites: AgentChatMissingPrerequisite[];
+  memory_candidates: MemoryCandidate[];
+  model: string;
+  cache_status: DeepSeekChatCacheStatus;
+  elapsed_ms: number;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  total_tokens: number | null;
+  estimated_cost_micro_usd: number | null;
+  created_at: string;
+};
+
+export type AgentActionExecutionState =
+  | "proposed"
+  | "waiting_prerequisite"
+  | "needs_confirmation"
+  | "blocked"
+  | "succeeded"
+  | "failed";
+
+export type AgentChatActionProposal = {
+  action_type: string;
+  title: string | null;
+  reason: string | null;
+  risk: string | null;
+  requires_confirmation: boolean;
+  target: string | null;
+  target_location: string | null;
+  preferred_browser: string | null;
+  content: string | null;
+  capability: CapabilityKind | null;
+  policy_decision: PolicyDecision | null;
+  execution_state: AgentActionExecutionState;
+  dispatch_note: string | null;
+  permission_request_id: string | null;
+  capability_invocation_id: string | null;
+  workflow_run_id: string | null;
+  blocked_reason: string | null;
+};
+
+export type AgentChatMissingPrerequisite = {
+  kind: string;
+  message: string;
 };
 
 export type DeepSeekPricingSettings = {
@@ -499,6 +578,32 @@ export type CapabilityInvocation = {
   excerpt: string | null;
   warnings: string[];
   elapsed_ms: number;
+  created_at: string;
+};
+
+export type AgentContextReceipt = {
+  id: string;
+  user_intent: string;
+  loop_mode: string;
+  action_type: string;
+  execution_state: string;
+  capability: string | null;
+  policy_decision: string | null;
+  capability_invocation_id: string | null;
+  workflow_run_id: string | null;
+  selected_evidence: string[];
+  selected_memories: string[];
+  model_route: string;
+  thinking_level: string;
+  token_cache_state: string;
+  allowed_tools: string[];
+  validators: string[];
+  stop_conditions: string[];
+  matched_stop_conditions: string[];
+  confirmation_rule: string;
+  policy_constraints: string[];
+  validation_results: string[];
+  intentional_omissions: string[];
   created_at: string;
 };
 

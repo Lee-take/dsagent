@@ -34,6 +34,8 @@ import type {
   WorkspaceScope,
 } from "./types";
 
+type RunStatusStepState = "done" | "current" | "waiting" | "needs_action" | "blocked";
+
 type TranslationSet = {
   brandTagline: string;
   navLabel: string;
@@ -41,6 +43,45 @@ type TranslationSet = {
     workbench: string;
     memory: string;
     approvals: string;
+    newChat: string;
+    conversations: string;
+    untitledConversation: string;
+    plugins: string;
+    settings: string;
+    contextCompressed: string;
+    pin: string;
+    unpin: string;
+    pinned: string;
+    archive: string;
+    rename: string;
+    renameConversation: string;
+  };
+  appUpdate: {
+    update: string;
+    checking: string;
+    installing: string;
+    installStarted: (version: string) => string;
+    installFailed: string;
+  };
+  settingsPanel: {
+    title: string;
+    deepSeekApiKey: string;
+    fallbackApiKey: string;
+    apiKeyPlaceholder: string;
+    apiKeyConfiguredPlaceholder: string;
+    apiKeyReady: string;
+    fallbackApiKeyPlaceholder: string;
+    workspaceDirectory: string;
+    chooseWorkspace: string;
+    saveWorkspace: string;
+    balance: string;
+    queryBalance: string;
+    queryingBalance: string;
+    balanceAvailable: string;
+    balanceUnavailable: string;
+    balanceNotQueried: string;
+    balanceFailed: string;
+    balanceEmpty: string;
   };
   controls: {
     modelRoute: string;
@@ -147,28 +188,109 @@ type TranslationSet = {
     title: string;
     summary: string;
   };
+  chatWorkbench: {
+    title: string;
+    assistantLabel: string;
+    userLabel: string;
+    assistantMessage: string;
+    taskTitlePlaceholder: string;
+    composerPlaceholder: string;
+    quickAsk: string;
+    quickDraft: string;
+    quickAnalyze: string;
+    saveTask: string;
+    readyStatus: string;
+    sendingStatus: string;
+    pendingStages: string[];
+    searchPending: string;
+    actionPlanLabel: string;
+    missingPrerequisitesLabel: string;
+    memoryCandidatesLabel: string;
+    actionState: Record<
+      "proposed" | "waiting_prerequisite" | "needs_confirmation" | "blocked" | "succeeded" | "failed",
+      string
+    >;
+    emptyPrompt: string;
+    desktopRuntimeMissing: string;
+    deepSeekRequestFailed: string;
+    deepSeekResponseReadFailed: string;
+    deepSeekKeyTitle: string;
+    deepSeekKeyBody: string;
+    deepSeekKeyPlaceholder: string;
+    deepSeekKeyRequired: string;
+    workspaceTitle: string;
+    workspaceBody: string;
+    networkSearchTitle: string;
+    networkSearchBody: string;
+    confirmAndRun: string;
+    confirmingAction: string;
+    resumeAction: string;
+    resumingAction: string;
+    resumeActionFailed: string;
+    continue: string;
+    cancel: string;
+  };
+  skills: {
+    title: string;
+    enabled: string;
+    operationsTitle: string;
+    operationsDescription: string;
+  };
+  runStatus: {
+    title: string;
+    current: string;
+    workflowSteps: string;
+    readyTitle: string;
+    readyBody: string;
+    runningTitle: string;
+    runningBody: string;
+    needsApprovalTitle: string;
+    needsApprovalBody: string;
+    doneTitle: string;
+    doneBody: string;
+    failedTitle: string;
+    failedBody: string;
+    agentActionTitle: string;
+    agentActionBody: string;
+    permissionsAndTools: string;
+    routeDetails: string;
+    steps: {
+      understand: string;
+      evidence: string;
+      memory: string;
+      deepseek: string;
+      validate: string;
+      report: string;
+    };
+    stepDetails: {
+      understand: string;
+      evidence: string;
+      memory: string;
+      deepseek: string;
+      validate: string;
+      report: string;
+    };
+    stepState: Record<RunStatusStepState, string>;
+  };
   localSetup: {
     title: string;
     required: string;
     ready: string;
     appData: string;
     settingsFile: string;
+    workspaceName: string;
+    workspaceNamePlaceholder: string;
     workspaceDir: string;
-    evidenceDir: string;
-    exportDir: string;
     workspacePlaceholder: string;
-    evidencePlaceholder: string;
-    exportPlaceholder: string;
     choose: string;
     chooseFailed: string;
     workspaceDialogTitle: string;
-    evidenceDialogTitle: string;
-    exportDialogTitle: string;
     save: string;
     saving: string;
     saved: string;
     failed: string;
     loadFailed: string;
+    managedStructure: string;
   };
   deepSeekPricing: {
     title: string;
@@ -191,7 +313,6 @@ type TranslationSet = {
   };
   operationsBriefing: {
     title: string;
-    folderPlaceholder: string;
     run: string;
     running: string;
     seedTemplates: string;
@@ -583,15 +704,54 @@ type TranslationSet = {
 
 export const translations: Record<Language, TranslationSet> = {
   zh: {
-    brandTagline: "本地优先 Agent OS",
+    brandTagline: "DeepSeek 本地 Agent",
     navLabel: "主导航",
     nav: {
-      workbench: "工作台",
+      workbench: "对话",
       memory: "记忆",
       approvals: "审批",
+      newChat: "新对话",
+      conversations: "对话",
+      untitledConversation: "未命名对话",
+      plugins: "插件",
+      settings: "设置",
+      contextCompressed: "已压缩",
+      pin: "置顶",
+      unpin: "取消置顶",
+      pinned: "已置顶",
+      archive: "归档",
+      rename: "重命名",
+      renameConversation: "重命名对话",
+    },
+    appUpdate: {
+      update: "更新",
+      checking: "检查更新",
+      installing: "正在更新",
+      installStarted: (version) => `已启动 ${version} 安装程序`,
+      installFailed: "更新启动失败",
+    },
+    settingsPanel: {
+      title: "设置",
+      deepSeekApiKey: "DeepSeek API key",
+      fallbackApiKey: "备用 DeepSeek API key",
+      apiKeyPlaceholder: "输入主 key，当前窗口内使用",
+      apiKeyConfiguredPlaceholder: "••••••••••••••••（已配置）",
+      apiKeyReady: "API key 已通过启动检测",
+      fallbackApiKeyPlaceholder: "主 key 不可用时自动尝试",
+      workspaceDirectory: "工作目录",
+      chooseWorkspace: "选择目录",
+      saveWorkspace: "保存目录",
+      balance: "DeepSeek 余额",
+      queryBalance: "读取真实余额",
+      queryingBalance: "正在读取",
+      balanceAvailable: "余额可用",
+      balanceUnavailable: "余额不足或不可用",
+      balanceNotQueried: "尚未读取余额",
+      balanceFailed: "DeepSeek 余额读取失败。",
+      balanceEmpty: "DeepSeek 未返回余额明细。",
     },
     controls: {
-      modelRoute: "模型路线",
+      modelRoute: "模型类型",
       largeModelProvider: "大模型",
       accessMode: "访问权限",
       thinkingLevel: "思考强度",
@@ -607,8 +767,8 @@ export const translations: Record<Language, TranslationSet> = {
     },
     modelOptions: {
       auto: "DeepSeek 自动",
-      flash: "DeepSeek 快速",
-      pro: "DeepSeek 专业",
+      flash: "Flash",
+      pro: "Pro",
     },
     accessOptions: {
       ask_every_step: "每步询问",
@@ -626,7 +786,6 @@ export const translations: Record<Language, TranslationSet> = {
       workspace: "工作区",
     },
     themeOptions: {
-      deep: "深色默认",
       ink: "水墨山水",
       porcelain: "青花瓷",
     },
@@ -815,32 +974,129 @@ export const translations: Record<Language, TranslationSet> = {
     },
     workbench: {
       stage: "0.1.0 预览",
-      title: "运营简报工作台",
+      title: "DeepSeek 对话工作台",
       summary:
-        "第一版已打通桌面工作台、权限控制、DeepSeek 路由默认值与本地内核边界。",
+        "中间用于直接对话和结果回看，左侧管理技能、插件与设置，右侧显示执行状态。",
+    },
+    chatWorkbench: {
+      title: "DeepSeek 对话工作台",
+      assistantLabel: "DS Agent",
+      userLabel: "你",
+      assistantMessage: "直接输入问题或指令。我会先判断需要的上下文、权限和插件，再连接 DeepSeek 回复。",
+      taskTitlePlaceholder: "给这个任务起个短标题",
+      composerPlaceholder: "输入问题、文字或指令",
+      quickAsk: "直接提问",
+      quickDraft: "帮我写一段",
+      quickAnalyze: "分析这段材料",
+      saveTask: "发送",
+      readyStatus: "输入后会先预处理，再连接 DeepSeek",
+      sendingStatus: "正在预处理并连接 DeepSeek",
+      pendingStages: [
+        "正在预处理指令并检查本地状态",
+        "已提交给 DeepSeek，正在等待结构化回复",
+        "DeepSeek 仍在生成，DS Agent 会继续等待并校验动作",
+        "请求仍在进行中，本地程序没有宕机",
+      ],
+      searchPending: "我已发起网络搜索权限请求，确认后可以继续。",
+      actionPlanLabel: "DS Agent 待处理动作",
+      missingPrerequisitesLabel: "需要补充",
+      memoryCandidatesLabel: "候选记忆已进入复核",
+      actionState: {
+        proposed: "待执行",
+        waiting_prerequisite: "待补充",
+        needs_confirmation: "需确认",
+        blocked: "已阻止",
+        succeeded: "已执行",
+        failed: "失败",
+      },
+      emptyPrompt: "请输入问题或指令。",
+      desktopRuntimeMissing: "当前是浏览器预览，未连接 DS Agent 桌面内核。请在 Tauri 桌面窗口中运行后再连接 DeepSeek。",
+      deepSeekRequestFailed: "DeepSeek 请求失败，DS Agent 未执行任何本地动作。请稍后重试。",
+      deepSeekResponseReadFailed: "DeepSeek 本次返回内容读取失败，DS Agent 未执行任何本地动作。请稍后重试。",
+      deepSeekKeyTitle: "连接 DeepSeek",
+      deepSeekKeyBody: "请输入 DeepSeek API key。本次先保存在当前会话内存中，不写入源码或本地文件。",
+      deepSeekKeyPlaceholder: "sk-...",
+      deepSeekKeyRequired: "请先输入 DeepSeek API key。",
+      workspaceTitle: "设置工作目录",
+      workspaceBody: "请选择一个工作目录。DS Agent 会在里面自动创建和维护项目结构。",
+      networkSearchTitle: "配置网络搜索",
+      networkSearchBody: "这条指令看起来需要网络信息。请选择搜索来源模型后继续；需要密钥的搜索源会走对应提供商配置。",
+      confirmAndRun: "确认并执行",
+      confirmingAction: "执行中",
+      resumeAction: "继续执行",
+      resumingAction: "执行中",
+      resumeActionFailed: "批准后继续执行失败。",
+      continue: "继续",
+      cancel: "取消",
+    },
+    skills: {
+      title: "技能与插件",
+      enabled: "已启用",
+      operationsTitle: "运营简报",
+      operationsDescription: "读取本地证据，调用 DeepSeek 生成可复核的经营管理简报。",
+    },
+    runStatus: {
+      title: "任务状态",
+      current: "当前状态",
+      workflowSteps: "运行步骤",
+      readyTitle: "等待你的指令",
+      readyBody: "在中间对话框输入问题或指令；需要工具、权限或工作流时，这里会显示执行状态。",
+      runningTitle: "正在执行工作流",
+      runningBody: "DS Agent 正在读取证据、组装上下文并调用 DeepSeek。",
+      needsApprovalTitle: "等待你的确认",
+      needsApprovalBody: "有权限请求需要处理；确认后可继续运行。",
+      doneTitle: "草稿已准备好",
+      doneBody: "工作流已生成可复核的结果，可在中间区域查看和导出。",
+      failedTitle: "运行遇到问题",
+      failedBody: "查看工具记录或错误提示后，可以修正输入再重试。",
+      agentActionTitle: "已解析 Agent 动作",
+      agentActionBody: "DeepSeek 返回了结构化计划，DS Agent 已将用户回复和本地动作提案分离。",
+      permissionsAndTools: "权限与工具",
+      routeDetails: "模型与路线详情",
+      steps: {
+        understand: "理解任务",
+        evidence: "读取证据",
+        memory: "选择记忆",
+        deepseek: "调用 DeepSeek",
+        validate: "校验结果",
+        report: "生成与导出",
+      },
+      stepDetails: {
+        understand: "等待你在对话框输入问题或指令。",
+        evidence: "需要时会在工作目录中读取或生成证据。",
+        memory: "需要时会从本地记忆中选择上下文。",
+        deepseek: "等待 DeepSeek Chat 就绪。",
+        validate: "等待生成后进行结果校验。",
+        report: "结果完成后可导出报告或工作包。",
+      },
+      stepState: {
+        done: "已完成",
+        current: "进行中",
+        waiting: "等待",
+        needs_action: "需确认",
+        blocked: "受阻",
+      },
     },
     localSetup: {
-      title: "本地目录设置",
+      title: "工作目录",
       required: "首次运行需要设置本机工作目录。",
-      ready: "本地目录已设置。",
+      ready: "工作目录已设置。",
       appData: "应用数据目录",
       settingsFile: "目录配置",
-      workspaceDir: "默认工作区",
-      evidenceDir: "默认证据文件夹",
-      exportDir: "默认导出文件夹",
-      workspacePlaceholder: "输入你本机的默认工作区路径",
-      evidencePlaceholder: "输入你本机的默认证据文件夹路径",
-      exportPlaceholder: "输入你本机的默认导出文件夹路径",
+      workspaceName: "工作区名称",
+      workspaceNamePlaceholder: "例如：南昌福朋经营分析",
+      workspaceDir: "工作目录",
+      workspacePlaceholder: "选择或输入一个本机工作目录",
       choose: "选择",
       chooseFailed: "打开目录选择器失败。",
-      workspaceDialogTitle: "选择默认工作区",
-      evidenceDialogTitle: "选择默认证据文件夹",
-      exportDialogTitle: "选择默认导出文件夹",
-      save: "保存目录",
+      workspaceDialogTitle: "选择工作目录",
+      save: "保存工作目录",
       saving: "保存中",
-      saved: "本地目录设置已保存。",
-      failed: "本地目录设置保存失败。",
-      loadFailed: "本地目录设置加载失败。",
+      saved: "工作目录已保存，项目结构会自动维护。",
+      failed: "工作目录保存失败。",
+      loadFailed: "工作目录加载失败。",
+      managedStructure:
+        "DS Agent 会在工作目录内自动管理证据、导出、报告、运行记录、来源、工作包、记忆和日志。",
     },
     deepSeekPricing: {
       title: "DeepSeek 价格表",
@@ -863,7 +1119,6 @@ export const translations: Record<Language, TranslationSet> = {
     },
     operationsBriefing: {
       title: "运营简报工作流",
-      folderPlaceholder: "输入你本机的证据文件夹路径",
       run: "运行",
       running: "运行中",
       seedTemplates: "写入模板",
@@ -904,7 +1159,7 @@ export const translations: Record<Language, TranslationSet> = {
       contextSelectedEvidence: "选入证据",
       contextSelectedMemories: "选入记忆",
       contextNoSelectedMemories: "本次未选入记忆",
-      contextModelRoute: "模型路线",
+      contextModelRoute: "模型类型",
       contextThinkingLevel: "思考等级",
       contextTokenCache: "Token / 缓存",
       contextValidation: "验证结果",
@@ -1285,7 +1540,7 @@ export const translations: Record<Language, TranslationSet> = {
       failed: "工作包导出请求失败。",
     },
     inspector: {
-      title: "运行控制",
+      title: "设置",
       largeModel: "大模型",
       model: "模型",
       access: "权限",
@@ -1295,15 +1550,54 @@ export const translations: Record<Language, TranslationSet> = {
     },
   },
   en: {
-    brandTagline: "Local-first Agent OS",
+    brandTagline: "DeepSeek local agent",
     navLabel: "Primary",
     nav: {
-      workbench: "Workbench",
+      workbench: "Chat",
       memory: "Memory",
       approvals: "Approvals",
+      newChat: "New chat",
+      conversations: "Chats",
+      untitledConversation: "Untitled chat",
+      plugins: "Plugins",
+      settings: "Settings",
+      contextCompressed: "Compressed",
+      pin: "Pin",
+      unpin: "Unpin",
+      pinned: "Pinned",
+      archive: "Archive",
+      rename: "Rename",
+      renameConversation: "Rename chat",
+    },
+    appUpdate: {
+      update: "Update",
+      checking: "Checking",
+      installing: "Updating",
+      installStarted: (version) => `Started installer for ${version}`,
+      installFailed: "Update failed to start",
+    },
+    settingsPanel: {
+      title: "Settings",
+      deepSeekApiKey: "DeepSeek API key",
+      fallbackApiKey: "Fallback DeepSeek API key",
+      apiKeyPlaceholder: "Enter the primary key for this window",
+      apiKeyConfiguredPlaceholder: "•••••••••••••••• (configured)",
+      apiKeyReady: "API key passed startup check",
+      fallbackApiKeyPlaceholder: "Tried automatically if the primary key fails",
+      workspaceDirectory: "Workspace directory",
+      chooseWorkspace: "Choose folder",
+      saveWorkspace: "Save folder",
+      balance: "DeepSeek balance",
+      queryBalance: "Read live balance",
+      queryingBalance: "Reading",
+      balanceAvailable: "Balance available",
+      balanceUnavailable: "Balance unavailable",
+      balanceNotQueried: "Balance not read yet",
+      balanceFailed: "DeepSeek balance query failed.",
+      balanceEmpty: "DeepSeek returned no balance details.",
     },
     controls: {
-      modelRoute: "Model route",
+      modelRoute: "Model type",
       largeModelProvider: "Large model",
       accessMode: "Access mode",
       thinkingLevel: "Thinking level",
@@ -1319,8 +1613,8 @@ export const translations: Record<Language, TranslationSet> = {
     },
     modelOptions: {
       auto: "DeepSeek Auto",
-      flash: "DeepSeek Flash",
-      pro: "DeepSeek Pro",
+      flash: "Flash",
+      pro: "Pro",
     },
     accessOptions: {
       ask_every_step: "Every step asks",
@@ -1338,7 +1632,6 @@ export const translations: Record<Language, TranslationSet> = {
       workspace: "Workspace",
     },
     themeOptions: {
-      deep: "Deep default",
       ink: "Ink landscape",
       porcelain: "Blue porcelain",
     },
@@ -1527,32 +1820,129 @@ export const translations: Record<Language, TranslationSet> = {
     },
     workbench: {
       stage: "0.1.0 preview",
-      title: "Operations Briefing Workbench",
+      title: "DeepSeek Chat Workbench",
       summary:
-        "The first runnable slice proves the desktop shell, policy controls, DeepSeek routing defaults, and local kernel boundary.",
+        "Chat and review results in the center, manage skills, plugins, and settings on the left, and follow execution status on the right.",
+    },
+    chatWorkbench: {
+      title: "DeepSeek Chat Workbench",
+      assistantLabel: "DS Agent",
+      userLabel: "You",
+      assistantMessage: "Type a question or instruction. I will check context, permissions, and plugins first, then connect to DeepSeek.",
+      taskTitlePlaceholder: "Give this task a short title",
+      composerPlaceholder: "Enter a question, text, or instruction",
+      quickAsk: "Ask directly",
+      quickDraft: "Help me draft",
+      quickAnalyze: "Analyze this text",
+      saveTask: "Send",
+      readyStatus: "Input is preprocessed before DS Agent connects to DeepSeek",
+      sendingStatus: "Preprocessing and connecting to DeepSeek",
+      pendingStages: [
+        "Preprocessing the request and checking local state",
+        "Sent to DeepSeek and waiting for the structured reply",
+        "DeepSeek is still generating; DS Agent will keep validating actions",
+        "The request is still running; the desktop app has not frozen",
+      ],
+      searchPending: "I created a network-search approval request. Confirm it to continue.",
+      actionPlanLabel: "DS Agent pending actions",
+      missingPrerequisitesLabel: "Needed setup",
+      memoryCandidatesLabel: "Memory candidates queued for review",
+      actionState: {
+        proposed: "Pending",
+        waiting_prerequisite: "Waiting for setup",
+        needs_confirmation: "Needs confirmation",
+        blocked: "Blocked",
+        succeeded: "Done",
+        failed: "Failed",
+      },
+      emptyPrompt: "Enter a question or instruction first.",
+      desktopRuntimeMissing: "This is the browser preview, so the DS Agent desktop kernel is not connected. Run the Tauri desktop window before connecting to DeepSeek.",
+      deepSeekRequestFailed: "The DeepSeek request failed. DS Agent did not run any local action. Please try again shortly.",
+      deepSeekResponseReadFailed: "DeepSeek returned a response DS Agent could not read. No local action was run. Please try again shortly.",
+      deepSeekKeyTitle: "Connect DeepSeek",
+      deepSeekKeyBody: "Enter a DeepSeek API key. For now it is kept in this session only and is not written to source or local files.",
+      deepSeekKeyPlaceholder: "sk-...",
+      deepSeekKeyRequired: "Enter a DeepSeek API key first.",
+      workspaceTitle: "Set Workspace",
+      workspaceBody: "Choose one workspace. DS Agent will create and maintain the project structure inside it.",
+      networkSearchTitle: "Configure Network Search",
+      networkSearchBody: "This instruction appears to need web information. Choose a search source model to continue; key-backed search sources use their provider configuration.",
+      confirmAndRun: "Confirm and run",
+      confirmingAction: "Running",
+      resumeAction: "Continue",
+      resumingAction: "Running",
+      resumeActionFailed: "Could not continue after approval.",
+      continue: "Continue",
+      cancel: "Cancel",
+    },
+    skills: {
+      title: "Skills & Plugins",
+      enabled: "Enabled",
+      operationsTitle: "Operations Briefing",
+      operationsDescription: "Reads local evidence and uses DeepSeek to produce a reviewable management brief.",
+    },
+    runStatus: {
+      title: "Run Status",
+      current: "Current status",
+      workflowSteps: "Workflow Steps",
+      readyTitle: "Waiting for your instruction",
+      readyBody: "Type a question or instruction in the center chat. When tools, permissions, or workflows are needed, this side panel shows execution status.",
+      runningTitle: "Workflow running",
+      runningBody: "DS Agent is reading evidence, assembling context, and calling DeepSeek.",
+      needsApprovalTitle: "Waiting for your confirmation",
+      needsApprovalBody: "A permission request needs review before the workflow can continue.",
+      doneTitle: "Draft ready",
+      doneBody: "The workflow produced reviewable results. Review and export them from the center workbench.",
+      failedTitle: "Run needs attention",
+      failedBody: "Check the tool record or error message, adjust the input, and retry.",
+      agentActionTitle: "Agent actions parsed",
+      agentActionBody: "DeepSeek returned a structured plan. DS Agent separated the reply from local action proposals.",
+      permissionsAndTools: "Permissions and tools",
+      routeDetails: "Model and route details",
+      steps: {
+        understand: "Understand task",
+        evidence: "Read evidence",
+        memory: "Select memory",
+        deepseek: "Call DeepSeek",
+        validate: "Validate result",
+        report: "Generate and export",
+      },
+      stepDetails: {
+        understand: "Waiting for a question or instruction in the chat.",
+        evidence: "Evidence is read or generated inside the workspace when needed.",
+        memory: "Local memory will be selected when useful.",
+        deepseek: "Waiting for DeepSeek Chat readiness.",
+        validate: "Validation runs after generation.",
+        report: "Export a report or work package after results are ready.",
+      },
+      stepState: {
+        done: "Done",
+        current: "Running",
+        waiting: "Waiting",
+        needs_action: "Needs action",
+        blocked: "Blocked",
+      },
     },
     localSetup: {
-      title: "Local Directory Setup",
-      required: "First run needs local working directories.",
-      ready: "Local directories are configured.",
+      title: "Workspace",
+      required: "First run needs a local workspace.",
+      ready: "Workspace is configured.",
       appData: "App data directory",
       settingsFile: "Directory settings",
-      workspaceDir: "Default workspace",
-      evidenceDir: "Default evidence folder",
-      exportDir: "Default export folder",
-      workspacePlaceholder: "Enter a default local workspace path",
-      evidencePlaceholder: "Enter a default local evidence folder path",
-      exportPlaceholder: "Enter a default local export folder path",
+      workspaceName: "Workspace name",
+      workspaceNamePlaceholder: "e.g. Operations Analysis",
+      workspaceDir: "Workspace",
+      workspacePlaceholder: "Choose or enter a local workspace",
       choose: "Choose",
       chooseFailed: "Folder picker failed to open.",
-      workspaceDialogTitle: "Choose default workspace",
-      evidenceDialogTitle: "Choose default evidence folder",
-      exportDialogTitle: "Choose default export folder",
-      save: "Save directories",
+      workspaceDialogTitle: "Choose workspace",
+      save: "Save workspace",
       saving: "Saving",
-      saved: "Local directory settings saved.",
-      failed: "Local directory setup failed.",
-      loadFailed: "Local directory settings failed to load.",
+      saved: "Workspace saved. DS Agent will maintain the project structure automatically.",
+      failed: "Workspace setup failed.",
+      loadFailed: "Workspace settings failed to load.",
+      managedStructure:
+        "DS Agent automatically manages evidence, exports, reports, runs, sources, work packages, memory, and logs inside the workspace.",
     },
     deepSeekPricing: {
       title: "DeepSeek Pricing",
@@ -1575,7 +1965,6 @@ export const translations: Record<Language, TranslationSet> = {
     },
     operationsBriefing: {
       title: "Operations Briefing Workflow",
-      folderPlaceholder: "Enter a local evidence folder path",
       run: "Run",
       running: "Running",
       seedTemplates: "Seed templates",
@@ -2023,7 +2412,7 @@ export const translations: Record<Language, TranslationSet> = {
       failed: "Work package export request failed.",
     },
     inspector: {
-      title: "Runtime Controls",
+      title: "Settings",
       largeModel: "Large model",
       model: "Model",
       access: "Access",

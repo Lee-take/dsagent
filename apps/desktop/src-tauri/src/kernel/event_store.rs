@@ -7,6 +7,7 @@ use rusqlite::{params, Connection};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::kernel::agent_context::AgentContextReceipt;
 use crate::kernel::capability::CapabilityInvocation;
 use crate::kernel::deepseek::DeepSeekChatTelemetry;
 use crate::kernel::models::{
@@ -31,6 +32,7 @@ use crate::kernel::workflow::{OperationsBriefingRun, WorkflowTemplatePackage};
 
 pub const CAPABILITY_ACCESS_REQUESTED_EVENT: &str = "capability_access.requested";
 pub const CAPABILITY_INVOCATION_RECORDED_EVENT: &str = "capability_invocation.recorded";
+pub const AGENT_CONTEXT_RECEIPT_RECORDED_EVENT: &str = "agent_context_receipt_recorded";
 pub const DEEPSEEK_CHAT_TELEMETRY_RECORDED_EVENT: &str = "deepseek_chat.telemetry_recorded";
 pub const MEMORY_CANDIDATE_PROPOSED_EVENT: &str = "memory_candidate.proposed";
 pub const MEMORY_CANDIDATE_RESOLVED_EVENT: &str = "memory_candidate.resolved";
@@ -1155,6 +1157,24 @@ impl EventStore {
         self.append(&event)
     }
 
+    pub fn append_agent_context_receipt(
+        &self,
+        receipt: &AgentContextReceipt,
+    ) -> EventStoreResult<()> {
+        let event = KernelEvent::new(AGENT_CONTEXT_RECEIPT_RECORDED_EVENT, receipt)?;
+        self.append(&event)
+    }
+
+    pub fn list_agent_context_receipts(&self) -> EventStoreResult<Vec<AgentContextReceipt>> {
+        let events = self.list_by_type(AGENT_CONTEXT_RECEIPT_RECORDED_EVENT, 100)?;
+        events
+            .into_iter()
+            .map(|event| {
+                serde_json::from_str::<AgentContextReceipt>(&event.payload_json).map_err(Into::into)
+            })
+            .collect()
+    }
+
     pub fn list_deepseek_chat_telemetry(&self) -> EventStoreResult<Vec<DeepSeekChatTelemetry>> {
         let events = self.list_by_type(DEEPSEEK_CHAT_TELEMETRY_RECORDED_EVENT, 500)?;
         events
@@ -1591,6 +1611,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::{EventStore, EventStoreError, MEMORY_RECORD_LINKED_EVENT};
+    use crate::kernel::agent_context::AgentContextReceipt;
     use crate::kernel::capability::{CapabilityInvocation, CapabilityInvocationStatus};
     use crate::kernel::deepseek::{DeepSeekChatCacheStatus, DeepSeekChatTelemetry};
     use crate::kernel::models::{AccessMode, FoundationState};
@@ -1602,7 +1623,7 @@ mod tests {
     };
     use crate::kernel::policy::{
         request_capability_access, CapabilityAccessStatus, CapabilityGrantState, CapabilityKind,
-        PermissionAuditEntry,
+        PermissionAuditEntry, PolicyDecision,
     };
     use crate::kernel::work_package::export_work_package;
     use crate::kernel::workflow::WorkflowTemplatePackage;
@@ -3709,6 +3730,31 @@ mod tests {
     }
 
     #[test]
+    fn appends_and_lists_agent_context_receipts() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let mut receipt =
+            AgentContextReceipt::new("file_read", "succeeded", "auto", "fast", "cache: miss");
+        receipt
+            .selected_evidence
+            .push("target:reports/source.md".to_string());
+        receipt
+            .validation_results
+            .push("capability invocation recorded".to_string());
+        receipt
+            .intentional_omissions
+            .push("raw user prompt not stored".to_string());
+
+        store
+            .append_agent_context_receipt(&receipt)
+            .expect("context receipt appends");
+        let receipts = store
+            .list_agent_context_receipts()
+            .expect("context receipts load");
+
+        assert_eq!(receipts, vec![receipt]);
+    }
+
+    #[test]
     fn resolves_pending_capability_access_request() {
         let store = EventStore::open_memory().expect("memory store opens");
         let request = request_capability_access(AccessMode::FullAccess, CapabilityKind::EmailSend)
@@ -3958,19 +4004,21 @@ mod tests {
     fn reusable_capability_grant_requires_explicit_user_approval() {
         let store = EventStore::open_memory().expect("memory store opens");
         let auto_request =
-            request_capability_access(AccessMode::LimitedAuto, CapabilityKind::BrowserBrowse)
-                .expect("auto-approved browser request builds");
+            request_capability_access(AccessMode::LimitedAuto, CapabilityKind::ComputerScreenshot)
+                .expect("auto-approved screenshot request builds");
+        assert_eq!(auto_request.decision, PolicyDecision::Allow);
         store
             .append_capability_access_request(&auto_request)
             .expect("auto-approved request appends");
 
         assert!(!store
-            .has_user_approved_capability(CapabilityKind::BrowserBrowse)
+            .has_user_approved_capability(CapabilityKind::ComputerScreenshot)
             .expect("grant check works"));
 
         let pending_request =
-            request_capability_access(AccessMode::AskOnRisk, CapabilityKind::BrowserBrowse)
-                .expect("pending browser request builds");
+            request_capability_access(AccessMode::AskOnRisk, CapabilityKind::ComputerScreenshot)
+                .expect("pending screenshot request builds");
+        assert_eq!(pending_request.decision, PolicyDecision::Ask);
         store
             .append_capability_access_request(&pending_request)
             .expect("pending request appends");
@@ -3978,12 +4026,12 @@ mod tests {
             .resolve_capability_access_request(
                 pending_request.id,
                 true,
-                "User approved browser browsing.".to_string(),
+                "User approved screen capture.".to_string(),
             )
             .expect("pending request resolves");
 
         assert!(store
-            .has_user_approved_capability(CapabilityKind::BrowserBrowse)
+            .has_user_approved_capability(CapabilityKind::ComputerScreenshot)
             .expect("grant check works"));
         let records = store
             .list_capability_access_records()
@@ -3991,7 +4039,7 @@ mod tests {
         let approved_record = records
             .iter()
             .find(|record| record.request.id == pending_request.id)
-            .expect("approved browser record exists");
+            .expect("approved screenshot record exists");
         assert_eq!(approved_record.grant_state, CapabilityGrantState::Reusable);
     }
 

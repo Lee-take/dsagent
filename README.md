@@ -129,7 +129,7 @@ plugin execution, and polished signed installers are not complete in `0.1.0`.
 当前代码库的基础功能目标如下：
 
 - 基于 Tauri、React、TypeScript 和 Rust 的 Windows 桌面应用外壳。
-- 本地优先的工作目录设置，包括工作区、证据目录和导出目录。
+- 本地优先的工作目录设置：首次只选择一个工作目录，证据、导出、报告、运行记录和工作包等子目录由 DS Agent 自动维护。
 - 通过本地 `DEEPSEEK_API_KEY` 环境变量检测 DeepSeek 可用性，但不保存、不展示密钥
   明文。
 - 可选的本地 DeepSeek 联调脚本，用于 Chat Completions 和经营简报合成验证。
@@ -172,9 +172,17 @@ Desktop source commands:
 ```powershell
 npx pnpm@9.15.9 install
 npx pnpm@9.15.9 test
+npx pnpm@9.15.9 tauri:dev
 npx pnpm@9.15.9 --filter @deepseek-agent-os/desktop tauri build --debug
 npx pnpm@9.15.9 dev
 ```
+
+Use `tauri:dev` for the real DS Agent desktop window. The root `dev` command
+starts only the Vite web preview and is useful for frontend layout work, but it
+does not provide the Tauri command bridge that the chat workflow uses. On
+Windows, `tauri:dev` automatically keeps Rust build output under the system
+temporary directory when `CARGO_TARGET_DIR` is not set, avoiding MinGW path
+parsing failures when the source checkout path contains spaces.
 
 `pnpm test` runs the repository secret scan, desktop frontend build, and Rust
 tests. The scan covers tracked files plus unignored new files. On Windows, the
@@ -290,8 +298,9 @@ not used as the workspace or data directory.
 - Program files live in the installer-selected application location.
 - App state, SQLite events, logs, and local settings live under the OS-provided
   app data directory.
-- First run asks for a default workspace, evidence folder, and export folder,
-  with native folder picker buttons for each path.
+- First run asks for one workspace. Evidence, exports, reports, runs, work
+  packages, and related artifact folders are managed automatically under that
+  workspace.
 - File, folder, Drive-local, evidence, and export-package paths remain runtime
   user inputs on the user's own machine.
 - Local directory settings are stored as `local-directories.json` under the app
@@ -310,6 +319,13 @@ focused instead of loading every available source into each request, so users
 get faster feedback while deeper workflows can still verify their evidence. The
 first public preview brings the desktop shell, local event history, policy
 model, and DeepSeek route model into one buildable Windows app.
+
+The model boundary is explicit: DeepSeek handles open-ended reasoning,
+understanding, planning, and generation, while DS Agent handles deterministic
+local preflight, protocol context, permission checks, workspace structure, tool
+execution, audit records, and artifacts. Model-returned actions are proposals
+until DS Agent validates them against local policy. See
+[`docs/AGENT_MODEL_BOUNDARY.md`](docs/AGENT_MODEL_BOUNDARY.md).
 
 Context receipts show loop mode, workflow policy, selected evidence, memory,
 model route, token/cache state, validation results, and intentional omissions.
@@ -355,10 +371,11 @@ accounts, while screen inspection and computer control use the configured bridge
 or local Windows/macOS route. No API key or account credential is stored by this
 settings slice.
 
-Setup directory clarity v1 keeps program files, app data, workspace, evidence,
-and export folders separate. It stores setup choices in the current user's app
-data directory and uses native folder pickers for workspace, evidence, and
-export locations.
+Setup directory clarity v2 keeps program files and app data separate from the
+user-selected workspace. DS Agent stores that single setup choice in the current
+user's app data directory, uses a native folder picker for the workspace, and
+automatically manages evidence, exports, reports, runs, sources, work packages,
+memory, and logs under that workspace.
 
 Windows packaging clarity v1 builds the local Windows preview as an NSIS
 installer. It keeps macOS packaging configured but pending verification on a

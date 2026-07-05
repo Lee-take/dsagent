@@ -216,9 +216,10 @@ mod tests {
         let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
         let handle = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept fake bridge request");
-            let mut buffer = [0_u8; 4096];
-            let bytes_read = stream.read(&mut buffer).expect("read request");
-            let raw = String::from_utf8(buffer[..bytes_read].to_vec()).expect("request utf8");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .expect("set read timeout");
+            let raw = read_one_http_request(&mut stream);
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 response_body.len(),
@@ -231,5 +232,40 @@ mod tests {
         });
 
         (endpoint, handle)
+    }
+
+    fn read_one_http_request(stream: &mut std::net::TcpStream) -> String {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        loop {
+            let bytes_read = stream.read(&mut buffer).expect("read request chunk");
+            if bytes_read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..bytes_read]);
+            if http_request_complete(&request) {
+                break;
+            }
+        }
+
+        String::from_utf8(request).expect("request utf8")
+    }
+
+    fn http_request_complete(request: &[u8]) -> bool {
+        let Some(headers_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+            return false;
+        };
+        let headers = String::from_utf8_lossy(&request[..headers_end]);
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0);
+
+        request.len() >= headers_end + 4 + content_length
     }
 }

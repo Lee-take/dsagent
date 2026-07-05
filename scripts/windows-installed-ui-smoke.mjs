@@ -9,7 +9,7 @@ import net from "node:net";
 
 const isWindows = process.platform === "win32";
 const rawArgs = process.argv.slice(2).filter((arg) => arg !== "--");
-const allowedArgs = new Set(["--help", "--self-test", "--workflow"]);
+const allowedArgs = new Set(["--agent-chat", "--help", "--self-test", "--workflow"]);
 validateArgs(rawArgs, allowedArgs, "test:windows-installed-ui");
 
 if (rawArgs.includes("--help")) {
@@ -18,6 +18,7 @@ if (rawArgs.includes("--help")) {
       "Usage: pnpm test:windows-installed-ui [-- <flags>]",
       "",
       "Flags:",
+      "  --agent-chat Exercise the installed Tauri agent chat command bridge.",
       "  --self-test Run deterministic helper checks without launching DS Agent.",
       "  --workflow  Exercise the installed Tauri workflow and report exports.",
     ].join("\n"),
@@ -31,6 +32,9 @@ const executablePath = selfTestMode ? null : resolveExecutablePath();
 const includeWorkflowSmoke =
   args.has("--workflow") ||
   process.env.DEEPSEEK_AGENT_OS_INSTALLED_UI_WORKFLOW_SMOKE === "1";
+const includeAgentChatSmoke =
+  args.has("--agent-chat") ||
+  process.env.DEEPSEEK_AGENT_OS_INSTALLED_AGENT_CHAT_SMOKE === "1";
 const expectModelTelemetry = Boolean(process.env.DEEPSEEK_API_KEY?.trim());
 const timeoutMs = readPositiveInteger(
   process.env.DEEPSEEK_AGENT_OS_INSTALLED_UI_TIMEOUT_MS ?? "20000",
@@ -101,6 +105,9 @@ async function main() {
       "Boolean(window.__TAURI_INTERNALS__ || window.__TAURI__)",
     );
     const screenshotPath = await captureScreenshot(cdp, screenshotDir);
+    const agentChat = includeAgentChatSmoke
+      ? await runInstalledAgentChatSmoke(cdp)
+      : null;
     const workflow = includeWorkflowSmoke
       ? await runInstalledWorkflowSmoke(cdp)
       : null;
@@ -130,6 +137,7 @@ async function main() {
           body_chars: String(bodyText).length,
           checks,
           screenshot: screenshotPath,
+          agent_chat: agentChat ?? "skipped",
           workflow: workflow ?? "skipped",
         },
         null,
@@ -305,7 +313,11 @@ async function invokeTauri(client, command, params = {}, timeout = workflowTimeo
       if (typeof invoke !== "function") {
         throw new Error("Tauri invoke bridge is not available.");
       }
-      return await invoke(command, params);
+      try {
+        return await invoke(command, params);
+      } catch (error) {
+        throw new Error(String(error?.message ?? error));
+      }
     })()
   `;
 
@@ -316,6 +328,58 @@ async function invokeTauri(client, command, params = {}, timeout = workflowTimeo
   );
 }
 
+async function runInstalledAgentChatSmoke(client) {
+  if (!process.env.DEEPSEEK_API_KEY?.trim()) {
+    throw new Error("DEEPSEEK_API_KEY is required for --agent-chat smoke.");
+  }
+
+  const telemetryBefore = await listDeepSeekTelemetry(client);
+  const response = await invokeTauri(
+    client,
+    "run_agent_chat",
+    {
+      prompt: "请用一句中文回答：DS Agent 的桌面对话桥已经连到 DeepSeek 了吗？",
+      largeModelProvider: "deepseek",
+      modelRoute: "flash",
+      thinkingLevel: "fast",
+      accessMode: "ask_on_risk",
+      networkSearchSourceModel: null,
+      apiKeyOverride: null,
+    },
+    workflowTimeoutMs,
+  );
+  const content = String(response?.content ?? "").trim();
+  if (!content) {
+    throw new Error("Installed agent chat smoke expected non-empty assistant content.");
+  }
+
+  const telemetryAfter = await listDeepSeekTelemetry(client);
+  const newEntries = newTelemetryEntries(telemetryBefore, telemetryAfter);
+  const latest = newEntries[0];
+  if (!latest) {
+    throw new Error("Installed agent chat smoke expected a new DeepSeek telemetry event.");
+  }
+
+  return {
+    ok: true,
+    content_chars: content.length,
+    response_model: response?.model ?? null,
+    protocol_version: response?.protocol_version ?? null,
+    proposed_actions: Array.isArray(response?.proposed_actions)
+      ? response.proposed_actions.length
+      : null,
+    missing_prerequisites: Array.isArray(response?.missing_prerequisites)
+      ? response.missing_prerequisites.length
+      : null,
+    model_telemetry: {
+      new_entries: newEntries.length,
+      latest_model: latest.model ?? null,
+      latest_cache_status: latest.cache_status ?? null,
+      latest_total_tokens: latest.total_tokens ?? null,
+    },
+  };
+}
+
 async function runInstalledWorkflowSmoke(client) {
   const startedAt = new Date();
   const runRoot = path.join(
@@ -323,13 +387,11 @@ async function runInstalledWorkflowSmoke(client) {
     startedAt.toISOString().replaceAll(":", "-").replaceAll(".", "-"),
   );
   const workspaceDir = path.join(runRoot, "workspace");
-  const evidenceDir = path.join(runRoot, "evidence");
-  const exportDir = path.join(runRoot, "exports");
-  await Promise.all([
-    mkdir(workspaceDir, { recursive: true }),
-    mkdir(evidenceDir, { recursive: true }),
-    mkdir(exportDir, { recursive: true }),
-  ]);
+  const evidenceDir = path.join(workspaceDir, "evidence");
+  const exportDir = path.join(workspaceDir, "exports");
+  await mkdir(workspaceDir, { recursive: true });
+  await mkdir(evidenceDir, { recursive: true });
+  await mkdir(exportDir, { recursive: true });
 
   const directoryState = await invokeTauri(client, "get_local_directory_state", {});
   const settingsBackup = await backupSettingsFile(directoryState?.settings_file);
@@ -347,6 +409,7 @@ async function runInstalledWorkflowSmoke(client) {
       "save_local_directory_settings",
       {
         workspaceDir,
+        workspaceName: "Installed Workflow Smoke",
         evidenceDir,
         exportDir,
       },
@@ -518,7 +581,7 @@ async function summarizeModelTelemetry(client, telemetryBefore) {
 
   const beforeIds = new Set(telemetryBefore.map((entry) => entry?.id));
   const telemetryAfter = await listDeepSeekTelemetry(client);
-  const newEntries = telemetryAfter.filter((entry) => !beforeIds.has(entry?.id));
+  const newEntries = newTelemetryEntries(telemetryBefore, telemetryAfter);
   const latest = newEntries[0];
 
   if (!latest) {
@@ -535,6 +598,11 @@ async function summarizeModelTelemetry(client, telemetryBefore) {
     latest_cache_status: latest.cache_status ?? null,
     latest_total_tokens: latest.total_tokens ?? null,
   };
+}
+
+function newTelemetryEntries(telemetryBefore, telemetryAfter) {
+  const beforeIds = new Set((telemetryBefore ?? []).map((entry) => entry?.id));
+  return (telemetryAfter ?? []).filter((entry) => !beforeIds.has(entry?.id));
 }
 
 function assertInvocationSucceeded(invocation, label) {

@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
+  Archive,
   ArchiveRestore,
   Brain,
   Check,
@@ -8,10 +9,10 @@ import {
   ClipboardList,
   Cloud,
   Database,
+  Download,
   FileText,
   FolderOpen,
   Globe2,
-  Languages,
   Link2,
   Mail,
   MonitorCog,
@@ -19,17 +20,40 @@ import {
   Network,
   PackageOpen,
   Pencil,
+  Pin,
+  Play,
   Plus,
   Search,
+  Send,
   ShieldCheck,
   TerminalSquare,
   X,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import type { ChangeEvent, FormEvent } from "react";
+import type { ChangeEvent, FormEvent, MouseEvent } from "react";
+import {
+  derivePersistedConversationTitle,
+  summarizeConversationTitleFromText,
+} from "./conversationTitle";
+import {
+  agentChatPendingStageDelaysMs,
+  agentChatPendingStageIndex,
+} from "./agentChatPending";
+import { summarizeAgentContextReceipt } from "./agentContextReceipt";
+import {
+  deepSeekApiKeyCandidates,
+  settingsPanelItems,
+  shouldExposePluginsSidebarEntry,
+} from "./settingsPanel";
 import { translations } from "./i18n";
 import type {
   AccessMode,
+  AgentChatActionProposal,
+  AgentChatMissingPrerequisite,
+  AgentChatResponse,
+  AgentContextReceipt,
+  AppUpdateInstallResult,
+  AppUpdateStatus,
   CapabilityAccessRecord,
   CapabilityDescriptor,
   CapabilityFamily,
@@ -39,12 +63,14 @@ import type {
   DeepSeekChatCacheState,
   DeepSeekChatTelemetry,
   DeepSeekPricingState,
+  DeepSeekUserBalanceResponse,
   ComputerUseBackendStatus,
   DeepSeekCredentialStatus,
   FoundationState,
   LargeModelProvider,
   Language,
   LocalDirectoryState,
+  MemoryCandidate,
   MemoryCandidateMergePreview,
   MemoryCandidateReplacePreview,
   MemoryCandidateRecord,
@@ -203,6 +229,15 @@ const fallbackLocalDirectoryState: LocalDirectoryState = {
   needs_setup: true,
 };
 
+const fallbackAppUpdateStatus: AppUpdateStatus = {
+  current_version: "0.1.0",
+  latest_version: null,
+  update_available: false,
+  asset_name: null,
+  release_url: null,
+  message: null,
+};
+
 const fallbackDeepSeekPricingState: DeepSeekPricingState = {
   app_data_dir: "",
   settings_file: "",
@@ -219,6 +254,9 @@ const fallbackDeepSeekPricingState: DeepSeekPricingState = {
 
 const LANGUAGE_STORAGE_KEY = "deepseek-agent-os:ui-language:v1";
 const THEME_STORAGE_KEY = "deepseek-agent-os:theme-style:v1";
+const AGENT_CONVERSATIONS_STORAGE_KEY = "deepseek-agent-os:agent-conversations:v1";
+const AGENT_CONTEXT_COMPRESSION_SOFT_LIMIT_TOKENS = 96_000;
+const AGENT_CONTEXT_RECENT_MESSAGE_COUNT = 10;
 
 const memoryTypeValues: MemoryType[] = [
   "preference",
@@ -245,7 +283,297 @@ type MemoryEditDraft = {
   expires_at: string;
 };
 
-type NavSection = "workbench" | "memory" | "approvals";
+type WorkflowStepState = "done" | "current" | "waiting" | "needs_action" | "blocked";
+type WorkflowStatusTone = "ready" | "running" | "needs_action" | "done" | "blocked";
+type AgentChatSetupPrompt = "deepseek_key" | "workspace" | "network_search";
+
+type AgentConversationMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  model?: string;
+  protocol_version?: string;
+  proposed_actions?: AgentChatActionProposal[];
+  missing_prerequisites?: AgentChatMissingPrerequisite[];
+  memory_candidates?: MemoryCandidate[];
+  run_error?: string;
+  created_at: string;
+};
+
+type AgentConversationSession = {
+  id: string;
+  title: string;
+  messages: AgentConversationMessage[];
+  updated_at: string;
+  context_state: "normal" | "compressed";
+  pinned: boolean;
+  archived: boolean;
+  manual_title: boolean;
+};
+
+type AgentConversationMenuState = {
+  conversationId: string;
+  x: number;
+  y: number;
+};
+
+type WorkflowStep = {
+  key: string;
+  label: string;
+  detail: string;
+  state: WorkflowStepState;
+};
+
+function createClientId(prefix: string): string {
+  return `${prefix}-${globalThis.crypto?.randomUUID?.() ?? Date.now().toString(36)}`;
+}
+
+function createEmptyAgentConversation(): AgentConversationSession {
+  const now = new Date().toISOString();
+  return {
+    id: createClientId("conversation"),
+    title: "",
+    messages: [],
+    updated_at: now,
+    context_state: "normal",
+    pinned: false,
+    archived: false,
+    manual_title: false,
+  };
+}
+
+function deriveConversationTitle(messages: AgentConversationMessage[], fallback: string): string {
+  const firstUserMessage =
+    messages.find((message) => message.role === "user")?.content.trim() || fallback.trim();
+  return summarizeConversationTitleFromText(firstUserMessage);
+}
+
+function sortAgentConversations(
+  conversations: AgentConversationSession[],
+): AgentConversationSession[] {
+  return [...conversations].sort((left, right) => {
+    if (left.pinned !== right.pinned) {
+      return left.pinned ? -1 : 1;
+    }
+    return new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime();
+  });
+}
+
+function estimateConversationTokens(messages: AgentConversationMessage[]): number {
+  const charCount = messages.reduce((total, message) => total + message.content.length, 0);
+  return Math.ceil(charCount / 3);
+}
+
+function buildAgentConversationContextPrompt(
+  prompt: string,
+  messages: AgentConversationMessage[],
+): { prompt: string; compressed: boolean } {
+  if (messages.length === 0) {
+    return { prompt, compressed: false };
+  }
+
+  const estimatedTokens = estimateConversationTokens(messages);
+  const shouldCompress = estimatedTokens > AGENT_CONTEXT_COMPRESSION_SOFT_LIMIT_TOKENS;
+  const recentCount = shouldCompress ? AGENT_CONTEXT_RECENT_MESSAGE_COUNT : 16;
+  const recentMessages = messages.slice(-recentCount);
+  const olderMessages = messages.slice(0, Math.max(0, messages.length - recentCount));
+  const compactOlderContext = olderMessages.slice(-24).map((message, index) => {
+    const excerpt = message.content.replace(/\s+/g, " ").trim().slice(0, 220);
+    return `${index + 1}. ${message.role}: ${excerpt}`;
+  });
+  const recentContext = recentMessages.map((message, index) => {
+    return `${index + 1}. ${message.role}: ${message.content.trim()}`;
+  });
+  const contextSections = [
+    "DS Agent conversation context. Use this as prior context, but answer the current user message directly.",
+    `Estimated prior context tokens: ${estimatedTokens}.`,
+  ];
+
+  if (compactOlderContext.length > 0) {
+    contextSections.push(
+      shouldCompress
+        ? "Older turns were automatically compacted because the conversation is approaching the DeepSeek context budget:"
+        : "Older turns:",
+      compactOlderContext.join("\n"),
+    );
+  }
+
+  contextSections.push("Recent turns:", recentContext.join("\n"));
+  contextSections.push("Current user message:", prompt);
+
+  return {
+    prompt: contextSections.join("\n\n"),
+    compressed: shouldCompress,
+  };
+}
+
+function latestAssistantMessage(
+  messages: AgentConversationMessage[],
+): AgentConversationMessage | undefined {
+  return [...messages].reverse().find((message) => message.role === "assistant");
+}
+
+function messageHasAgentEnvelope(message: AgentConversationMessage | undefined): boolean {
+  return (
+    ((message?.proposed_actions?.length ?? 0) > 0) ||
+    ((message?.missing_prerequisites?.length ?? 0) > 0)
+  );
+}
+
+function userFacingAgentRunError(
+  message: AgentConversationMessage | undefined,
+  fallback: {
+    requestFailed: string;
+    responseReadFailed: string;
+  },
+): string {
+  const explicitRunError = message?.run_error?.trim();
+  if (explicitRunError) {
+    return explicitRunError;
+  }
+
+  const content = message?.content?.trim() ?? "";
+  if (
+    content.includes("deepseek chat response could not be read") ||
+    content.includes("error decoding response body")
+  ) {
+    return fallback.responseReadFailed;
+  }
+
+  return "";
+}
+
+function userFacingAgentMessageContent(
+  message: AgentConversationMessage,
+  fallback: {
+    responseReadFailed: string;
+  },
+): string {
+  if (
+    message.role === "assistant" &&
+    (message.content.includes("deepseek chat response could not be read") ||
+      message.content.includes("error decoding response body"))
+  ) {
+    return fallback.responseReadFailed;
+  }
+
+  return message.content;
+}
+
+function userFacingAgentActionDetail(action: AgentChatActionProposal): string {
+  const dispatchNote = action.dispatch_note?.trim();
+  if (action.action_type === "browser_open" && action.execution_state === "succeeded" && dispatchNote) {
+    return dispatchNote;
+  }
+
+  const blockedReason = action.blocked_reason?.trim();
+  if (blockedReason) {
+    return blockedReason;
+  }
+
+  const reason = action.reason?.trim();
+  if (reason) {
+    return reason;
+  }
+
+  const target = action.target?.trim();
+  if (target) {
+    return target;
+  }
+
+  if (action.execution_state !== "succeeded") {
+    return dispatchNote || "";
+  }
+
+  return "";
+}
+
+function shouldShowAgentActionInChat(action: AgentChatActionProposal): boolean {
+  return (
+    action.execution_state === "needs_confirmation" ||
+    action.execution_state === "blocked" ||
+    action.execution_state === "failed"
+  );
+}
+
+function shouldShowWorkflowStepDetail(step: WorkflowStep): boolean {
+  return step.detail.trim().length > 0 && step.state === "blocked";
+}
+
+function readInitialAgentConversations(): AgentConversationSession[] {
+  if (typeof window === "undefined") {
+    return [createEmptyAgentConversation()];
+  }
+
+  try {
+    const stored = window.localStorage.getItem(AGENT_CONVERSATIONS_STORAGE_KEY);
+    const parsed = stored ? JSON.parse(stored) : null;
+    if (!Array.isArray(parsed)) {
+      return [createEmptyAgentConversation()];
+    }
+    const sessions = parsed
+      .filter((session): session is AgentConversationSession => {
+        return (
+          typeof session?.id === "string" &&
+          Array.isArray(session.messages) &&
+          typeof session.updated_at === "string"
+        );
+      })
+      .map((session) => {
+        const manualTitle = session.manual_title === true;
+        const storedTitle = typeof session.title === "string" ? session.title : "";
+        const firstUserMessage =
+          session.messages.find((message) => message.role === "user")?.content.trim() || "";
+
+        return {
+          id: session.id,
+          title: derivePersistedConversationTitle({
+            firstUserMessage,
+            manualTitle,
+            storedTitle,
+          }),
+          messages: session.messages,
+          updated_at: session.updated_at,
+          context_state:
+            session.context_state === "compressed" ? ("compressed" as const) : ("normal" as const),
+          pinned: session.pinned === true,
+          archived: session.archived === true,
+          manual_title: manualTitle,
+        };
+      });
+    if (!sessions.length) {
+      return [createEmptyAgentConversation()];
+    }
+    if (sessions.every((session) => session.archived)) {
+      return [createEmptyAgentConversation(), ...sortAgentConversations(sessions)];
+    }
+    return sortAgentConversations(sessions);
+  } catch {
+    return [createEmptyAgentConversation()];
+  }
+}
+
+function hasDesktopRuntime(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+function prerequisitesNeedNetworkSearchSetup(
+  prerequisites: AgentChatMissingPrerequisite[],
+): boolean {
+  return prerequisites.some((prerequisite) => {
+    const kind = prerequisite.kind.trim().toLowerCase();
+    return kind === "network_search" || kind === "search" || kind === "web_search";
+  });
+}
+
+function prerequisitesNeedWorkspaceSetup(
+  prerequisites: AgentChatMissingPrerequisite[],
+): boolean {
+  return prerequisites.some((prerequisite) => {
+    const kind = prerequisite.kind.trim().toLowerCase();
+    return kind === "workspace" || kind === "work_root" || kind === "local_workspace";
+  });
+}
 
 function isoToDateInputValue(value: string | null): string {
   return value ? value.slice(0, 10) : "";
@@ -273,14 +601,14 @@ function readInitialLanguage(): Language {
 
 function readInitialThemeStyle(): ThemeStyle {
   if (typeof window === "undefined") {
-    return "deep";
+    return "porcelain";
   }
 
   const storedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
   if (storedTheme === "ink" || storedTheme === "porcelain") {
     return storedTheme;
   }
-  return "deep";
+  return "porcelain";
 }
 
 function formatTaskDate(value: string, language: Language) {
@@ -334,14 +662,16 @@ export function App() {
     useState<ModelDrivenToolStrategy>(fallbackModelDrivenToolStrategy);
   const [localDirectoryState, setLocalDirectoryState] =
     useState<LocalDirectoryState>(fallbackLocalDirectoryState);
+  const [appUpdateStatus, setAppUpdateStatus] =
+    useState<AppUpdateStatus>(fallbackAppUpdateStatus);
   const [deepSeekPricingState, setDeepSeekPricingState] =
     useState<DeepSeekPricingState>(fallbackDeepSeekPricingState);
   const [language, setLanguage] = useState<Language>(readInitialLanguage);
   const [themeStyle, setThemeStyle] = useState<ThemeStyle>(readInitialThemeStyle);
-  const [activeNavSection, setActiveNavSection] = useState<NavSection>("workbench");
   const workbenchSectionRef = useRef<HTMLElement | null>(null);
   const memorySectionRef = useRef<HTMLElement | null>(null);
   const approvalsSectionRef = useRef<HTMLDivElement | null>(null);
+  const chatThreadRef = useRef<HTMLDivElement | null>(null);
   const [taskRecords, setTaskRecords] = useState<TaskRecord[]>([]);
   const [memoryRecords, setMemoryRecords] = useState<MemoryRecord[]>([]);
   const [memoryCandidateRecords, setMemoryCandidateRecords] = useState<MemoryCandidateRecord[]>([]);
@@ -349,6 +679,7 @@ export function App() {
   const [capabilityCatalog, setCapabilityCatalog] = useState<CapabilityDescriptor[]>([]);
   const [capabilityRecords, setCapabilityRecords] = useState<CapabilityAccessRecord[]>([]);
   const [capabilityInvocations, setCapabilityInvocations] = useState<CapabilityInvocation[]>([]);
+  const [agentContextReceipts, setAgentContextReceipts] = useState<AgentContextReceipt[]>([]);
   const [operationsBriefingRuns, setOperationsBriefingRuns] = useState<OperationsBriefingRun[]>([]);
   const [memoryQuery, setMemoryQuery] = useState("");
   const [candidateTitle, setCandidateTitle] = useState("");
@@ -399,9 +730,8 @@ export function App() {
   const [computerControlTarget, setComputerControlTarget] = useState("");
   const [computerControlAction, setComputerControlAction] = useState("");
   const [computerControlUnlockToken, setComputerControlUnlockToken] = useState("");
+  const [setupWorkspaceName, setSetupWorkspaceName] = useState("");
   const [setupWorkspaceDir, setSetupWorkspaceDir] = useState("");
-  const [setupEvidenceDir, setSetupEvidenceDir] = useState("");
-  const [setupExportDir, setSetupExportDir] = useState("");
   const [deepSeekPricingEnabled, setDeepSeekPricingEnabled] = useState(false);
   const [deepSeekFlashPromptPrice, setDeepSeekFlashPromptPrice] = useState("");
   const [deepSeekFlashCompletionPrice, setDeepSeekFlashCompletionPrice] = useState("");
@@ -409,6 +739,36 @@ export function App() {
   const [deepSeekProCompletionPrice, setDeepSeekProCompletionPrice] = useState("");
   const [taskTitle, setTaskTitle] = useState("");
   const [taskSummary, setTaskSummary] = useState("");
+  const [agentPrompt, setAgentPrompt] = useState("");
+  const [agentConversations, setAgentConversations] = useState<AgentConversationSession[]>(
+    readInitialAgentConversations,
+  );
+  const [activeAgentConversationId, setActiveAgentConversationId] = useState(
+    () =>
+      agentConversations.find((conversation) => !conversation.archived)?.id ??
+      agentConversations[0]?.id ??
+      createEmptyAgentConversation().id,
+  );
+  const [agentMessages, setAgentMessages] = useState<AgentConversationMessage[]>(
+    () =>
+      agentConversations.find((conversation) => !conversation.archived)?.messages ??
+      agentConversations[0]?.messages ??
+      [],
+  );
+  const [conversationMenu, setConversationMenu] =
+    useState<AgentConversationMenuState | null>(null);
+  const [renamingConversationId, setRenamingConversationId] = useState<string | null>(null);
+  const [renameConversationTitle, setRenameConversationTitle] = useState("");
+  const [agentChatPending, setAgentChatPending] = useState(false);
+  const [agentChatPendingStage, setAgentChatPendingStage] = useState(0);
+  const [agentActionPending, setAgentActionPending] = useState<string | null>(null);
+  const [agentChatError, setAgentChatError] = useState("");
+  const [agentSetupPrompt, setAgentSetupPrompt] = useState<AgentChatSetupPrompt | null>(null);
+  const [pendingAgentPrompt, setPendingAgentPrompt] = useState("");
+  const [sessionDeepSeekApiKey, setSessionDeepSeekApiKey] = useState("");
+  const [fallbackDeepSeekApiKey, setFallbackDeepSeekApiKey] = useState("");
+  const [deepSeekApiKeyDraft, setDeepSeekApiKeyDraft] = useState("");
+  const [deepSeekBalance, setDeepSeekBalance] = useState<DeepSeekUserBalanceResponse | null>(null);
   const [exportedPackageJson, setExportedPackageJson] = useState("");
   const [importPackageJson, setImportPackageJson] = useState("");
   const [importPreview, setImportPreview] = useState<WorkPackageImportPreview | null>(null);
@@ -456,10 +816,13 @@ export function App() {
   const [briefingError, setBriefingError] = useState("");
   const [setupNotice, setSetupNotice] = useState("");
   const [setupError, setSetupError] = useState("");
+  const [appUpdateNotice, setAppUpdateNotice] = useState("");
+  const [appUpdateError, setAppUpdateError] = useState("");
   const [deepSeekCacheNotice, setDeepSeekCacheNotice] = useState("");
   const [deepSeekCacheError, setDeepSeekCacheError] = useState("");
   const [deepSeekPricingNotice, setDeepSeekPricingNotice] = useState("");
   const [deepSeekPricingError, setDeepSeekPricingError] = useState("");
+  const [deepSeekBalanceError, setDeepSeekBalanceError] = useState("");
   const [packagePending, setPackagePending] = useState(false);
   const [memoryPending, setMemoryPending] = useState(false);
   const [memoryCandidatePending, setMemoryCandidatePending] = useState(false);
@@ -490,11 +853,19 @@ export function App() {
   const [computerControlUnlockPending, setComputerControlUnlockPending] = useState(false);
   const [briefingPending, setBriefingPending] = useState(false);
   const [setupPending, setSetupPending] = useState(false);
+  const [appUpdatePending, setAppUpdatePending] = useState(false);
   const [deepSeekCachePending, setDeepSeekCachePending] = useState(false);
   const [deepSeekPricingPending, setDeepSeekPricingPending] = useState(false);
+  const [deepSeekBalancePending, setDeepSeekBalancePending] = useState(false);
   const [capabilityPending, setCapabilityPending] = useState<CapabilityKind | null>(null);
   const [resolutionPending, setResolutionPending] = useState<string | null>(null);
   const copy = translations[language];
+  const exposePluginsSidebarEntry = shouldExposePluginsSidebarEntry();
+  const settingsPanelItemCount = settingsPanelItems.length;
+  const agentChatPendingStatus =
+    copy.chatWorkbench.pendingStages[
+      Math.min(agentChatPendingStage, copy.chatWorkbench.pendingStages.length - 1)
+    ] ?? copy.chatWorkbench.sendingStatus;
   const networkSearchSourceModelMissing =
     modelToolStrategy.network_search_source_model_required &&
     !state.network_search_source_model;
@@ -521,16 +892,38 @@ export function App() {
     computerControlUnlockStatus.unlocked && computerControlUnlockStatus.unlocked_until
       ? formatTaskDate(computerControlUnlockStatus.unlocked_until, language)
       : "";
+  const deepSeekBalanceStatus = deepSeekBalance
+    ? deepSeekBalance.is_available
+      ? copy.settingsPanel.balanceAvailable
+      : copy.settingsPanel.balanceUnavailable
+    : copy.settingsPanel.balanceNotQueried;
+  const deepSeekBalanceDetails = deepSeekBalance
+    ? deepSeekBalance.balance_infos.length > 0
+      ? deepSeekBalance.balance_infos
+          .map(
+            (info) =>
+              `${info.currency} ${info.total_balance} (${info.topped_up_balance} + ${info.granted_balance})`,
+          )
+          .join(" / ")
+      : copy.settingsPanel.balanceEmpty
+    : "";
+  const primaryDeepSeekApiKeyPlaceholder = sessionDeepSeekApiKey
+    ? copy.settingsPanel.apiKeyPlaceholder
+    : deepSeekCredentialStatus.api_key_configured
+      ? copy.settingsPanel.apiKeyConfiguredPlaceholder
+      : copy.settingsPanel.apiKeyPlaceholder;
+  const primaryDeepSeekApiKeyReady = deepSeekCredentialStatus.chat_completion_ready;
+  const fallbackDeepSeekApiKeyReady = false;
 
   const hydrateLocalDirectoryInputs = (directoryState: LocalDirectoryState) => {
     if (!directoryState.settings) {
       return;
     }
 
-    const { workspace_dir, evidence_dir, export_dir } = directoryState.settings;
+    const { workspace_dir, workspace_name, evidence_dir, export_dir } =
+      directoryState.settings;
+    setSetupWorkspaceName(workspace_name);
     setSetupWorkspaceDir(workspace_dir);
-    setSetupEvidenceDir(evidence_dir);
-    setSetupExportDir(export_dir);
     setBriefingFolderPath((current) => current || evidence_dir);
     setFolderPath((current) => current || evidence_dir);
     setDriveLocation((current) => current || workspace_dir);
@@ -552,6 +945,18 @@ export function App() {
   };
 
   useEffect(() => {
+    if (!hasDesktopRuntime()) {
+      setState(fallbackState);
+      setDeepSeekCredentialStatus(fallbackDeepSeekCredentialStatus);
+      setDeepSeekChatCacheState(fallbackDeepSeekChatCacheState);
+      setDeepSeekTelemetry([]);
+      setComputerControlUnlockStatus(fallbackComputerControlUnlockStatus);
+      setLocalDirectoryState(fallbackLocalDirectoryState);
+      setAppUpdateStatus(fallbackAppUpdateStatus);
+      setDeepSeekPricingState(fallbackDeepSeekPricingState);
+      return;
+    }
+
     void invoke<FoundationState>("get_foundation_state")
       .then(setState)
       .catch(() => setState(fallbackState));
@@ -576,6 +981,9 @@ export function App() {
         setLocalDirectoryState(fallbackLocalDirectoryState);
         setSetupError(copy.localSetup.loadFailed);
       });
+    void invoke<AppUpdateStatus>("check_app_update")
+      .then(setAppUpdateStatus)
+      .catch(() => setAppUpdateStatus(fallbackAppUpdateStatus));
     void invoke<DeepSeekPricingState>("get_deepseek_pricing_state")
       .then((pricingState) => {
         setDeepSeekPricingState(pricingState);
@@ -588,6 +996,13 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (!hasDesktopRuntime()) {
+      setModelToolStrategy(fallbackModelDrivenToolStrategy);
+      setNetworkSearchRouteStatus(fallbackNetworkSearchRouteStatus);
+      setComputerUseBackendStatus(fallbackComputerUseBackendStatus);
+      return;
+    }
+
     let cancelled = false;
     const strategyRequest = {
       largeModelProvider: state.large_model_provider,
@@ -639,6 +1054,271 @@ export function App() {
   }, [state.large_model_provider, state.network_search_source_model]);
 
   useEffect(() => {
+    const chatThread = chatThreadRef.current;
+    if (!chatThread) {
+      return;
+    }
+    chatThread.scrollTo({
+      top: chatThread.scrollHeight,
+      behavior: "smooth",
+    });
+  }, [agentMessages.length, agentChatPending]);
+
+  useEffect(() => {
+    if (!agentChatPending) {
+      setAgentChatPendingStage(0);
+      return;
+    }
+
+    setAgentChatPendingStage(0);
+    const stageCount = copy.chatWorkbench.pendingStages.length;
+    const timers = agentChatPendingStageDelaysMs(stageCount)
+      .slice(1)
+      .map((delayMs) =>
+        window.setTimeout(() => {
+          setAgentChatPendingStage(agentChatPendingStageIndex(delayMs, stageCount));
+        }, delayMs),
+      );
+
+    return () => {
+      timers.forEach((timer) => window.clearTimeout(timer));
+    };
+  }, [agentChatPending, copy.chatWorkbench.pendingStages.length]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem(
+      AGENT_CONVERSATIONS_STORAGE_KEY,
+      JSON.stringify(agentConversations.slice(0, 50)),
+    );
+  }, [agentConversations]);
+
+  useEffect(() => {
+    if (!conversationMenu || typeof window === "undefined") {
+      return;
+    }
+
+    const closeMenu = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Element && target.closest(".conversation-context-menu")) {
+        return;
+      }
+      setConversationMenu(null);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setConversationMenu(null);
+      }
+    };
+    window.addEventListener("pointerdown", closeMenu);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("pointerdown", closeMenu);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [conversationMenu]);
+
+  const updateActiveAgentMessages = (
+    updater:
+      | AgentConversationMessage[]
+      | ((currentMessages: AgentConversationMessage[]) => AgentConversationMessage[]),
+    fallbackTitle = "",
+  ) => {
+    setAgentMessages((currentMessages) => {
+      const nextMessages =
+        typeof updater === "function" ? updater(currentMessages) : updater;
+      setAgentConversations((currentConversations) =>
+        currentConversations
+          .map((conversation) => {
+            if (conversation.id !== activeAgentConversationId) {
+              return conversation;
+            }
+            const title =
+              conversation.manual_title
+                ? conversation.title
+                : deriveConversationTitle(nextMessages, fallbackTitle) ||
+              conversation.title;
+            return {
+              ...conversation,
+              title,
+              messages: nextMessages,
+              updated_at: new Date().toISOString(),
+              context_state:
+                estimateConversationTokens(nextMessages) >
+                AGENT_CONTEXT_COMPRESSION_SOFT_LIMIT_TOKENS
+                  ? ("compressed" as const)
+                  : ("normal" as const),
+            };
+          })
+          .sort((left, right) => {
+            if (left.pinned !== right.pinned) {
+              return left.pinned ? -1 : 1;
+            }
+            return new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime();
+          }),
+      );
+      return nextMessages;
+    });
+  };
+
+  const startNewAgentConversation = () => {
+    const conversation = createEmptyAgentConversation();
+    setAgentConversations((currentConversations) =>
+      sortAgentConversations([conversation, ...currentConversations]),
+    );
+    setActiveAgentConversationId(conversation.id);
+    setAgentMessages([]);
+    setAgentPrompt("");
+    setAgentChatError("");
+    setPendingAgentPrompt("");
+    setAgentSetupPrompt(null);
+    setConversationMenu(null);
+    setRenamingConversationId(null);
+  };
+
+  const openAgentConversation = (conversationId: string) => {
+    const conversation = agentConversations.find(
+      (candidate) => candidate.id === conversationId && !candidate.archived,
+    );
+    if (!conversation) {
+      return;
+    }
+    setActiveAgentConversationId(conversation.id);
+    setAgentMessages(conversation.messages);
+    setAgentPrompt("");
+    setAgentChatError("");
+    setConversationMenu(null);
+  };
+
+  const openAgentConversationMenu = (
+    event: MouseEvent,
+    conversation: AgentConversationSession,
+  ) => {
+    event.preventDefault();
+    const menuWidth = 156;
+    const menuHeight = 132;
+    const x =
+      typeof window === "undefined"
+        ? event.clientX
+        : Math.min(event.clientX, window.innerWidth - menuWidth - 8);
+    const y =
+      typeof window === "undefined"
+        ? event.clientY
+        : Math.min(event.clientY, window.innerHeight - menuHeight - 8);
+    setConversationMenu({
+      conversationId: conversation.id,
+      x: Math.max(8, x),
+      y: Math.max(8, y),
+    });
+  };
+
+  const toggleAgentConversationPinned = (conversationId: string) => {
+    setAgentConversations((currentConversations) =>
+      sortAgentConversations(
+        currentConversations.map((conversation) =>
+          conversation.id === conversationId
+            ? { ...conversation, pinned: !conversation.pinned }
+            : conversation,
+        ),
+      ),
+    );
+    setConversationMenu(null);
+  };
+
+  const archiveAgentConversation = (conversationId: string) => {
+    setAgentConversations((currentConversations) => {
+      const archivedConversations = currentConversations.map((conversation) =>
+        conversation.id === conversationId
+          ? { ...conversation, archived: true, updated_at: new Date().toISOString() }
+          : conversation,
+      );
+      const sortedConversations = sortAgentConversations(archivedConversations);
+      if (conversationId === activeAgentConversationId) {
+        const replacement = sortedConversations.find(
+          (conversation) => !conversation.archived,
+        );
+        if (replacement) {
+          setActiveAgentConversationId(replacement.id);
+          setAgentMessages(replacement.messages);
+        } else {
+          const emptyConversation = createEmptyAgentConversation();
+          setActiveAgentConversationId(emptyConversation.id);
+          setAgentMessages([]);
+          return [emptyConversation, ...sortedConversations];
+        }
+        setAgentPrompt("");
+        setAgentChatError("");
+      }
+      return sortedConversations;
+    });
+    setConversationMenu(null);
+    if (renamingConversationId === conversationId) {
+      setRenamingConversationId(null);
+      setRenameConversationTitle("");
+    }
+  };
+
+  const beginRenameAgentConversation = (conversation: AgentConversationSession) => {
+    setRenamingConversationId(conversation.id);
+    setRenameConversationTitle(
+      conversation.title ||
+        deriveConversationTitle(conversation.messages, "") ||
+        copy.nav.untitledConversation,
+    );
+    setConversationMenu(null);
+  };
+
+  const cancelRenameAgentConversation = () => {
+    setRenamingConversationId(null);
+    setRenameConversationTitle("");
+  };
+
+  const saveRenameAgentConversation = () => {
+    const title = renameConversationTitle.trim();
+    if (!title || !renamingConversationId) {
+      cancelRenameAgentConversation();
+      return;
+    }
+    const now = new Date().toISOString();
+    setAgentConversations((currentConversations) =>
+      sortAgentConversations(
+        currentConversations.map((conversation) =>
+          conversation.id === renamingConversationId
+            ? {
+                ...conversation,
+                title,
+                manual_title: true,
+                updated_at: now,
+              }
+            : conversation,
+        ),
+      ),
+    );
+    setRenamingConversationId(null);
+    setRenameConversationTitle("");
+  };
+
+  const submitRenameAgentConversation = (event: FormEvent) => {
+    event.preventDefault();
+    saveRenameAgentConversation();
+  };
+
+  useEffect(() => {
+    if (!hasDesktopRuntime()) {
+      setTaskRecords([]);
+      setMemoryRecords([]);
+      setMemoryCandidateRecords([]);
+      setPermissionAudits([]);
+      setCapabilityCatalog([]);
+      setCapabilityRecords([]);
+      setCapabilityInvocations([]);
+      setAgentContextReceipts([]);
+      setOperationsBriefingRuns([]);
+      return;
+    }
+
     void Promise.all([
       invoke<TaskRecord[]>("list_task_records"),
       invoke<MemoryRecord[]>("list_memory_records"),
@@ -647,6 +1327,7 @@ export function App() {
       invoke<CapabilityDescriptor[]>("list_capability_catalog"),
       invoke<CapabilityAccessRecord[]>("list_capability_access_records"),
       invoke<CapabilityInvocation[]>("list_capability_invocations"),
+      invoke<AgentContextReceipt[]>("list_agent_context_receipts"),
       invoke<OperationsBriefingRun[]>("list_operations_briefing_runs"),
     ])
       .then(([
@@ -657,6 +1338,7 @@ export function App() {
         catalog,
         capabilityAccessRecords,
         invocations,
+        contextReceipts,
         briefingRuns,
       ]) => {
         setTaskRecords(records);
@@ -666,6 +1348,7 @@ export function App() {
         setCapabilityCatalog(catalog);
         setCapabilityRecords(capabilityAccessRecords);
         setCapabilityInvocations(invocations);
+        setAgentContextReceipts(contextReceipts);
         setOperationsBriefingRuns(briefingRuns);
       })
       .catch(() => {
@@ -759,8 +1442,11 @@ export function App() {
     }
   };
 
-  const saveLocalDirectorySetup = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
+  const persistLocalDirectorySetup = async (
+    options: { workspaceDir?: string; workspaceName?: string } = {},
+  ): Promise<boolean> => {
+    const workspaceDir = options.workspaceDir ?? setupWorkspaceDir;
+    const workspaceName = options.workspaceName ?? setupWorkspaceName;
     setSetupPending(true);
     setSetupError("");
     setSetupNotice("");
@@ -769,19 +1455,25 @@ export function App() {
       const directoryState = await invoke<LocalDirectoryState>(
         "save_local_directory_settings",
         {
-          workspaceDir: setupWorkspaceDir,
-          evidenceDir: setupEvidenceDir,
-          exportDir: setupExportDir,
+          workspaceDir,
+          workspaceName,
         },
       );
       setLocalDirectoryState(directoryState);
       hydrateLocalDirectoryInputs(directoryState);
       setSetupNotice(copy.localSetup.saved);
+      return true;
     } catch (error) {
       setSetupError(String(error) || copy.localSetup.failed);
+      return false;
     } finally {
       setSetupPending(false);
     }
+  };
+
+  const saveLocalDirectorySetup = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    await persistLocalDirectorySetup();
   };
 
   const saveDeepSeekPricingSetup = async (event: FormEvent<HTMLFormElement>) => {
@@ -811,46 +1503,76 @@ export function App() {
     }
   };
 
-  const chooseLocalDirectory = async (
-    target: "workspace" | "evidence" | "export",
-  ) => {
-    const currentPath =
-      target === "workspace"
-        ? setupWorkspaceDir
-        : target === "evidence"
-          ? setupEvidenceDir
-          : setupExportDir;
-    const title =
-      target === "workspace"
-        ? copy.localSetup.workspaceDialogTitle
-        : target === "evidence"
-          ? copy.localSetup.evidenceDialogTitle
-          : copy.localSetup.exportDialogTitle;
+  const queryDeepSeekBalance = async () => {
+    setDeepSeekBalancePending(true);
+    setDeepSeekBalanceError("");
 
+    try {
+      const apiKeyCandidates = deepSeekApiKeyCandidates(
+        sessionDeepSeekApiKey,
+        fallbackDeepSeekApiKey,
+      );
+      if (!deepSeekCredentialStatus.chat_completion_ready && apiKeyCandidates.length === 0) {
+        setDeepSeekBalanceError(copy.chatWorkbench.deepSeekKeyRequired);
+        return;
+      }
+
+      const balance = await invoke<DeepSeekUserBalanceResponse>(
+        "get_deepseek_user_balance",
+        {
+          apiKeyOverride: apiKeyCandidates[0] ?? null,
+          fallbackApiKeyOverride: apiKeyCandidates[1] ?? null,
+        },
+      );
+      setDeepSeekBalance(balance);
+    } catch (error) {
+      setDeepSeekBalanceError(String(error) || copy.settingsPanel.balanceFailed);
+    } finally {
+      setDeepSeekBalancePending(false);
+    }
+  };
+
+  const chooseLocalDirectory = async (options: { autoSave?: boolean } = {}) => {
     setSetupError("");
     setSetupNotice("");
+    const previousWorkspaceDir = setupWorkspaceDir;
 
     try {
       const selected = await open({
-        title,
+        title: copy.localSetup.workspaceDialogTitle,
         directory: true,
         multiple: false,
-        defaultPath: currentPath || undefined,
+        defaultPath: setupWorkspaceDir || undefined,
       });
 
       if (!selected || Array.isArray(selected)) {
         return;
       }
 
-      if (target === "workspace") {
-        setSetupWorkspaceDir(selected);
-      } else if (target === "evidence") {
-        setSetupEvidenceDir(selected);
-      } else {
-        setSetupExportDir(selected);
+      setSetupWorkspaceDir(selected);
+      if (options.autoSave) {
+        const saved = await persistLocalDirectorySetup({ workspaceDir: selected });
+        if (!saved) {
+          setSetupWorkspaceDir(previousWorkspaceDir);
+        }
       }
     } catch (error) {
       setSetupError(String(error) || copy.localSetup.chooseFailed);
+    }
+  };
+
+  const installAvailableAppUpdate = async () => {
+    setAppUpdatePending(true);
+    setAppUpdateError("");
+    setAppUpdateNotice("");
+
+    try {
+      const result = await invoke<AppUpdateInstallResult>("install_app_update");
+      setAppUpdateNotice(copy.appUpdate.installStarted(result.latest_version));
+    } catch (error) {
+      setAppUpdateError(String(error) || copy.appUpdate.installFailed);
+    } finally {
+      setAppUpdatePending(false);
     }
   };
 
@@ -866,14 +1588,16 @@ export function App() {
   };
 
   const refreshCapabilityState = async () => {
-    const [records, audits, invocations] = await Promise.all([
+    const [records, audits, invocations, contextReceipts] = await Promise.all([
       invoke<CapabilityAccessRecord[]>("list_capability_access_records"),
       invoke<PermissionAuditEntry[]>("list_permission_audit_entries"),
       invoke<CapabilityInvocation[]>("list_capability_invocations"),
+      invoke<AgentContextReceipt[]>("list_agent_context_receipts"),
     ]);
     setCapabilityRecords(records);
     setPermissionAudits(audits);
     setCapabilityInvocations(invocations);
+    setAgentContextReceipts(contextReceipts);
   };
 
   const refreshComputerControlUnlockStatus = async () => {
@@ -1768,7 +2492,8 @@ export function App() {
 
   const runOperationsBriefingWorkflow = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const trimmedPath = briefingFolderPath.trim();
+    const trimmedPath =
+      briefingFolderPath.trim() || localDirectoryState.settings?.evidence_dir.trim() || "";
     if (!trimmedPath) {
       setBriefingError(copy.operationsBriefing.failed);
       return;
@@ -1969,7 +2694,11 @@ export function App() {
     event.preventDefault();
     clearPackageStatus();
 
-    if (!taskTitle.trim()) {
+    const trimmedSummary = taskSummary.trim();
+    const derivedTitle = trimmedSummary.split(/\r?\n/)[0]?.trim().slice(0, 80) ?? "";
+    const normalizedTitle = taskTitle.trim() || derivedTitle;
+
+    if (!normalizedTitle) {
       setPackageError(copy.package.emptyTitle);
       return;
     }
@@ -1977,8 +2706,8 @@ export function App() {
     setPackagePending(true);
     try {
       const record = await invoke<TaskRecord>("create_task_record", {
-        title: taskTitle,
-        summary: taskSummary,
+        title: normalizedTitle,
+        summary: trimmedSummary,
       });
       const memories = await loadMemoryRecords(memoryQuery);
       setTaskRecords((currentRecords) => [record, ...currentRecords]);
@@ -1991,6 +2720,285 @@ export function App() {
     } finally {
       setPackagePending(false);
     }
+  };
+
+  const sendAgentPrompt = async (
+    promptValue: string,
+    options: { apiKeyOverride?: string; skipWorkspaceSetup?: boolean; skipNetworkSearchSetup?: boolean } = {},
+  ) => {
+    const prompt = promptValue.trim();
+    if (!prompt) {
+      setAgentChatError(copy.chatWorkbench.emptyPrompt);
+      return;
+    }
+
+    setAgentChatError("");
+
+    if (!hasDesktopRuntime()) {
+      updateActiveAgentMessages((currentMessages) => [
+        ...currentMessages,
+        {
+          id: createClientId("user"),
+          role: "user",
+          content: prompt,
+          created_at: new Date().toISOString(),
+        },
+        {
+          id: createClientId("assistant"),
+          role: "assistant",
+          content: copy.chatWorkbench.desktopRuntimeMissing,
+          created_at: new Date().toISOString(),
+        },
+      ], prompt);
+      setAgentPrompt("");
+      return;
+    }
+
+    const apiKeyCandidates = deepSeekApiKeyCandidates(
+      options.apiKeyOverride ?? sessionDeepSeekApiKey,
+      fallbackDeepSeekApiKey,
+    );
+    if (!deepSeekCredentialStatus.chat_completion_ready && apiKeyCandidates.length === 0) {
+      setPendingAgentPrompt(prompt);
+      setDeepSeekApiKeyDraft("");
+      setAgentSetupPrompt("deepseek_key");
+      return;
+    }
+
+    if (localDirectoryState.needs_setup && !options.skipWorkspaceSetup) {
+      setPendingAgentPrompt(prompt);
+      setAgentSetupPrompt("workspace");
+      return;
+    }
+
+    const userMessage: AgentConversationMessage = {
+      id: createClientId("user"),
+      role: "user",
+      content: prompt,
+      created_at: new Date().toISOString(),
+    };
+
+    setAgentPrompt("");
+    updateActiveAgentMessages((currentMessages) => [...currentMessages, userMessage], prompt);
+    setAgentChatPending(true);
+
+    try {
+      const contextPacket = buildAgentConversationContextPrompt(prompt, agentMessages);
+      const response = await invoke<AgentChatResponse>("run_agent_chat", {
+        prompt: contextPacket.prompt,
+        largeModelProvider: state.large_model_provider,
+        modelRoute: state.model_route,
+        thinkingLevel: state.thinking_level,
+        accessMode: state.access_mode,
+        networkSearchSourceModel: state.network_search_source_model || null,
+        apiKeyOverride: apiKeyCandidates[0] ?? null,
+        fallbackApiKeyOverride: apiKeyCandidates[1] ?? null,
+      });
+      if (contextPacket.compressed) {
+        setAgentConversations((currentConversations) =>
+          currentConversations.map((conversation) =>
+            conversation.id === activeAgentConversationId
+              ? { ...conversation, context_state: "compressed" }
+              : conversation,
+          ),
+        );
+      }
+      updateActiveAgentMessages((currentMessages) => [
+        ...currentMessages,
+        {
+          id: response.id,
+          role: "assistant",
+          content: response.content,
+          model: response.model,
+          protocol_version: response.protocol_version,
+          proposed_actions: response.proposed_actions,
+          missing_prerequisites: response.missing_prerequisites,
+          memory_candidates: response.memory_candidates,
+          created_at: response.created_at,
+        },
+      ], prompt);
+      const [telemetry, cacheState] = await Promise.all([
+        invoke<DeepSeekChatTelemetry[]>("list_deepseek_chat_telemetry"),
+        invoke<DeepSeekChatCacheState>("get_deepseek_chat_cache_state"),
+      ]);
+      setDeepSeekTelemetry(telemetry);
+      setDeepSeekChatCacheState(cacheState);
+      await Promise.all([refreshCapabilityState(), refreshMemoryCandidateRecords()]);
+      const needsWorkspaceSetup = prerequisitesNeedWorkspaceSetup(response.missing_prerequisites);
+      if (needsWorkspaceSetup && !options.skipWorkspaceSetup) {
+        setPendingAgentPrompt(prompt);
+        setAgentSetupPrompt("workspace");
+        return;
+      }
+      const needsNetworkSearchSetup =
+        prerequisitesNeedNetworkSearchSetup(response.missing_prerequisites) &&
+        ((modelToolStrategy.network_search_source_model_required &&
+          !state.network_search_source_model) ||
+          !networkSearchRouteStatus.network_requests_enabled);
+      if (needsNetworkSearchSetup && !options.skipNetworkSearchSetup) {
+        setPendingAgentPrompt(prompt);
+        setAgentSetupPrompt("network_search");
+      }
+    } catch (error) {
+      const rawMessage = String(error);
+      const message =
+        rawMessage.includes("deepseek chat response could not be read") ||
+        rawMessage.includes("error decoding response body")
+          ? copy.chatWorkbench.deepSeekResponseReadFailed
+          : copy.chatWorkbench.deepSeekRequestFailed;
+      setAgentChatError("");
+      updateActiveAgentMessages((currentMessages) => [
+        ...currentMessages,
+        {
+          id: createClientId("assistant"),
+          role: "assistant",
+          content: message,
+          run_error: message,
+          created_at: new Date().toISOString(),
+        },
+      ], prompt);
+    } finally {
+      setAgentChatPending(false);
+    }
+  };
+
+  const resumeAgentAction = async (
+    messageId: string,
+    actionIndex: number,
+    action: AgentChatActionProposal,
+  ) => {
+    const actionKey = `${messageId}:${actionIndex}`;
+    setAgentActionPending(actionKey);
+    setAgentChatError("");
+
+    if (!hasDesktopRuntime()) {
+      setAgentChatError(copy.chatWorkbench.desktopRuntimeMissing);
+      setAgentActionPending(null);
+      return;
+    }
+
+    try {
+      const updatedAction = await invoke<AgentChatActionProposal>("resume_agent_chat_action", {
+        accessMode: state.access_mode,
+        largeModelProvider: state.large_model_provider,
+        networkSearchSourceModel: state.network_search_source_model || null,
+        action,
+      });
+      updateActiveAgentMessages((currentMessages) =>
+        currentMessages.map((message) => {
+          if (message.id !== messageId || !message.proposed_actions) {
+            return message;
+          }
+          return {
+            ...message,
+            proposed_actions: message.proposed_actions.map((currentAction, index) =>
+              index === actionIndex ? updatedAction : currentAction,
+            ),
+          };
+        }),
+      );
+      await Promise.all([refreshCapabilityState(), refreshOperationsBriefingRuns()]);
+    } catch (error) {
+      setAgentChatError(String(error) || copy.chatWorkbench.resumeActionFailed);
+    } finally {
+      setAgentActionPending(null);
+    }
+  };
+
+  const approveAndResumeAgentAction = async (
+    messageId: string,
+    actionIndex: number,
+    action: AgentChatActionProposal,
+  ) => {
+    const actionKey = `${messageId}:${actionIndex}`;
+    setAgentActionPending(actionKey);
+    setAgentChatError("");
+
+    if (!hasDesktopRuntime()) {
+      setAgentChatError(copy.chatWorkbench.desktopRuntimeMissing);
+      setAgentActionPending(null);
+      return;
+    }
+
+    try {
+      if (action.permission_request_id) {
+        setResolutionPending(action.permission_request_id);
+        await invoke("resolve_capability_access_request", {
+          requestId: action.permission_request_id,
+          approved: true,
+          note: copy.chatWorkbench.confirmAndRun,
+        });
+      }
+
+      const updatedAction = await invoke<AgentChatActionProposal>("resume_agent_chat_action", {
+        accessMode: state.access_mode,
+        largeModelProvider: state.large_model_provider,
+        networkSearchSourceModel: state.network_search_source_model || null,
+        action,
+      });
+      updateActiveAgentMessages((currentMessages) =>
+        currentMessages.map((message) => {
+          if (message.id !== messageId || !message.proposed_actions) {
+            return message;
+          }
+          return {
+            ...message,
+            proposed_actions: message.proposed_actions.map((currentAction, index) =>
+              index === actionIndex ? updatedAction : currentAction,
+            ),
+          };
+        }),
+      );
+      await Promise.all([refreshCapabilityState(), refreshOperationsBriefingRuns()]);
+    } catch (error) {
+      setAgentChatError(String(error) || copy.chatWorkbench.resumeActionFailed);
+    } finally {
+      setResolutionPending(null);
+      setAgentActionPending(null);
+    }
+  };
+
+  const sendAgentMessage = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    await sendAgentPrompt(agentPrompt);
+  };
+
+  const continueAgentAfterDeepSeekKey = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const trimmedKey = deepSeekApiKeyDraft.trim();
+    if (!trimmedKey) {
+      setAgentChatError(copy.chatWorkbench.deepSeekKeyRequired);
+      return;
+    }
+    setSessionDeepSeekApiKey(trimmedKey);
+    setAgentSetupPrompt(null);
+    await sendAgentPrompt(pendingAgentPrompt, { apiKeyOverride: trimmedKey });
+    setPendingAgentPrompt("");
+    setDeepSeekApiKeyDraft("");
+  };
+
+  const continueAgentAfterWorkspaceSetup = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const saved = await persistLocalDirectorySetup();
+    if (!saved) {
+      return;
+    }
+    const prompt = pendingAgentPrompt;
+    setAgentSetupPrompt(null);
+    setPendingAgentPrompt("");
+    await sendAgentPrompt(prompt, { skipWorkspaceSetup: true });
+  };
+
+  const continueAgentAfterNetworkSearchSetup = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (modelToolStrategy.network_search_source_model_required && !state.network_search_source_model) {
+      setAgentChatError(copy.networkSearchTool.sourceModelMissing);
+      return;
+    }
+    const prompt = pendingAgentPrompt;
+    setAgentSetupPrompt(null);
+    setPendingAgentPrompt("");
+    await sendAgentPrompt(prompt, { skipNetworkSearchSetup: true });
   };
 
   const exportCurrentWorkPackage = async () => {
@@ -2098,33 +3106,245 @@ export function App() {
     (record) => record.effective_status === "pending_approval",
   );
   const latestOperationsBriefingRun = operationsBriefingRuns[0];
-  const navItemClassName = (section: NavSection) =>
-    activeNavSection === section ? "nav-item active" : "nav-item";
-  const scrollToNavSection = (section: NavSection) => {
-    setActiveNavSection(section);
-    const target =
-      section === "memory"
-        ? memorySectionRef.current
-        : section === "approvals"
-          ? approvalsSectionRef.current
-          : workbenchSectionRef.current;
-
-    target?.scrollIntoView({ behavior: "smooth", block: "start" });
-  };
-
+  const latestRunFailed = latestOperationsBriefingRun?.status === "failed";
+  const latestRunReady = latestOperationsBriefingRun?.status === "draft_ready";
+  const latestOperationsRunNeedsApproval =
+    latestOperationsBriefingRun?.status === "pending_approval";
+  const latestRunNeedsApproval =
+    latestOperationsRunNeedsApproval || pendingCapabilityRecords.length > 0;
+  const latestAgentMessage = latestAssistantMessage(agentMessages);
+  const latestAgentRunError = userFacingAgentRunError(latestAgentMessage, {
+    requestFailed: copy.chatWorkbench.deepSeekRequestFailed,
+    responseReadFailed: copy.chatWorkbench.deepSeekResponseReadFailed,
+  });
+  const latestAgentEnvelopeMessage = messageHasAgentEnvelope(latestAgentMessage)
+    ? latestAgentMessage
+    : undefined;
+  const latestAgentActions = latestAgentEnvelopeMessage?.proposed_actions ?? [];
+  const latestAgentMissingPrerequisites =
+    latestAgentEnvelopeMessage?.missing_prerequisites ?? [];
+  const latestAgentHasExecutionPlan =
+    latestAgentActions.length > 0 || latestAgentMissingPrerequisites.length > 0;
+  const showAgentEnvelopeStatus =
+    latestAgentHasExecutionPlan && !agentChatPending && !briefingPending;
+  const showAgentErrorStatus =
+    latestAgentRunError.length > 0 && !agentChatPending && !briefingPending;
+  const latestAgentHasBlockedAction = latestAgentActions.some(
+    (action) => action.execution_state === "blocked",
+  );
+  const latestAgentNeedsUserAction =
+    latestAgentMissingPrerequisites.length > 0 ||
+    latestAgentActions.some((action) => action.execution_state === "needs_confirmation");
+  const latestAgentHasWaitingAction = latestAgentActions.some(
+    (action) =>
+      action.execution_state === "proposed" || action.execution_state === "waiting_prerequisite",
+  );
+  const latestAgentAllActionsDone =
+    latestAgentActions.length > 0 &&
+    latestAgentActions.every((action) => action.execution_state === "succeeded");
+  const runStatusTone: WorkflowStatusTone = agentChatPending || briefingPending
+    ? "running"
+    : showAgentErrorStatus ||
+        (showAgentEnvelopeStatus && latestAgentHasBlockedAction) ||
+        latestRunFailed
+      ? "blocked"
+      : (showAgentEnvelopeStatus && latestAgentNeedsUserAction) || latestRunNeedsApproval
+        ? "needs_action"
+        : (showAgentEnvelopeStatus && latestAgentAllActionsDone) || latestRunReady
+          ? "done"
+          : showAgentEnvelopeStatus && latestAgentHasWaitingAction
+            ? "running"
+            : "ready";
+  const runStatusTitle = showAgentEnvelopeStatus
+    ? copy.runStatus.agentActionTitle
+    : runStatusTone === "running"
+      ? copy.runStatus.runningTitle
+      : runStatusTone === "blocked"
+        ? copy.runStatus.failedTitle
+        : runStatusTone === "needs_action"
+          ? copy.runStatus.needsApprovalTitle
+          : runStatusTone === "done"
+            ? copy.runStatus.doneTitle
+            : copy.runStatus.readyTitle;
+  const runStatusBody = showAgentEnvelopeStatus
+    ? copy.runStatus.agentActionBody
+    : runStatusTone === "running"
+      ? copy.runStatus.runningBody
+      : runStatusTone === "blocked"
+        ? copy.runStatus.failedBody
+        : runStatusTone === "needs_action"
+          ? copy.runStatus.needsApprovalBody
+          : runStatusTone === "done"
+            ? copy.runStatus.doneBody
+            : copy.runStatus.readyBody;
+  const latestRunContextReceipt = latestOperationsBriefingRun?.context_receipt;
+  const renderLegacyCenterManagementPanels = false;
+  const agentPendingSteps: WorkflowStep[] = agentChatPending
+    ? [
+        {
+          key: "agent-chat-pending",
+          label: copy.runStatus.steps.deepseek,
+          detail: agentChatPendingStatus,
+          state: "current",
+        },
+      ]
+    : [];
+  const agentErrorSteps: WorkflowStep[] = showAgentErrorStatus
+    ? [
+        {
+          key: "agent-chat-error",
+          label: copy.runStatus.steps.deepseek,
+          detail: latestAgentRunError,
+          state: "blocked",
+        },
+      ]
+    : [];
+  const agentEnvelopeSteps: WorkflowStep[] = showAgentEnvelopeStatus
+    ? [
+        {
+          key: "agent-model-envelope",
+          label: copy.runStatus.steps.deepseek,
+          detail: latestDeepSeekTelemetry
+            ? latestDeepSeekTelemetryText
+            : latestAgentEnvelopeMessage?.protocol_version ?? "ds-agent-envelope-v1",
+          state: "done",
+        },
+        ...latestAgentMissingPrerequisites.map((prerequisite, index) => ({
+          key: `agent-prerequisite-${index}`,
+          label: copy.chatWorkbench.missingPrerequisitesLabel,
+          detail: `${prerequisite.kind}: ${prerequisite.message}`,
+          state: "needs_action" as WorkflowStepState,
+        })),
+        ...latestAgentActions.map((action, index) => ({
+          key: `agent-action-${index}`,
+          label: action.title || action.action_type,
+          detail: userFacingAgentActionDetail(action) || action.action_type,
+          state:
+            action.execution_state === "blocked"
+              ? ("blocked" as WorkflowStepState)
+              : action.execution_state === "failed"
+                ? ("blocked" as WorkflowStepState)
+                : action.execution_state === "succeeded"
+                  ? ("done" as WorkflowStepState)
+                  : action.execution_state === "needs_confirmation"
+                    ? ("needs_action" as WorkflowStepState)
+                    : ("waiting" as WorkflowStepState),
+        })),
+      ]
+    : [];
+  const operationsRunStatusSteps: WorkflowStep[] = [
+    {
+      key: "understand",
+      label: copy.runStatus.steps.understand,
+      detail: latestRunContextReceipt?.user_intent ?? copy.runStatus.stepDetails.understand,
+      state: latestOperationsBriefingRun || briefingPending ? "done" : "waiting",
+    },
+    {
+      key: "evidence",
+      label: copy.runStatus.steps.evidence,
+      detail:
+        latestRunContextReceipt?.selected_evidence[0] ??
+        latestOperationsBriefingRun?.evidence_folder_path ??
+        copy.runStatus.stepDetails.evidence,
+      state: latestOperationsRunNeedsApproval
+        ? "needs_action"
+        : latestOperationsBriefingRun
+        ? "done"
+        : briefingPending
+          ? "current"
+          : localDirectoryState.needs_setup
+            ? "blocked"
+            : "waiting",
+    },
+    {
+      key: "memory",
+      label: copy.runStatus.steps.memory,
+      detail:
+        latestRunContextReceipt?.selected_memories[0] ??
+        copy.runStatus.stepDetails.memory,
+      state: latestOperationsBriefingRun
+        ? "done"
+        : briefingPending
+          ? "current"
+          : "waiting",
+    },
+    {
+      key: "deepseek",
+      label: copy.runStatus.steps.deepseek,
+      detail: latestDeepSeekTelemetry
+        ? latestDeepSeekTelemetryText
+        : copy.runStatus.stepDetails.deepseek,
+      state: latestOperationsBriefingRun
+        ? "done"
+        : briefingPending
+          ? "current"
+          : deepSeekCredentialStatus.chat_completion_ready
+            ? "waiting"
+            : "needs_action",
+    },
+    {
+      key: "validate",
+      label: copy.runStatus.steps.validate,
+      detail:
+        latestRunContextReceipt?.validation_results[0] ??
+        copy.runStatus.stepDetails.validate,
+      state: latestRunFailed
+        ? "blocked"
+        : latestRunReady
+          ? "done"
+          : briefingPending
+            ? "waiting"
+            : "waiting",
+    },
+    {
+      key: "report",
+      label: copy.runStatus.steps.report,
+      detail: latestRunFailed
+        ? latestOperationsBriefingRun?.summary ?? copy.runStatus.stepDetails.report
+        : copy.runStatus.stepDetails.report,
+      state: latestRunFailed
+        ? "blocked"
+        : latestRunReady
+          ? "done"
+          : latestOperationsRunNeedsApproval
+            ? "needs_action"
+            : "waiting",
+    },
+  ];
+  const runStatusSteps = agentPendingSteps.length
+    ? agentPendingSteps
+    : agentErrorSteps.length
+      ? agentErrorSteps
+    : agentEnvelopeSteps.length
+      ? agentEnvelopeSteps
+      : operationsRunStatusSteps;
+  const latestAgentHasOpenWork =
+    latestAgentMissingPrerequisites.length > 0 ||
+    latestAgentActions.some((action) => action.execution_state !== "succeeded");
+  const shouldShowRunInspector =
+    showAgentEnvelopeStatus ||
+    showAgentErrorStatus ||
+    agentChatPending ||
+    briefingPending ||
+    latestRunNeedsApproval ||
+    latestRunFailed ||
+    latestAgentHasOpenWork;
+  const visibleAgentConversations = sortAgentConversations(
+    agentConversations.filter((conversation) => !conversation.archived),
+  );
+  const activeConversationMenuTarget = conversationMenu
+    ? agentConversations.find(
+        (conversation) => conversation.id === conversationMenu.conversationId,
+      )
+    : null;
   return (
     <main className="app-shell">
       <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-mark">D</div>
-          <div>
-            <strong>{state.app_name}</strong>
-            <span>{copy.brandTagline}</span>
+        <header className="sidebar-header">
+          <div className="brand" title={state.app_name}>
+            <img className="brand-mark-image" src="/ds-agent-mark.png" alt={state.app_name} />
           </div>
-        </div>
-        <div className="sidebar-preferences">
           <div className="language-switch" role="group" aria-label={copy.controls.language}>
-            <Languages size={16} aria-hidden="true" />
             <button
               className={language === "zh" ? "language-option active" : "language-option"}
               type="button"
@@ -2142,286 +3362,1051 @@ export function App() {
               EN
             </button>
           </div>
+        </header>
+        <div className="app-update-slot">
+          {appUpdateStatus.update_available ? (
+            <button
+              className="app-update-button"
+              type="button"
+              title={
+                appUpdateStatus.latest_version
+                  ? `${state.app_name} ${appUpdateStatus.latest_version}`
+                  : copy.appUpdate.update
+              }
+              disabled={appUpdatePending}
+              onClick={() => void installAvailableAppUpdate()}
+            >
+              <Download size={14} aria-hidden="true" />
+              {appUpdatePending ? copy.appUpdate.installing : copy.appUpdate.update}
+            </button>
+          ) : null}
+          {appUpdateNotice ? <span className="app-update-feedback">{appUpdateNotice}</span> : null}
+          {appUpdateError ? <span className="app-update-feedback error">{appUpdateError}</span> : null}
         </div>
-        <nav className="nav-list" aria-label={copy.navLabel}>
-          <button
-            className={navItemClassName("workbench")}
-            type="button"
-            aria-current={activeNavSection === "workbench" ? "page" : undefined}
-            onClick={() => scrollToNavSection("workbench")}
-          >
-            <FolderOpen size={18} /> {copy.nav.workbench}
+        <nav className="conversation-rail" aria-label={copy.nav.conversations}>
+          <button className="nav-item new-chat-item" type="button" onClick={startNewAgentConversation}>
+            <Pencil size={18} /> {copy.nav.newChat}
           </button>
-          <button
-            className={navItemClassName("memory")}
-            type="button"
-            aria-current={activeNavSection === "memory" ? "page" : undefined}
-            onClick={() => scrollToNavSection("memory")}
-          >
-            <Database size={18} /> {copy.nav.memory}
-          </button>
-          <button
-            className={navItemClassName("approvals")}
-            type="button"
-            aria-current={activeNavSection === "approvals" ? "page" : undefined}
-            onClick={() => scrollToNavSection("approvals")}
-          >
-            <ShieldCheck size={18} /> {copy.nav.approvals}
-          </button>
+          <div className="conversation-list">
+            <div className="conversation-heading">
+              <span>{copy.nav.conversations}</span>
+              <span>{visibleAgentConversations.length}</span>
+            </div>
+            {visibleAgentConversations.map((conversation) => {
+              const title = conversation.title || copy.nav.untitledConversation;
+              const isRenaming = renamingConversationId === conversation.id;
+              const isActive = conversation.id === activeAgentConversationId;
+              return isRenaming ? (
+                <form
+                  className={
+                    isActive
+                      ? "conversation-item conversation-rename-form active"
+                      : "conversation-item conversation-rename-form"
+                  }
+                  key={conversation.id}
+                  onSubmit={submitRenameAgentConversation}
+                >
+                  <input
+                    aria-label={copy.nav.renameConversation}
+                    autoFocus
+                    value={renameConversationTitle}
+                    onChange={(event) => setRenameConversationTitle(event.target.value)}
+                    onBlur={cancelRenameAgentConversation}
+                    onKeyDown={(event) => {
+                      if (event.key === "Escape") {
+                        cancelRenameAgentConversation();
+                        return;
+                      }
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        saveRenameAgentConversation();
+                      }
+                    }}
+                  />
+                </form>
+              ) : (
+                <button
+                  className={isActive ? "conversation-item active" : "conversation-item"}
+                  type="button"
+                  key={conversation.id}
+                  onClick={() => openAgentConversation(conversation.id)}
+                  onContextMenu={(event) => openAgentConversationMenu(event, conversation)}
+                  title={title}
+                >
+                  <span className="conversation-title-line">
+                    <span>{title}</span>
+                    {conversation.pinned ? (
+                      <Pin size={12} aria-label={copy.nav.pinned} />
+                    ) : null}
+                  </span>
+                  <small>
+                    {conversation.context_state === "compressed"
+                      ? copy.nav.contextCompressed
+                      : formatTaskDate(conversation.updated_at, language)}
+                  </small>
+                </button>
+              );
+            })}
+          </div>
         </nav>
+
+        {conversationMenu && activeConversationMenuTarget ? (
+          <div
+            className="conversation-context-menu"
+            role="menu"
+            style={{ left: conversationMenu.x, top: conversationMenu.y }}
+          >
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => toggleAgentConversationPinned(activeConversationMenuTarget.id)}
+            >
+              <Pin size={14} aria-hidden="true" />
+              {activeConversationMenuTarget.pinned ? copy.nav.unpin : copy.nav.pin}
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => archiveAgentConversation(activeConversationMenuTarget.id)}
+            >
+              <Archive size={14} aria-hidden="true" />
+              {copy.nav.archive}
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => beginRenameAgentConversation(activeConversationMenuTarget)}
+            >
+              <Pencil size={14} aria-hidden="true" />
+              {copy.nav.rename}
+            </button>
+          </div>
+        ) : null}
+
+        <section className="sidebar-tools" aria-label={copy.navLabel}>
+          <details className="sidebar-tool sidebar-hub user-settings-hub">
+            <summary>
+              <MonitorCog size={16} aria-hidden="true" />
+              <span>{copy.nav.settings}</span>
+            </summary>
+            <div className="sidebar-hub-body">
+              <section
+                className="sidebar-controls user-settings-controls"
+                aria-label={copy.settingsPanel.title}
+                data-settings-count={settingsPanelItemCount}
+              >
+                <label>
+                  <span>{copy.settingsPanel.deepSeekApiKey}</span>
+                  <div className="api-key-input-row">
+                    <input
+                      type="password"
+                      value={sessionDeepSeekApiKey}
+                      aria-label={copy.settingsPanel.deepSeekApiKey}
+                      placeholder={primaryDeepSeekApiKeyPlaceholder}
+                      onChange={(event) => setSessionDeepSeekApiKey(event.target.value)}
+                    />
+                    {primaryDeepSeekApiKeyReady ? (
+                      <span
+                        className="api-key-ready-indicator"
+                        aria-label={copy.settingsPanel.apiKeyReady}
+                        title={copy.settingsPanel.apiKeyReady}
+                      >
+                        √
+                      </span>
+                    ) : null}
+                  </div>
+                </label>
+                <label>
+                  <span>{copy.settingsPanel.fallbackApiKey}</span>
+                  <div className="api-key-input-row">
+                    <input
+                      type="password"
+                      value={fallbackDeepSeekApiKey}
+                      aria-label={copy.settingsPanel.fallbackApiKey}
+                      placeholder={copy.settingsPanel.fallbackApiKeyPlaceholder}
+                      onChange={(event) => setFallbackDeepSeekApiKey(event.target.value)}
+                    />
+                    {fallbackDeepSeekApiKeyReady ? (
+                      <span
+                        className="api-key-ready-indicator"
+                        aria-label={copy.settingsPanel.apiKeyReady}
+                        title={copy.settingsPanel.apiKeyReady}
+                      >
+                        √
+                      </span>
+                    ) : null}
+                  </div>
+                </label>
+                <label>
+                  <span>{copy.controls.modelRoute}</span>
+                  <select
+                    value={state.model_route}
+                    aria-label={copy.controls.modelRoute}
+                    onChange={updateModelRoute}
+                  >
+                    <option value="auto">{copy.modelOptions.auto}</option>
+                    <option value="flash">{copy.modelOptions.flash}</option>
+                    <option value="pro">{copy.modelOptions.pro}</option>
+                  </select>
+                </label>
+                <label>
+                  <span>{copy.controls.thinkingLevel}</span>
+                  <select
+                    value={state.thinking_level}
+                    aria-label={copy.controls.thinkingLevel}
+                    onChange={updateThinkingLevel}
+                  >
+                    <option value="auto">{copy.thinkingOptions.auto}</option>
+                    <option value="fast">{copy.thinkingOptions.fast}</option>
+                    <option value="standard">{copy.thinkingOptions.standard}</option>
+                    <option value="deep">{copy.thinkingOptions.deep}</option>
+                  </select>
+                </label>
+                <label>
+                  <span>{copy.controls.themeStyle}</span>
+                  <select
+                    value={themeStyle}
+                    aria-label={copy.controls.themeStyle}
+                    onChange={updateThemeStyle}
+                  >
+                    <option value="porcelain">{copy.themeOptions.porcelain}</option>
+                    <option value="ink">{copy.themeOptions.ink}</option>
+                  </select>
+                </label>
+                <div className="setup-form compact-settings-form">
+                  <label>
+                    <span>{copy.settingsPanel.workspaceDirectory}</span>
+                    <div className="setup-field">
+                      <input
+                        value={setupWorkspaceDir}
+                        aria-label={copy.settingsPanel.workspaceDirectory}
+                        placeholder={copy.localSetup.workspacePlaceholder}
+                        readOnly
+                      />
+                      <button
+                        type="button"
+                        onClick={() => void chooseLocalDirectory({ autoSave: true })}
+                        disabled={setupPending}
+                      >
+                        <FolderOpen size={14} aria-hidden="true" />
+                        {setupPending ? copy.localSetup.saving : copy.settingsPanel.chooseWorkspace}
+                      </button>
+                    </div>
+                  </label>
+                  {setupNotice ? <p className="package-message">{setupNotice}</p> : null}
+                  {setupError ? <p className="package-error">{setupError}</p> : null}
+                </div>
+                <div className="settings-balance-panel">
+                  <div>
+                    <span>{copy.settingsPanel.balance}</span>
+                    <p className="setup-status">{deepSeekBalanceStatus}</p>
+                    {deepSeekBalanceDetails ? (
+                      <p className="setup-status">{deepSeekBalanceDetails}</p>
+                    ) : null}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void queryDeepSeekBalance()}
+                    disabled={deepSeekBalancePending}
+                  >
+                    <Database size={14} aria-hidden="true" />
+                    {deepSeekBalancePending
+                      ? copy.settingsPanel.queryingBalance
+                      : copy.settingsPanel.queryBalance}
+                  </button>
+                  {deepSeekBalanceError ? (
+                    <p className="package-error">{deepSeekBalanceError}</p>
+                  ) : null}
+                </div>
+              </section>
+            </div>
+          </details>
+          <details className="sidebar-tool sidebar-hub plugins-hub" hidden={!exposePluginsSidebarEntry}>
+            <summary>
+              <PackageOpen size={16} aria-hidden="true" />
+              <span>{copy.nav.plugins}</span>
+            </summary>
+            <div className="sidebar-hub-body">
+          <details className="sidebar-tool operations-tool" open>
+            <summary>
+              <ClipboardList size={16} aria-hidden="true" />
+              <span>{copy.skills.title}</span>
+            </summary>
+            <div className="skill-plugin-list">
+              <article className="skill-plugin-card">
+                <header>
+                  <div>
+                    <strong>{copy.skills.operationsTitle}</strong>
+                    <p>{copy.skills.operationsDescription}</p>
+                  </div>
+                  <span>{copy.skills.enabled}</span>
+                </header>
+                <form className="sidebar-form workflow-form" onSubmit={runOperationsBriefingWorkflow}>
+                  <button
+                    type="button"
+                    disabled={briefingPending || capabilityPending !== null}
+                    onClick={() => void seedOperationsBriefingEvidenceTemplates()}
+                  >
+                    <FileText size={14} aria-hidden="true" />
+                    {copy.operationsBriefing.seedTemplates}
+                  </button>
+                  <button type="submit" disabled={briefingPending || capabilityPending !== null}>
+                    <MousePointerClick size={14} aria-hidden="true" />
+                    {briefingPending ? copy.operationsBriefing.running : copy.operationsBriefing.run}
+                  </button>
+                </form>
+                {briefingNotice ? <p className="package-message">{briefingNotice}</p> : null}
+                {briefingError ? <p className="package-error">{briefingError}</p> : null}
+                <div className="sidebar-compact-panel" aria-live="polite">
+                  <div className="queue-heading">
+                    <strong>{copy.operationsBriefing.runs}</strong>
+                    <span>{operationsBriefingRuns.length}</span>
+                  </div>
+                  {operationsBriefingRuns.length === 0 ? (
+                    <p className="empty-state">{copy.operationsBriefing.noRuns}</p>
+                  ) : (
+                    <div className="sidebar-record-list">
+                      {operationsBriefingRuns.slice(0, 3).map((operationsBriefingRun, runIndex) => (
+                        <article className="sidebar-record-row" key={operationsBriefingRun.id}>
+                          <div>
+                            <span>
+                              {runIndex === 0
+                                ? copy.operationsBriefing.latestRun
+                                : copy.operationsBriefing.runs}
+                            </span>
+                            <strong>{operationsBriefingRun.title}</strong>
+                          </div>
+                          <span className={`access-status ${operationsBriefingRun.status}`}>
+                            {copy.operationsBriefing.status[operationsBriefingRun.status]}
+                          </span>
+                        </article>
+                      ))}
+                    </div>
+                  )}
+                  {latestOperationsBriefingRun ? (
+                    <div className="sidebar-split-actions">
+                      <button
+                        type="button"
+                        onClick={exportOperationsBriefingPackage}
+                        disabled={briefingPending || packagePending}
+                      >
+                        <PackageOpen size={14} aria-hidden="true" />
+                        {copy.operationsBriefing.exportPackage}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void exportOperationsBriefingReport()}
+                        disabled={briefingPending}
+                      >
+                        <FileText size={14} aria-hidden="true" />
+                        {copy.operationsBriefing.exportReport}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void exportOperationsBriefingHtmlReport()}
+                        disabled={briefingPending}
+                      >
+                        <FileText size={14} aria-hidden="true" />
+                        {copy.operationsBriefing.exportHtmlReport}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void exportOperationsBriefingPdfReport()}
+                        disabled={briefingPending}
+                      >
+                        <FileText size={14} aria-hidden="true" />
+                        {copy.operationsBriefing.exportPdfReport}
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              </article>
+            </div>
+          </details>
+
+          <details className="sidebar-tool package-tool">
+            <summary>
+              <PackageOpen size={16} aria-hidden="true" />
+              <span>{copy.package.title}</span>
+            </summary>
+            <div className="sidebar-action-stack">
+              <button type="button" onClick={exportCurrentWorkPackage} disabled={packagePending}>
+                <PackageOpen size={14} aria-hidden="true" />
+                {copy.package.exportPackage}
+              </button>
+              <button type="button" onClick={copyCurrentWorkPackage} disabled={packagePending}>
+                <Clipboard size={14} aria-hidden="true" />
+                {copy.package.copyPackage}
+              </button>
+              <textarea
+                value={importPackageJson}
+                aria-label={copy.package.importJson}
+                placeholder={copy.package.importJson}
+                rows={4}
+                onChange={(event) => {
+                  setImportPackageJson(event.target.value);
+                  setImportPreview(null);
+                }}
+              />
+              <div className="sidebar-split-actions">
+                <button type="button" onClick={previewWorkPackageImport} disabled={packagePending}>
+                  <FileText size={14} aria-hidden="true" />
+                  {copy.package.previewImport}
+                </button>
+                <button type="button" onClick={importWorkPackageJson} disabled={packagePending}>
+                  <ArchiveRestore size={14} aria-hidden="true" />
+                  {copy.package.importPackage}
+                </button>
+              </div>
+              <div className="sidebar-compact-panel" aria-live="polite">
+                <div className="queue-heading">
+                  <strong>{copy.package.title}</strong>
+                  <span>{taskRecords.length}</span>
+                </div>
+                {taskRecords.length === 0 ? (
+                  <p className="empty-state">{copy.package.noRecords}</p>
+                ) : (
+                  <div className="sidebar-record-list">
+                    {taskRecords.slice(0, 4).map((record) => (
+                      <article className="sidebar-record-row single" key={record.id}>
+                        <div>
+                          <strong>{record.title}</strong>
+                          {record.summary ? <p>{record.summary}</p> : null}
+                        </div>
+                        <time dateTime={record.created_at}>
+                          {formatTaskDate(record.created_at, language)}
+                        </time>
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </div>
+              {exportedPackageJson ? (
+                <textarea
+                  className="package-json sidebar-package-json"
+                  value={exportedPackageJson}
+                  aria-label={copy.package.packageJson}
+                  rows={4}
+                  readOnly
+                />
+              ) : null}
+              {importPreview ? (
+                <section className="import-preview sidebar-import-preview" aria-labelledby="sidebar-import-preview-title">
+                  <strong id="sidebar-import-preview-title">{copy.package.previewTitle}</strong>
+                  <div>
+                    <span>
+                      {copy.package.previewTotalTasks}: {importPreview.task_records.total}
+                    </span>
+                    <span>
+                      {copy.package.previewNewTasks}: {importPreview.task_records.new}
+                    </span>
+                    <span>
+                      {copy.package.previewMemoryCandidates}:{" "}
+                      {importPreview.memory_candidates.total}
+                    </span>
+                    <span>
+                      {copy.package.previewArchivedRuns}:{" "}
+                      {importPreview.operations_briefing_runs.total}
+                    </span>
+                    <span>
+                      {copy.package.previewWorkflowTemplates}:{" "}
+                      {importPreview.workflow_templates.total}
+                    </span>
+                  </div>
+                  <p>{copy.package.previewMemoryCandidateHint}</p>
+                  <p>{copy.package.previewArchiveHint}</p>
+                </section>
+              ) : null}
+            </div>
+            {packageNotice ? <p className="package-message">{packageNotice}</p> : null}
+            {packageError ? <p className="package-error">{packageError}</p> : null}
+          </details>
+
+            </div>
+          </details>
+
+          <details
+            className="sidebar-tool sidebar-hub settings-hub legacy-settings-hub"
+          >
+            <summary>
+              <MonitorCog size={16} aria-hidden="true" />
+              <span>{copy.nav.settings}</span>
+            </summary>
+            <div className="sidebar-hub-body">
+          <details
+            className="sidebar-tool memory-tool"
+            ref={(node) => {
+              memorySectionRef.current = node;
+            }}
+          >
+            <summary>
+              <Database size={16} aria-hidden="true" />
+              <span>{copy.memory.title}</span>
+            </summary>
+            <div className="sidebar-action-stack">
+              <form className="memory-search sidebar-memory-search" onSubmit={searchMemoryRecords}>
+                <input
+                  value={memoryQuery}
+                  aria-label={copy.memory.searchPlaceholder}
+                  placeholder={copy.memory.searchPlaceholder}
+                  onChange={(event) => setMemoryQuery(event.target.value)}
+                />
+                <button type="submit" disabled={memoryPending}>
+                  <Search size={15} aria-hidden="true" />
+                  {copy.memory.search}
+                </button>
+              </form>
+              {memoryRecords.length >= 2 ? (
+                <form className="memory-link-form sidebar-memory-link-form" onSubmit={linkExistingMemoryRecords}>
+                  <select
+                    value={memoryLinkSourceId}
+                    aria-label={copy.memory.linkSource}
+                    onChange={(event) => setMemoryLinkSourceId(event.target.value)}
+                    disabled={memoryExistingLinkPending}
+                  >
+                    <option value="">{copy.memory.linkSource}</option>
+                    {memoryRecords.map((memory) => (
+                      <option key={memory.id} value={memory.id}>
+                        {memory.title}
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    value={memoryLinkTargetId}
+                    aria-label={copy.memory.linkTarget}
+                    onChange={(event) => setMemoryLinkTargetId(event.target.value)}
+                    disabled={memoryExistingLinkPending}
+                  >
+                    <option value="">{copy.memory.linkTarget}</option>
+                    {memoryRecords.map((memory) => (
+                      <option key={memory.id} value={memory.id}>
+                        {memory.title}
+                      </option>
+                    ))}
+                  </select>
+                  <button type="submit" disabled={memoryExistingLinkPending}>
+                    <Link2 size={15} aria-hidden="true" />
+                    {memoryExistingLinkPending
+                      ? copy.memory.linkingExisting
+                      : copy.memory.linkExisting}
+                  </button>
+                </form>
+              ) : null}
+              {memoryNotice ? <p className="package-message">{memoryNotice}</p> : null}
+              {memoryError ? <p className="package-error">{memoryError}</p> : null}
+              <div className="sidebar-compact-panel">
+                <div className="queue-heading">
+                  <strong>{copy.memory.title}</strong>
+                  <span>{memoryRecords.length}</span>
+                </div>
+                {memoryRecords.length === 0 ? (
+                  <p className="empty-state">{copy.memory.noMemories}</p>
+                ) : (
+                  <div className="sidebar-record-list">
+                    {memoryRecords.slice(0, 5).map((memory) => (
+                      <article className="sidebar-record-row single" key={memory.id}>
+                        <div>
+                          <strong>{memory.title}</strong>
+                          <p>{memory.body}</p>
+                          <div className="memory-meta">
+                            <span>{copy.memory.typeOptions[memory.memory_type]}</span>
+                            <span>{copy.memory.scopeOptions[memory.scope]}</span>
+                            <span>{copy.memory.lifecycleOptions[memory.lifecycle]}</span>
+                          </div>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div className="sidebar-compact-panel">
+                <div className="queue-heading">
+                  <strong>{copy.memory.candidates}</strong>
+                  <span>{memoryCandidateRecords.length}</span>
+                </div>
+                {memoryCandidateNotice ? (
+                  <p className="package-message">{memoryCandidateNotice}</p>
+                ) : null}
+                {memoryCandidateError ? (
+                  <p className="package-error">{memoryCandidateError}</p>
+                ) : null}
+                {memoryCandidateRecords.length === 0 ? (
+                  <p className="empty-state">{copy.memory.noCandidates}</p>
+                ) : (
+                  <div className="sidebar-record-list">
+                    {memoryCandidateRecords.slice(0, 4).map((record) => (
+                      <article className="sidebar-record-row candidate" key={record.candidate.id}>
+                        <div>
+                          <strong>{record.candidate.title}</strong>
+                          <p>{record.candidate.body}</p>
+                        </div>
+                        <span className={`access-status ${record.effective_status}`}>
+                          {copy.memory.candidateStatus[record.effective_status]}
+                        </span>
+                        {record.effective_status === "pending" ? (
+                          <div className="sidebar-row-actions">
+                            <button
+                              type="button"
+                              onClick={() => void resolveMemoryCandidate(record.candidate.id, true)}
+                              disabled={memoryCandidateResolutionPending !== null}
+                            >
+                              <Check size={14} aria-hidden="true" />
+                              {memoryCandidateResolutionPending === record.candidate.id
+                                ? copy.memory.resolving
+                                : copy.memory.accept}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void resolveMemoryCandidate(record.candidate.id, false)}
+                              disabled={memoryCandidateResolutionPending !== null}
+                            >
+                              <X size={14} aria-hidden="true" />
+                              {copy.memory.reject}
+                            </button>
+                          </div>
+                        ) : null}
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </details>
+
+          <details className="sidebar-tool settings-tool" open={localDirectoryState.needs_setup}>
+            <summary>
+              <MonitorCog size={16} aria-hidden="true" />
+              <span>{copy.inspector.title}</span>
+            </summary>
+            <section className="sidebar-controls" aria-label={copy.inspector.title}>
+              <label>
+                <span>{copy.controls.largeModelProvider}</span>
+                <select
+                  value={state.large_model_provider}
+                  aria-label={copy.controls.largeModelProvider}
+                  onChange={updateLargeModelProvider}
+                >
+                  <option value="deepseek">{copy.largeModelOptions.deepseek}</option>
+                  <option value="chatgpt">{copy.largeModelOptions.chatgpt}</option>
+                  <option value="codex">{copy.largeModelOptions.codex}</option>
+                  <option value="custom">{copy.largeModelOptions.custom}</option>
+                </select>
+              </label>
+              <label>
+                <span>{copy.controls.modelRoute}</span>
+                <select
+                  value={state.model_route}
+                  aria-label={copy.controls.modelRoute}
+                  onChange={updateModelRoute}
+                >
+                  <option value="auto">{copy.modelOptions.auto}</option>
+                  <option value="flash">{copy.modelOptions.flash}</option>
+                  <option value="pro">{copy.modelOptions.pro}</option>
+                </select>
+              </label>
+              <label>
+                <span>{copy.controls.accessMode}</span>
+                <select
+                  value={state.access_mode}
+                  aria-label={copy.controls.accessMode}
+                  onChange={updateAccessMode}
+                >
+                  <option value="ask_every_step">{copy.accessOptions.ask_every_step}</option>
+                  <option value="ask_on_risk">{copy.accessOptions.ask_on_risk}</option>
+                  <option value="limited_auto">{copy.accessOptions.limited_auto}</option>
+                  <option value="full_access">{copy.accessOptions.full_access}</option>
+                </select>
+              </label>
+              <label>
+                <span>{copy.controls.thinkingLevel}</span>
+                <select
+                  value={state.thinking_level}
+                  aria-label={copy.controls.thinkingLevel}
+                  onChange={updateThinkingLevel}
+                >
+                  <option value="auto">{copy.thinkingOptions.auto}</option>
+                  <option value="fast">{copy.thinkingOptions.fast}</option>
+                  <option value="standard">{copy.thinkingOptions.standard}</option>
+                  <option value="deep">{copy.thinkingOptions.deep}</option>
+                </select>
+              </label>
+              <label>
+                <span>{copy.controls.themeStyle}</span>
+                <select
+                  value={themeStyle}
+                  aria-label={copy.controls.themeStyle}
+                  onChange={updateThemeStyle}
+                >
+                  <option value="porcelain">{copy.themeOptions.porcelain}</option>
+                  <option value="ink">{copy.themeOptions.ink}</option>
+                </select>
+              </label>
+            </section>
+            <details
+              className={
+                localDirectoryState.needs_setup
+                  ? "setup-disclosure setup-required"
+                  : "setup-disclosure"
+              }
+              open={localDirectoryState.needs_setup}
+            >
+              <summary className="section-heading">
+                <FolderOpen size={18} aria-hidden="true" />
+                <span>{copy.localSetup.title}</span>
+                <small>
+                  {localDirectoryState.needs_setup
+                    ? copy.localSetup.required
+                    : copy.localSetup.ready}
+                </small>
+              </summary>
+              <div className="setup-disclosure-body">
+                <form className="setup-form" onSubmit={saveLocalDirectorySetup}>
+                  <label>
+                    <span>{copy.localSetup.workspaceName}</span>
+                    <input
+                      value={setupWorkspaceName}
+                      aria-label={copy.localSetup.workspaceName}
+                      placeholder={copy.localSetup.workspaceNamePlaceholder}
+                      onChange={(event) => setSetupWorkspaceName(event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    <span>{copy.localSetup.workspaceDir}</span>
+                    <div className="setup-field">
+                      <input
+                        value={setupWorkspaceDir}
+                        aria-label={copy.localSetup.workspaceDir}
+                        placeholder={copy.localSetup.workspacePlaceholder}
+                        onChange={(event) => setSetupWorkspaceDir(event.target.value)}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => void chooseLocalDirectory()}
+                      >
+                        <FolderOpen size={14} aria-hidden="true" />
+                        {copy.localSetup.choose}
+                      </button>
+                    </div>
+                  </label>
+                  <p className="setup-help">{copy.localSetup.managedStructure}</p>
+                  <button type="submit" disabled={setupPending}>
+                    <MousePointerClick size={14} aria-hidden="true" />
+                    {setupPending ? copy.localSetup.saving : copy.localSetup.save}
+                  </button>
+                </form>
+                {setupNotice ? <p className="package-message">{setupNotice}</p> : null}
+                {setupError ? <p className="package-error">{setupError}</p> : null}
+              </div>
+            </details>
+
+            <details className="setup-disclosure">
+              <summary className="section-heading">
+                <Database size={18} aria-hidden="true" />
+                <span>{copy.deepSeekPricing.title}</span>
+                <small>
+                  {deepSeekPricingState.pricing_configured
+                    ? copy.deepSeekPricing.statusConfigured
+                    : copy.deepSeekPricing.statusNotConfigured}
+                </small>
+              </summary>
+              <div className="setup-disclosure-body">
+                <p className="setup-status" title={deepSeekPricingState.note}>
+                  {deepSeekPricingState.note}
+                </p>
+                <dl className="setup-meta">
+                  <div>
+                    <dt>{copy.deepSeekPricing.settingsFile}</dt>
+                    <dd>{deepSeekPricingState.settings_file || copy.backendLabels.notSelected}</dd>
+                  </div>
+                </dl>
+                <form className="setup-form" onSubmit={saveDeepSeekPricingSetup}>
+                  <label className="setup-checkbox">
+                    <input
+                      type="checkbox"
+                      checked={deepSeekPricingEnabled}
+                      onChange={(event) => setDeepSeekPricingEnabled(event.target.checked)}
+                    />
+                    <span>{copy.deepSeekPricing.enabled}</span>
+                  </label>
+                  <p className="setup-status">{copy.deepSeekPricing.help}</p>
+                  <label>
+                    <span>{copy.deepSeekPricing.flashPrompt}</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.000001"
+                      value={deepSeekFlashPromptPrice}
+                      aria-label={copy.deepSeekPricing.flashPrompt}
+                      placeholder={copy.deepSeekPricing.pricePlaceholder}
+                      onChange={(event) => setDeepSeekFlashPromptPrice(event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    <span>{copy.deepSeekPricing.flashCompletion}</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.000001"
+                      value={deepSeekFlashCompletionPrice}
+                      aria-label={copy.deepSeekPricing.flashCompletion}
+                      placeholder={copy.deepSeekPricing.pricePlaceholder}
+                      onChange={(event) => setDeepSeekFlashCompletionPrice(event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    <span>{copy.deepSeekPricing.proPrompt}</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.000001"
+                      value={deepSeekProPromptPrice}
+                      aria-label={copy.deepSeekPricing.proPrompt}
+                      placeholder={copy.deepSeekPricing.pricePlaceholder}
+                      onChange={(event) => setDeepSeekProPromptPrice(event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    <span>{copy.deepSeekPricing.proCompletion}</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.000001"
+                      value={deepSeekProCompletionPrice}
+                      aria-label={copy.deepSeekPricing.proCompletion}
+                      placeholder={copy.deepSeekPricing.pricePlaceholder}
+                      onChange={(event) => setDeepSeekProCompletionPrice(event.target.value)}
+                    />
+                  </label>
+                  <button type="submit" disabled={deepSeekPricingPending}>
+                    <MousePointerClick size={14} aria-hidden="true" />
+                    {deepSeekPricingPending
+                      ? copy.deepSeekPricing.saving
+                      : copy.deepSeekPricing.save}
+                  </button>
+                </form>
+                {deepSeekPricingNotice ? (
+                  <p className="package-message">{deepSeekPricingNotice}</p>
+                ) : null}
+                {deepSeekPricingError ? (
+                  <p className="package-error">{deepSeekPricingError}</p>
+                ) : null}
+              </div>
+            </details>
+          </details>
+            </div>
+          </details>
+        </section>
       </aside>
 
       <section className="workspace">
-        <header className="toolbar">
-          <select
-            value={state.large_model_provider}
-            aria-label={copy.controls.largeModelProvider}
-            onChange={updateLargeModelProvider}
-          >
-            <option value="deepseek">{copy.largeModelOptions.deepseek}</option>
-            <option value="chatgpt">{copy.largeModelOptions.chatgpt}</option>
-            <option value="codex">{copy.largeModelOptions.codex}</option>
-            <option value="custom">{copy.largeModelOptions.custom}</option>
-          </select>
-          <select value={state.model_route} aria-label={copy.controls.modelRoute} onChange={updateModelRoute}>
-            <option value="auto">{copy.modelOptions.auto}</option>
-            <option value="flash">{copy.modelOptions.flash}</option>
-            <option value="pro">{copy.modelOptions.pro}</option>
-          </select>
-          <select value={state.access_mode} aria-label={copy.controls.accessMode} onChange={updateAccessMode}>
-            <option value="ask_every_step">{copy.accessOptions.ask_every_step}</option>
-            <option value="ask_on_risk">{copy.accessOptions.ask_on_risk}</option>
-            <option value="limited_auto">{copy.accessOptions.limited_auto}</option>
-            <option value="full_access">{copy.accessOptions.full_access}</option>
-          </select>
-          <select value={state.thinking_level} aria-label={copy.controls.thinkingLevel} onChange={updateThinkingLevel}>
-            <option value="auto">{copy.thinkingOptions.auto}</option>
-            <option value="fast">{copy.thinkingOptions.fast}</option>
-            <option value="standard">{copy.thinkingOptions.standard}</option>
-            <option value="deep">{copy.thinkingOptions.deep}</option>
-          </select>
-          <select value={themeStyle} aria-label={copy.controls.themeStyle} onChange={updateThemeStyle}>
-            <option value="deep">{copy.themeOptions.deep}</option>
-            <option value="ink">{copy.themeOptions.ink}</option>
-            <option value="porcelain">{copy.themeOptions.porcelain}</option>
-          </select>
-        </header>
 
-        <section className="workbench" ref={workbenchSectionRef}>
+        <section
+          className={`workbench ${shouldShowRunInspector ? "has-inspector" : "chat-only"}`}
+          ref={workbenchSectionRef}
+        >
           <div className="timeline">
-            <p className="eyebrow">{copy.workbench.stage}</p>
-            <h1>{copy.workbench.title}</h1>
-            <p className="summary">{copy.workbench.summary}</p>
+            <section className="agent-chat-panel" aria-label={copy.chatWorkbench.title}>
+              <div className="chat-thread" ref={chatThreadRef} aria-live="polite">
+                {agentMessages.map((message) => {
+                  const visibleProposedActions =
+                    message.role === "assistant"
+                      ? (message.proposed_actions ?? []).filter(shouldShowAgentActionInChat)
+                      : [];
 
-            <section
-              className={
-                localDirectoryState.needs_setup
-                  ? "setup-panel setup-required"
-                  : "setup-panel"
-              }
-              aria-labelledby="local-directory-setup-title"
-            >
-              <div className="section-heading">
-                <FolderOpen size={18} aria-hidden="true" />
-                <h2 id="local-directory-setup-title">{copy.localSetup.title}</h2>
+                  return (
+                  <article className={`chat-message ${message.role}`} key={message.id}>
+                    {message.role === "assistant" ? (
+                      <div className="chat-avatar" aria-hidden="true">
+                        <Brain size={16} />
+                      </div>
+                    ) : null}
+                    <div className="chat-bubble">
+                      {message.role === "assistant" ? (
+                        <span>{message.model ?? copy.chatWorkbench.assistantLabel}</span>
+                      ) : null}
+                      <p>
+                        {userFacingAgentMessageContent(message, {
+                          responseReadFailed: copy.chatWorkbench.deepSeekResponseReadFailed,
+                        })}
+                      </p>
+                      {message.role === "assistant" && message.missing_prerequisites?.length ? (
+                        <div className="agent-action-list">
+                          <strong>{copy.chatWorkbench.missingPrerequisitesLabel}</strong>
+                          <ul>
+                            {message.missing_prerequisites.map((prerequisite, index) => (
+                              <li key={`${message.id}-prerequisite-${index}`}>
+                                <span>{prerequisite.kind}</span>
+                                <p>{prerequisite.message}</p>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      ) : null}
+                      {visibleProposedActions.length ? (
+                        <div className="agent-action-list">
+                          <strong>{copy.chatWorkbench.actionPlanLabel}</strong>
+                          <ul>
+                            {visibleProposedActions.map((action) => {
+                              const actionIndex = message.proposed_actions?.indexOf(action) ?? -1;
+                              const actionKey = `${message.id}:${actionIndex}`;
+                              const approvalRecord = action.permission_request_id
+                                ? capabilityRecords.find(
+                                    (record) => record.request.id === action.permission_request_id,
+                                  )
+                                : null;
+                              const canResumeAction =
+                                action.execution_state === "needs_confirmation" &&
+                                approvalRecord?.effective_status === "approved" &&
+                                (approvalRecord.grant_state === "reusable" ||
+                                  approvalRecord.grant_state === "one_shot_available");
+                              const canApproveAndResumeAction =
+                                action.execution_state === "needs_confirmation" &&
+                                ((action.permission_request_id !== null &&
+                                  approvalRecord?.effective_status === "pending_approval") ||
+                                  action.permission_request_id === null);
+                              const actionButtonDisabled =
+                                agentChatPending ||
+                                agentActionPending !== null ||
+                                resolutionPending !== null;
+                              const actionDetail = userFacingAgentActionDetail(action);
+                              return (
+                                <li key={`${message.id}-action-${actionIndex}`}>
+                                  <span className={`agent-action-state ${action.execution_state}`}>
+                                    {copy.chatWorkbench.actionState[action.execution_state]}
+                                  </span>
+                                  <p>
+                                    {action.title || action.action_type}
+                                    {action.target ? ` · ${action.target}` : ""}
+                                  </p>
+                                  {actionDetail ? <small>{actionDetail}</small> : null}
+                                  {canApproveAndResumeAction ? (
+                                    <button
+                                      className="agent-action-resume"
+                                      type="button"
+                                      disabled={actionButtonDisabled}
+                                      onClick={() =>
+                                        void approveAndResumeAgentAction(
+                                          message.id,
+                                          actionIndex,
+                                          action,
+                                        )
+                                      }
+                                    >
+                                      <Check size={13} aria-hidden="true" />
+                                      {agentActionPending === actionKey
+                                        ? copy.chatWorkbench.confirmingAction
+                                        : copy.chatWorkbench.confirmAndRun}
+                                    </button>
+                                  ) : canResumeAction ? (
+                                    <button
+                                      className="agent-action-resume"
+                                      type="button"
+                                      disabled={actionButtonDisabled}
+                                      onClick={() =>
+                                        void resumeAgentAction(message.id, actionIndex, action)
+                                      }
+                                    >
+                                      <Play size={13} aria-hidden="true" />
+                                      {agentActionPending === actionKey
+                                        ? copy.chatWorkbench.resumingAction
+                                        : copy.chatWorkbench.resumeAction}
+                                    </button>
+                                  ) : null}
+                                </li>
+                              );
+                            })}
+                          </ul>
+                        </div>
+                      ) : null}
+                      {message.role === "assistant" && message.memory_candidates?.length ? (
+                        <div className="agent-action-list">
+                          <strong>{copy.chatWorkbench.memoryCandidatesLabel}</strong>
+                          <ul>
+                            {message.memory_candidates.map((candidate) => (
+                              <li key={candidate.id}>
+                                <span>{candidate.title}</span>
+                                <p>{candidate.body}</p>
+                                {candidate.rationale ? <small>{candidate.rationale}</small> : null}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      ) : null}
+                    </div>
+                  </article>
+                  );
+                })}
+                {agentChatPending ? (
+                  <article className="chat-message assistant pending">
+                    <div className="chat-avatar" aria-hidden="true">
+                      <Brain size={16} />
+                    </div>
+                    <div className="chat-bubble">
+                      <span>{copy.chatWorkbench.assistantLabel}</span>
+                      <p>{agentChatPendingStatus}</p>
+                    </div>
+                  </article>
+                ) : null}
               </div>
-              <p className="setup-status">
-                {localDirectoryState.needs_setup
-                  ? copy.localSetup.required
-                  : copy.localSetup.ready}
-              </p>
-              <dl className="setup-meta">
-                <div>
-                  <dt>{copy.localSetup.appData}</dt>
-                  <dd>{localDirectoryState.app_data_dir || copy.backendLabels.notSelected}</dd>
-                </div>
-                <div>
-                  <dt>{copy.localSetup.settingsFile}</dt>
-                  <dd>{localDirectoryState.settings_file || copy.backendLabels.notSelected}</dd>
-                </div>
-              </dl>
-              <form className="setup-form" onSubmit={saveLocalDirectorySetup}>
-                <label>
-                  <span>{copy.localSetup.workspaceDir}</span>
-                  <div className="setup-field">
-                    <input
-                      value={setupWorkspaceDir}
-                      aria-label={copy.localSetup.workspaceDir}
-                      placeholder={copy.localSetup.workspacePlaceholder}
-                      onChange={(event) => setSetupWorkspaceDir(event.target.value)}
-                    />
-                    <button
-                      type="button"
-                      onClick={() => void chooseLocalDirectory("workspace")}
-                    >
-                      <FolderOpen size={14} aria-hidden="true" />
-                      {copy.localSetup.choose}
+
+              <div className="chat-input-dock">
+                <form className="chat-composer" onSubmit={sendAgentMessage}>
+                  <textarea
+                    value={agentPrompt}
+                    aria-label={copy.chatWorkbench.composerPlaceholder}
+                    placeholder={copy.chatWorkbench.composerPlaceholder}
+                    rows={4}
+                    onChange={(event) => setAgentPrompt(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (
+                        event.key !== "Enter" ||
+                        event.nativeEvent.isComposing
+                      ) {
+                        return;
+                      }
+                      if (event.ctrlKey) {
+                        event.preventDefault();
+                        const textarea = event.currentTarget;
+                        const cursorStart = textarea.selectionStart;
+                        const cursorEnd = textarea.selectionEnd;
+                        const nextPrompt = `${agentPrompt.slice(0, cursorStart)}\n${agentPrompt.slice(
+                          cursorEnd,
+                        )}`;
+                        const nextCursor = cursorStart + 1;
+                        setAgentPrompt(nextPrompt);
+                        window.requestAnimationFrame(() => {
+                          textarea.setSelectionRange(nextCursor, nextCursor);
+                        });
+                        return;
+                      }
+                      if (event.metaKey || event.altKey || event.shiftKey) {
+                        return;
+                      }
+                      event.preventDefault();
+                      if (!agentChatPending) {
+                        event.currentTarget.form?.requestSubmit();
+                      }
+                    }}
+                  />
+                  <div className="composer-actions">
+                    {agentChatPending ? <span>{agentChatPendingStatus}</span> : null}
+                    <button className="primary-action" type="submit" disabled={agentChatPending}>
+                      <Send size={16} aria-hidden="true" />
+                      {copy.chatWorkbench.saveTask}
                     </button>
                   </div>
-                </label>
-                <label>
-                  <span>{copy.localSetup.evidenceDir}</span>
-                  <div className="setup-field">
-                    <input
-                      value={setupEvidenceDir}
-                      aria-label={copy.localSetup.evidenceDir}
-                      placeholder={copy.localSetup.evidencePlaceholder}
-                      onChange={(event) => setSetupEvidenceDir(event.target.value)}
-                    />
-                    <button
-                      type="button"
-                      onClick={() => void chooseLocalDirectory("evidence")}
-                    >
-                      <FolderOpen size={14} aria-hidden="true" />
-                      {copy.localSetup.choose}
-                    </button>
-                  </div>
-                </label>
-                <label>
-                  <span>{copy.localSetup.exportDir}</span>
-                  <div className="setup-field">
-                    <input
-                      value={setupExportDir}
-                      aria-label={copy.localSetup.exportDir}
-                      placeholder={copy.localSetup.exportPlaceholder}
-                      onChange={(event) => setSetupExportDir(event.target.value)}
-                    />
-                    <button
-                      type="button"
-                      onClick={() => void chooseLocalDirectory("export")}
-                    >
-                      <FolderOpen size={14} aria-hidden="true" />
-                      {copy.localSetup.choose}
-                    </button>
-                  </div>
-                </label>
-                <button type="submit" disabled={setupPending}>
-                  <MousePointerClick size={14} aria-hidden="true" />
-                  {setupPending ? copy.localSetup.saving : copy.localSetup.save}
-                </button>
-              </form>
-              {setupNotice ? <p className="package-message">{setupNotice}</p> : null}
-              {setupError ? <p className="package-error">{setupError}</p> : null}
+                </form>
+                {agentChatError ? <p className="package-error chat-feedback">{agentChatError}</p> : null}
+              </div>
             </section>
 
-            <section className="setup-panel" aria-labelledby="deepseek-pricing-title">
-              <div className="section-heading">
-                <Database size={18} aria-hidden="true" />
-                <h2 id="deepseek-pricing-title">{copy.deepSeekPricing.title}</h2>
-              </div>
-              <p className="setup-status" title={deepSeekPricingState.note}>
-                {deepSeekPricingState.pricing_configured
-                  ? copy.deepSeekPricing.statusConfigured
-                  : copy.deepSeekPricing.statusNotConfigured}
-              </p>
-              <dl className="setup-meta">
-                <div>
-                  <dt>{copy.deepSeekPricing.settingsFile}</dt>
-                  <dd>{deepSeekPricingState.settings_file || copy.backendLabels.notSelected}</dd>
-                </div>
-              </dl>
-              <form className="setup-form" onSubmit={saveDeepSeekPricingSetup}>
-                <label className="setup-checkbox">
-                  <input
-                    type="checkbox"
-                    checked={deepSeekPricingEnabled}
-                    onChange={(event) => setDeepSeekPricingEnabled(event.target.checked)}
-                  />
-                  <span>{copy.deepSeekPricing.enabled}</span>
-                </label>
-                <p className="setup-status">{copy.deepSeekPricing.help}</p>
-                <label>
-                  <span>{copy.deepSeekPricing.flashPrompt}</span>
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.000001"
-                    value={deepSeekFlashPromptPrice}
-                    aria-label={copy.deepSeekPricing.flashPrompt}
-                    placeholder={copy.deepSeekPricing.pricePlaceholder}
-                    onChange={(event) => setDeepSeekFlashPromptPrice(event.target.value)}
-                  />
-                </label>
-                <label>
-                  <span>{copy.deepSeekPricing.flashCompletion}</span>
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.000001"
-                    value={deepSeekFlashCompletionPrice}
-                    aria-label={copy.deepSeekPricing.flashCompletion}
-                    placeholder={copy.deepSeekPricing.pricePlaceholder}
-                    onChange={(event) => setDeepSeekFlashCompletionPrice(event.target.value)}
-                  />
-                </label>
-                <label>
-                  <span>{copy.deepSeekPricing.proPrompt}</span>
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.000001"
-                    value={deepSeekProPromptPrice}
-                    aria-label={copy.deepSeekPricing.proPrompt}
-                    placeholder={copy.deepSeekPricing.pricePlaceholder}
-                    onChange={(event) => setDeepSeekProPromptPrice(event.target.value)}
-                  />
-                </label>
-                <label>
-                  <span>{copy.deepSeekPricing.proCompletion}</span>
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.000001"
-                    value={deepSeekProCompletionPrice}
-                    aria-label={copy.deepSeekPricing.proCompletion}
-                    placeholder={copy.deepSeekPricing.pricePlaceholder}
-                    onChange={(event) => setDeepSeekProCompletionPrice(event.target.value)}
-                  />
-                </label>
-                <button type="submit" disabled={deepSeekPricingPending}>
-                  <MousePointerClick size={14} aria-hidden="true" />
-                  {deepSeekPricingPending
-                    ? copy.deepSeekPricing.saving
-                    : copy.deepSeekPricing.save}
-                </button>
-              </form>
-              {deepSeekPricingNotice ? (
-                <p className="package-message">{deepSeekPricingNotice}</p>
-              ) : null}
-              {deepSeekPricingError ? (
-                <p className="package-error">{deepSeekPricingError}</p>
-              ) : null}
-            </section>
-
+            {renderLegacyCenterManagementPanels ? (
+              <>
             <section className="workflow-panel" aria-labelledby="operations-briefing-title">
               <div className="section-heading">
                 <ClipboardList size={18} aria-hidden="true" />
                 <h2 id="operations-briefing-title">{copy.operationsBriefing.title}</h2>
               </div>
-
-              <form className="workflow-form" onSubmit={runOperationsBriefingWorkflow}>
-                <input
-                  value={briefingFolderPath}
-                  aria-label={copy.operationsBriefing.folderPlaceholder}
-                  placeholder={copy.operationsBriefing.folderPlaceholder}
-                  onChange={(event) => setBriefingFolderPath(event.target.value)}
-                />
-                <button
-                  type="button"
-                  disabled={briefingPending || capabilityPending !== null}
-                  onClick={() => void seedOperationsBriefingEvidenceTemplates()}
-                >
-                  <FileText size={14} aria-hidden="true" />
-                  {copy.operationsBriefing.seedTemplates}
-                </button>
-                <button type="submit" disabled={briefingPending || capabilityPending !== null}>
-                  <MousePointerClick size={14} aria-hidden="true" />
-                  {briefingPending ? copy.operationsBriefing.running : copy.operationsBriefing.run}
-                </button>
-              </form>
-
-              {briefingNotice ? <p className="package-message">{briefingNotice}</p> : null}
-              {briefingError ? <p className="package-error">{briefingError}</p> : null}
 
               <div className="workflow-run-list" aria-live="polite">
                 {operationsBriefingRuns.length === 0 ? (
@@ -2650,26 +4635,6 @@ export function App() {
                 <PackageOpen size={18} aria-hidden="true" />
                 <h2 id="work-package-title">{copy.package.title}</h2>
               </div>
-
-              <form className="task-form" onSubmit={createTaskRecord}>
-                <input
-                  value={taskTitle}
-                  aria-label={copy.package.taskTitle}
-                  placeholder={copy.package.taskTitle}
-                  onChange={(event) => setTaskTitle(event.target.value)}
-                />
-                <textarea
-                  value={taskSummary}
-                  aria-label={copy.package.taskSummary}
-                  placeholder={copy.package.taskSummary}
-                  rows={3}
-                  onChange={(event) => setTaskSummary(event.target.value)}
-                />
-                <button className="primary-action" type="submit" disabled={packagePending}>
-                  <Plus size={16} aria-hidden="true" />
-                  {copy.package.addRecord}
-                </button>
-              </form>
 
               <section
                 className="memory-panel inline"
@@ -3346,46 +5311,15 @@ export function App() {
                 )}
               </div>
 
-              <div className="package-actions">
-                <button type="button" onClick={exportCurrentWorkPackage} disabled={packagePending}>
-                  <PackageOpen size={16} aria-hidden="true" />
-                  {copy.package.exportPackage}
-                </button>
-                <button type="button" onClick={copyCurrentWorkPackage} disabled={packagePending}>
-                  <Clipboard size={16} aria-hidden="true" />
-                  {copy.package.copyPackage}
-                </button>
-              </div>
-
-              <textarea
-                className="package-json"
-                value={exportedPackageJson}
-                aria-label={copy.package.packageJson}
-                placeholder={copy.package.packageJson}
-                rows={5}
-                readOnly
-              />
-
-              <div className="import-row">
+              {exportedPackageJson ? (
                 <textarea
-                  value={importPackageJson}
-                  aria-label={copy.package.importJson}
-                  placeholder={copy.package.importJson}
-                  rows={4}
-                  onChange={(event) => {
-                    setImportPackageJson(event.target.value);
-                    setImportPreview(null);
-                  }}
+                  className="package-json"
+                  value={exportedPackageJson}
+                  aria-label={copy.package.packageJson}
+                  rows={5}
+                  readOnly
                 />
-                <button type="button" onClick={previewWorkPackageImport} disabled={packagePending}>
-                  <Search size={16} aria-hidden="true" />
-                  {packagePending ? copy.package.previewing : copy.package.previewImport}
-                </button>
-                <button type="button" onClick={importWorkPackageJson} disabled={packagePending}>
-                  <ArchiveRestore size={16} aria-hidden="true" />
-                  {copy.package.importPackage}
-                </button>
-              </div>
+              ) : null}
 
               {importPreview ? (
                 <section className="import-preview" aria-labelledby="import-preview-title">
@@ -3461,12 +5395,60 @@ export function App() {
               {packageNotice ? <p className="package-message">{packageNotice}</p> : null}
               {packageError ? <p className="package-error">{packageError}</p> : null}
             </section>
+              </>
+            ) : null}
           </div>
-          <aside className="inspector">
+          {shouldShowRunInspector ? (
+          <aside className="inspector run-inspector">
             <div className="inspector-header">
-              <Brain size={18} />
-              <strong>{copy.inspector.title}</strong>
+              <ClipboardList size={18} aria-hidden="true" />
+              <strong>{copy.runStatus.title}</strong>
             </div>
+            <section className="run-status-panel" aria-labelledby="run-status-title">
+              <div className={`run-status-callout ${runStatusTone}`}>
+                <span>{copy.runStatus.current}</span>
+                <strong id="run-status-title">{runStatusTitle}</strong>
+                <p>{runStatusBody}</p>
+                {latestOperationsBriefingRun ? (
+                  <footer>
+                    <span>{latestOperationsBriefingRun.title}</span>
+                    <span>
+                      {formatTaskDate(latestOperationsBriefingRun.created_at, language)}
+                    </span>
+                  </footer>
+                ) : null}
+              </div>
+              <div className="queue-heading">
+                <strong>{copy.runStatus.workflowSteps}</strong>
+                <span>{runStatusSteps.length}</span>
+              </div>
+              <ol className="workflow-step-list" aria-label={copy.runStatus.workflowSteps}>
+                {runStatusSteps.map((step, stepIndex) => {
+                  const hasStepDetail = shouldShowWorkflowStepDetail(step);
+
+                  return (
+                    <li
+                      className={`workflow-step ${step.state}${hasStepDetail ? " has-detail" : ""}`}
+                      key={step.key}
+                    >
+                      <span className="workflow-step-marker">{stepIndex + 1}</span>
+                      <div>
+                        <strong>{step.label}</strong>
+                        {hasStepDetail ? <p>{step.detail}</p> : null}
+                      </div>
+                      <span className={`workflow-step-state ${step.state}`}>
+                        {copy.runStatus.stepState[step.state]}
+                      </span>
+                    </li>
+                  );
+                })}
+              </ol>
+            </section>
+            <details className="inspector-details" open={pendingCapabilityRecords.length > 0}>
+              <summary>
+                <ShieldCheck size={16} aria-hidden="true" />
+                <span>{copy.runStatus.permissionsAndTools}</span>
+              </summary>
             <section className="audit-panel" aria-labelledby="audit-panel-title">
               <div className="inspector-header compact">
                 <ShieldCheck size={18} aria-hidden="true" />
@@ -4113,6 +6095,60 @@ export function App() {
                   </div>
                 )}
               </div>
+              <div className="tool-output context-receipt-output">
+                <div className="recent-audit-heading">
+                  {copy.operationsBriefing.contextReceipt}
+                </div>
+                {agentContextReceipts.length === 0 ? (
+                  <p className="empty-state">{copy.operationsBriefing.contextNoItems}</p>
+                ) : (
+                  <div className="tool-output-list">
+                    {agentContextReceipts.slice(0, 3).map((receipt) => {
+                      const summary = summarizeAgentContextReceipt(receipt);
+                      return (
+                        <article className="tool-output-row context-receipt-row" key={receipt.id}>
+                          <div>
+                            <strong>{summary.title}</strong>
+                            <span className={`access-status ${summary.status}`}>
+                              {summary.status}
+                            </span>
+                          </div>
+                          {summary.evidence.length > 0 ? (
+                            <p>
+                              {copy.operationsBriefing.contextSelectedEvidence}:{" "}
+                              {summary.evidence.join(" · ")}
+                            </p>
+                          ) : null}
+                          {summary.validation.length > 0 ? (
+                            <p>
+                              {copy.operationsBriefing.contextValidation}:{" "}
+                              {summary.validation.join(" · ")}
+                            </p>
+                          ) : null}
+                          {summary.policy.length > 0 ? (
+                            <p>
+                              {copy.runStatus.permissionsAndTools}:{" "}
+                              {summary.policy.join(" · ")}
+                            </p>
+                          ) : null}
+                          {summary.omissions.length > 0 ? (
+                            <p>
+                              {copy.operationsBriefing.contextIntentionalOmissions}:{" "}
+                              {summary.omissions.join(" · ")}
+                            </p>
+                          ) : null}
+                          <footer>
+                            <span>{formatTaskDate(receipt.created_at, language)}</span>
+                            {summary.meta.map((item) => (
+                              <span key={item}>{item}</span>
+                            ))}
+                          </footer>
+                        </article>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
               <div className="recent-audit-heading">{copy.capabilities.auditTitle}</div>
               {permissionAudits.length === 0 ? (
                 <p className="empty-state">{copy.audit.empty}</p>
@@ -4131,6 +6167,12 @@ export function App() {
                 </div>
               )}
             </section>
+            </details>
+            <details className="inspector-details">
+              <summary>
+                <Brain size={16} aria-hidden="true" />
+                <span>{copy.runStatus.routeDetails}</span>
+              </summary>
             <dl>
               <div>
                 <dt>{copy.inspector.largeModel}</dt>
@@ -4430,9 +6472,159 @@ export function App() {
                 <p className="package-error">{deepSeekCacheError}</p>
               ) : null}
             </section>
+            </details>
           </aside>
+          ) : (
+            <aside className="run-rail-placeholder" aria-hidden="true" />
+          )}
         </section>
       </section>
+      {agentSetupPrompt ? (
+        <div className="setup-modal-backdrop" role="presentation">
+          <section
+            className="setup-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="agent-setup-modal-title"
+          >
+            {agentSetupPrompt === "deepseek_key" ? (
+              <form className="setup-modal-form" onSubmit={continueAgentAfterDeepSeekKey}>
+                <header>
+                  <Brain size={18} aria-hidden="true" />
+                  <div>
+                    <h2 id="agent-setup-modal-title">{copy.chatWorkbench.deepSeekKeyTitle}</h2>
+                    <p>{copy.chatWorkbench.deepSeekKeyBody}</p>
+                  </div>
+                </header>
+                <input
+                  type="password"
+                  value={deepSeekApiKeyDraft}
+                  aria-label={copy.chatWorkbench.deepSeekKeyPlaceholder}
+                  placeholder={copy.chatWorkbench.deepSeekKeyPlaceholder}
+                  autoFocus
+                  onChange={(event) => setDeepSeekApiKeyDraft(event.target.value)}
+                />
+                <div className="setup-modal-actions">
+                  <button type="submit">
+                    <Send size={14} aria-hidden="true" />
+                    {copy.chatWorkbench.continue}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAgentSetupPrompt(null);
+                      setPendingAgentPrompt("");
+                    }}
+                  >
+                    <X size={14} aria-hidden="true" />
+                    {copy.chatWorkbench.cancel}
+                  </button>
+                </div>
+              </form>
+            ) : null}
+
+            {agentSetupPrompt === "workspace" ? (
+              <form className="setup-modal-form" onSubmit={continueAgentAfterWorkspaceSetup}>
+                <header>
+                  <FolderOpen size={18} aria-hidden="true" />
+                  <div>
+                    <h2 id="agent-setup-modal-title">{copy.chatWorkbench.workspaceTitle}</h2>
+                    <p>{copy.chatWorkbench.workspaceBody}</p>
+                  </div>
+                </header>
+                <label>
+                  <span>{copy.localSetup.workspaceName}</span>
+                  <input
+                    value={setupWorkspaceName}
+                    aria-label={copy.localSetup.workspaceName}
+                    placeholder={copy.localSetup.workspaceNamePlaceholder}
+                    autoFocus
+                    onChange={(event) => setSetupWorkspaceName(event.target.value)}
+                  />
+                </label>
+                <label>
+                  <span>{copy.localSetup.workspaceDir}</span>
+                  <div className="setup-field">
+                    <input
+                      value={setupWorkspaceDir}
+                      aria-label={copy.localSetup.workspaceDir}
+                      placeholder={copy.localSetup.workspacePlaceholder}
+                      onChange={(event) => setSetupWorkspaceDir(event.target.value)}
+                    />
+                    <button type="button" onClick={() => void chooseLocalDirectory()}>
+                      <FolderOpen size={14} aria-hidden="true" />
+                      {copy.localSetup.choose}
+                    </button>
+                  </div>
+                </label>
+                <p className="setup-help">{copy.localSetup.managedStructure}</p>
+                {setupError ? <p className="package-error">{setupError}</p> : null}
+                <div className="setup-modal-actions">
+                  <button type="submit" disabled={setupPending}>
+                    <FolderOpen size={14} aria-hidden="true" />
+                    {setupPending ? copy.localSetup.saving : copy.chatWorkbench.continue}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAgentSetupPrompt(null);
+                      setPendingAgentPrompt("");
+                    }}
+                    disabled={setupPending}
+                  >
+                    <X size={14} aria-hidden="true" />
+                    {copy.chatWorkbench.cancel}
+                  </button>
+                </div>
+              </form>
+            ) : null}
+
+            {agentSetupPrompt === "network_search" ? (
+              <form className="setup-modal-form" onSubmit={continueAgentAfterNetworkSearchSetup}>
+                <header>
+                  <Globe2 size={18} aria-hidden="true" />
+                  <div>
+                    <h2 id="agent-setup-modal-title">{copy.chatWorkbench.networkSearchTitle}</h2>
+                    <p>{copy.chatWorkbench.networkSearchBody}</p>
+                  </div>
+                </header>
+                <label>
+                  <span>{copy.controls.networkSearchSourceModel}</span>
+                  <select
+                    value={state.network_search_source_model ?? ""}
+                    aria-label={copy.controls.networkSearchSourceModel}
+                    onChange={updateNetworkSearchSourceModel}
+                  >
+                    <option value="">{copy.networkSearchTool.sourceModelPlaceholder}</option>
+                    {modelToolStrategy.free_network_search_source_model_options.map((option) => (
+                      <option key={option.value} value={option.value} title={option.note}>
+                        {copy.networkSearchSourceOptions[option.value]}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {agentChatError ? <p className="package-error">{agentChatError}</p> : null}
+                <div className="setup-modal-actions">
+                  <button type="submit">
+                    <Globe2 size={14} aria-hidden="true" />
+                    {copy.chatWorkbench.continue}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAgentSetupPrompt(null);
+                      setPendingAgentPrompt("");
+                    }}
+                  >
+                    <X size={14} aria-hidden="true" />
+                    {copy.chatWorkbench.cancel}
+                  </button>
+                </div>
+              </form>
+            ) : null}
+          </section>
+        </div>
+      ) : null}
     </main>
   );
 }

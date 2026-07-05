@@ -3992,7 +3992,7 @@ mod tests {
         let client = FakeBrowserPageClient::new();
         let outcome = run_browser_browse(
             BrowserBrowseRequest {
-                access_mode: AccessMode::AskOnRisk,
+                access_mode: AccessMode::AskEveryStep,
                 url: "https://example.com/ops-brief".to_string(),
                 approval_granted: false,
             },
@@ -4018,7 +4018,7 @@ mod tests {
         let client = FakeBrowserPageClient::new();
         let outcome = run_browser_browse(
             BrowserBrowseRequest {
-                access_mode: AccessMode::AskOnRisk,
+                access_mode: AccessMode::AskEveryStep,
                 url: "https://example.com/ops-brief".to_string(),
                 approval_granted: true,
             },

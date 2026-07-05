@@ -40,7 +40,10 @@ const localCredentialArtifactExtensions = new Set([
   ".cer",
 ]);
 const generatedDirectorySegments = new Set(["node_modules", "dist", "target"]);
-const allowedSourceBinaryFiles = new Set(["apps/desktop/src-tauri/icons/icon.ico"]);
+const allowedSourceBinaryFiles = new Set([
+  "apps/desktop/public/ds-agent-mark.png",
+  "apps/desktop/src-tauri/icons/icon.ico",
+]);
 const requiredDocs = [
   "README.md",
   "docs/INSTALLATION.md",
@@ -334,6 +337,7 @@ const requiredPackageScripts = new Map([
   ["stage:webview2-loader", "node scripts/stage-webview2-loader.mjs"],
   ["test:deepseek", "node scripts/deepseek-smoke.mjs"],
   ["test:deepseek:briefing", "node scripts/deepseek-operations-briefing-smoke.mjs"],
+  ["test:builtin-plugins", "node scripts/validate-builtin-plugins.mjs"],
   ["test:windows-local", "node scripts/windows-local-smoke.mjs"],
   ["test:windows-installed-ui", "node scripts/windows-installed-ui-smoke.mjs"],
   ["test:release-source", "node scripts/release-source-check.mjs"],
@@ -343,6 +347,7 @@ const requiredGitignoreEntries = [
   "node_modules/",
   "dist/",
   "target/",
+  "tmp/",
   ".DS_Store",
   ".env",
   ".env.*",
@@ -445,6 +450,8 @@ checkAppFallbackCopyPositioning();
 checkRuntimeWebSearchCopyPositioning();
 checkRuntimeComputerUseCopyPositioning();
 checkRuntimeLocalDesktopRouteFailureCopyPositioning();
+checkChatFirstRunStatusUi();
+checkChatFirstCenterWorkbenchUi();
 checkHistoricalReleaseNotes();
 checkWindowsValidationStatusDocs();
 checkReleaseGateDocs();
@@ -454,6 +461,7 @@ checkOperationsBriefingArchiveReplayUi();
 checkWorkPackageImportPreviewUi();
 checkOperationsBriefingSmokeEvidence();
 checkOperationsBriefingSeedEvidence();
+checkBuiltinPluginPackages();
 checkGitignoreEntries();
 checkLineEndingPolicy();
 checkPublicPeerProductTermGuardSelfTest();
@@ -774,10 +782,10 @@ function checkRequiredDocs() {
     "Optional local web-search bridge readiness v1",
     "uses only a configured local loopback bridge for supported providers",
     "maps returned source URLs into the same evidence and audit trail",
-    "Setup directory clarity v1",
-    "keeps program files, app data, workspace, evidence, and export folders separate",
-    "stores setup choices in the current user's app data directory",
-    "uses native folder pickers for workspace, evidence, and export locations",
+    "Setup directory clarity v2",
+    "keeps program files and app data separate from the user-selected workspace",
+    "stores that single setup choice in the current user's app data directory",
+    "automatically manages evidence, exports, reports, runs, sources, work packages, memory, and logs under that workspace",
     "Windows packaging clarity v1",
     "builds the local Windows preview as an NSIS installer",
     "keeps macOS packaging configured but pending verification on a macOS host",
@@ -1712,6 +1720,132 @@ function checkAppFallbackCopyPositioning() {
     } else {
       checks.push(`${filePath} fallback copy user-facing wording: ${phrase}`);
     }
+  }
+}
+
+function checkChatFirstRunStatusUi() {
+  const appPath = "apps/desktop/src/App.tsx";
+  const i18nPath = "apps/desktop/src/i18n.ts";
+  const stylesPath = "apps/desktop/src/styles.css";
+
+  for (const filePath of [appPath, i18nPath, stylesPath]) {
+    if (!existsSync(filePath)) {
+      failures.push(`${filePath} is required for chat-first run status UI`);
+      return;
+    }
+  }
+
+  const app = readText(appPath);
+  const i18n = readText(i18nPath);
+  const styles = readText(stylesPath);
+
+  const requiredAppSnippets = [
+    "runStatusSteps",
+    "className=\"run-status-panel\"",
+    "className=\"workflow-step-list\"",
+    "className=\"inspector-details\"",
+    "copy.runStatus.title",
+    "copy.runStatus.workflowSteps",
+  ];
+
+  for (const snippet of requiredAppSnippets) {
+    checkTextIncludes(appPath, app, snippet, `chat-first run status app snippet: ${snippet}`);
+  }
+
+  for (const phrase of [
+    "任务状态",
+    "运行步骤",
+    "Run Status",
+    "Workflow Steps",
+  ]) {
+    checkTextIncludes(i18nPath, i18n, phrase, `chat-first run status copy: ${phrase}`);
+  }
+
+  for (const snippet of [
+    ".run-status-panel",
+    ".workflow-step-list",
+    ".workflow-step-marker",
+    ".inspector-details",
+    ".setup-disclosure",
+  ]) {
+    checkTextIncludes(stylesPath, styles, snippet, `chat-first run status style: ${snippet}`);
+  }
+}
+
+function checkChatFirstCenterWorkbenchUi() {
+  const appPath = "apps/desktop/src/App.tsx";
+  const i18nPath = "apps/desktop/src/i18n.ts";
+  const stylesPath = "apps/desktop/src/styles.css";
+
+  for (const filePath of [appPath, i18nPath, stylesPath]) {
+    if (!existsSync(filePath)) {
+      failures.push(`${filePath} is required for chat-first center workbench UI`);
+      return;
+    }
+  }
+
+  const app = readText(appPath);
+  const i18n = readText(i18nPath);
+  const styles = readText(stylesPath);
+
+  for (const snippet of [
+    "className=\"sidebar-controls\"",
+    "className=\"sidebar-tool operations-tool\"",
+    "className=\"sidebar-tool package-tool\"",
+    "className=\"sidebar-tool memory-tool\"",
+    "className=\"sidebar-tool settings-tool\"",
+    "copy.skills.title",
+    "className=\"skill-plugin-card\"",
+    "renderLegacyCenterManagementPanels",
+    "className=\"agent-chat-panel\"",
+    "aria-label={copy.chatWorkbench.title}",
+    "className=\"chat-thread\"",
+    "className=\"chat-message assistant pending\"",
+    "className=\"chat-composer\"",
+    "className=\"sidebar-record-list\"",
+    "onSubmit={sendAgentMessage}",
+    "agentMessages.map",
+    "run_agent_chat",
+    "className=\"setup-modal-backdrop\"",
+    "copy.chatWorkbench.deepSeekKeyTitle",
+    "copy.chatWorkbench.workspaceTitle",
+    "copy.chatWorkbench.networkSearchTitle",
+    "copy.chatWorkbench.title",
+    "copy.chatWorkbench.composerPlaceholder",
+  ]) {
+    checkTextIncludes(appPath, app, snippet, `chat-first center workbench app snippet: ${snippet}`);
+  }
+
+  for (const phrase of [
+    "DeepSeek 对话工作台",
+    "输入问题、文字或指令",
+    "技能与插件",
+    "请输入 DeepSeek API key",
+    "DeepSeek Chat Workbench",
+    "Enter a question, text, or instruction",
+    "Skills & Plugins",
+    "Enter a DeepSeek API key",
+  ]) {
+    checkTextIncludes(i18nPath, i18n, phrase, `chat-first center workbench copy: ${phrase}`);
+  }
+
+  for (const snippet of [
+    ".sidebar-controls",
+    ".sidebar-tools",
+    ".sidebar-tool",
+    ".sidebar-record-row",
+    ".skill-plugin-card",
+    ".agent-chat-panel",
+    ".chat-thread",
+    ".chat-message",
+    ".chat-message.pending",
+    ".chat-composer",
+    ".chat-session-meta",
+    ".composer-actions",
+    ".setup-modal-backdrop",
+    ".setup-modal",
+  ]) {
+    checkTextIncludes(stylesPath, styles, snippet, `chat-first center workbench style: ${snippet}`);
   }
 }
 
@@ -3907,6 +4041,21 @@ function checkOperationsBriefingSeedEvidence() {
     }
     checks.push(`${docPath} seed evidence blank-template docs`);
   }
+}
+
+function checkBuiltinPluginPackages() {
+  const result = spawnSync(process.execPath, ["scripts/validate-builtin-plugins.mjs"], {
+    encoding: "utf8",
+  });
+
+  if (result.status !== 0) {
+    failures.push(
+      `builtin plugin package validation failed: ${(result.stderr || result.stdout).trim()}`,
+    );
+    return;
+  }
+
+  checks.push("builtin plugin package validation");
 }
 
 function checkGitignoreEntries() {
