@@ -58,21 +58,22 @@ engineering inspiration, with respect for their licenses and maintainers.
 
 ## 0.1.0 Status / 0.1.0 状态
 
-Version `0.1.0` is the current Windows-first test candidate in the source tree.
-The codebase is not a finished agent product yet. The current Windows
-build/install/launch/run path is locally verified through the repeatable
-release gate and installed UI workflow smoke. This commit is intended for
-maintainer testing before any new GitHub tag or release is published.
+Version `0.1.0` is the current Windows-first release-candidate line. The
+codebase is not a finished agent product yet. The current Windows
+build/install/launch/run path is verified through the repeatable release gate
+and installed UI workflow smoke before each prerelease. The `v0.1.0-rc.1`
+prerelease is intended to include a Windows NSIS installer for ordinary
+colleagues to download and test.
 
 After the Windows preview continues to pass local release gates, the next
 platform target is macOS. A macOS Tauri packaging config already exists in the
 repository, but macOS validation and release work will follow after the Windows
 preview continues to pass local release gates.
 
-`0.1.0` 是当前源码树里的 Windows 优先测试候选版本，还不是完整成熟的 Agent 产品。
-当前 Windows 构建、安装、启动和运行路径已经通过本地 release gate 与 installed UI
-workflow smoke 验证。本次先上传代码供维护者人工测试，暂不创建新的 GitHub tag 或
-release。
+`0.1.0` 是当前 Windows 优先 release-candidate 版本线，还不是完整成熟的 Agent 产品。
+每次 prerelease 前，当前 Windows 构建、安装、启动和运行路径都要通过本地 release gate
+与 installed UI workflow smoke 验证。`v0.1.0-rc.1` prerelease 计划附带 Windows
+NSIS 安装包，方便普通同事直接下载测试。
 
 Windows 预览版持续通过本地 release gates 后，下一步会推进 macOS 版本。仓库里已经保
 留了 macOS 的 Tauri 打包配置，macOS 的验证和发布会在 Windows 预览版持续通过本地
@@ -80,9 +81,11 @@ release gates 后推进。
 
 License: Apache-2.0.
 
-The public `v0.0.1` release remains unchanged. Windows installer artifacts can
-be built locally for validation, but public binary distribution should stay
-conservative until signing, packaging, and provenance are ready.
+The public `v0.0.1` release remains unchanged. The `v0.1.0-rc.1` prerelease is
+the first Windows installer candidate for colleague testing. The installer is
+unsigned, so Windows may show an unknown-publisher warning, but the NSIS package
+is built with the Microsoft WebView2 bootstrapper embedded and run silently so
+ordinary Windows users do not need a developer toolchain.
 
 ## Basic Functions / 基本功能
 
@@ -118,7 +121,8 @@ The current codebase is intended to provide these basic functions:
   - Uses blank operator templates under
     `docs/templates/operations-briefing-evidence/` for local evidence-folder
     seeding.
-- Windows NSIS debug installer build path for local validation.
+- Windows NSIS installer build path for local validation and RC distribution,
+  including an embedded Microsoft WebView2 bootstrapper.
 
 Current limits are intentional: real mailbox connectors, real cloud-drive
 connectors, automatic local bridge-service management, hosted sync, broad
@@ -147,7 +151,8 @@ plugin execution, and polished signed installers are not complete in `0.1.0`.
   - 导入工作包时预览新增/跳过的工作流模板、待审核记忆候选和归档简报运行。
   - 导入归档运行保持只读回放详情，同时保留已清理的源机器证据句柄作为安全边界。
   - 使用 `docs/templates/operations-briefing-evidence/` 下的空白运营模板进行本地证据目录初始化。
-- Windows NSIS debug installer 构建路径，便于本地验证安装和运行。
+- Windows NSIS 安装包构建路径，便于本地验证和 RC 分发，并内置 Microsoft WebView2
+  bootstrapper。
 
 当前限制也要说清楚：`0.1.0` 还没有完成真实邮箱连接器、真实云盘连接器、自动安装或管理本地桥接服务、
 云同步、广泛插件执行和正式签名安装包。这一版先把 Windows 本地可运行和 DeepSeek 基础支持打牢。
@@ -197,7 +202,7 @@ To run only the repository secret scan before committing or pushing:
 npx pnpm@9.15.9 test:secrets
 ```
 
-Before any publication decision for a new source-only prerelease, run the local
+Before any publication decision for a new prerelease, run the local
 release-candidate gate:
 
 ```powershell
@@ -207,10 +212,11 @@ npx pnpm@9.15.9 test:release-local
 This runs the full project test, working-tree and staged diff whitespace checks
 (`git diff --check` and `git diff --cached --check`), and the source-only
 release guard. The source-only guard checks version/name consistency, required
-release docs, generated WebView2 loader ignore coverage, and currently tracked
-or unignored files for accidental installer/binary release artifacts, local
-runtime artifacts, generated workflow exports, unexpected binary files,
-oversized source files, and stale smoke-test release labels.
+release docs, generated WebView2 loader ignore coverage, Windows WebView2
+bootstrapper packaging config, and currently tracked or unignored files for
+accidental installer/binary release artifacts, local runtime artifacts,
+generated workflow exports, unexpected binary files, oversized source files,
+and stale smoke-test release labels.
 The local gate also runs deterministic helper checks for the Windows local
 Operations Briefing smoke helper, the installed UI helper, and the release-local
 helper itself; the Windows local helper self-test does not call DeepSeek or read
@@ -283,8 +289,10 @@ npx pnpm@9.15.9 test:windows-installed-ui -- --workflow
 ```
 
 Windows builds automatically merge `apps/desktop/src-tauri/tauri.windows.conf.json`
-and produce an NSIS installer under the configured Cargo target directory,
-for example `debug/bundle/nsis/DS Agent_0.1.0_x64-setup.exe`.
+and produce an NSIS installer under the configured Cargo target directory, for
+example `release/bundle/nsis/DS Agent_0.1.0_x64-setup.exe`. The Windows config
+embeds the Microsoft WebView2 bootstrapper and runs it silently during install
+when the target machine needs the WebView2 runtime.
 
 macOS builds have a separate platform config at
 `apps/desktop/src-tauri/tauri.macos.conf.json` for `.app` and `.dmg` packaging.

@@ -428,6 +428,16 @@ checkJsonField("apps/desktop/src-tauri/tauri.windows.conf.json", "bundle.active"
 checkJsonField("apps/desktop/src-tauri/tauri.windows.conf.json", "bundle.targets.0", "nsis");
 checkJsonField(
   "apps/desktop/src-tauri/tauri.windows.conf.json",
+  "bundle.windows.webviewInstallMode.type",
+  "embedBootstrapper",
+);
+checkJsonField(
+  "apps/desktop/src-tauri/tauri.windows.conf.json",
+  "bundle.windows.webviewInstallMode.silent",
+  true,
+);
+checkJsonField(
+  "apps/desktop/src-tauri/tauri.windows.conf.json",
   "bundle.resources.generated/windows/WebView2Loader.dll",
   "WebView2Loader.dll",
 );
@@ -1007,12 +1017,12 @@ function checkRequiredDocs() {
   );
 
   if (
-    !releaseNotes.includes("source-first release") ||
-    !releaseNotes.includes("No public installer binaries")
+    !releaseNotes.includes("Windows installer prerelease") ||
+    !releaseNotes.includes("WebView2 bootstrapper")
   ) {
-    failures.push("release notes must document source-first public release packaging");
+    failures.push("release notes must document Windows installer prerelease packaging");
   } else {
-    checks.push("release notes source-first packaging");
+    checks.push("release notes Windows installer prerelease packaging");
   }
 }
 
@@ -2166,7 +2176,7 @@ function checkWindowsValidationStatusDocs() {
   checkTextIncludesCollapsed(
     "README.md",
     readme,
-    "Windows build/install/launch/run path is locally verified",
+    "Windows build/install/launch/run path is verified through the repeatable release gate",
     "README.md Windows local validation status",
   );
   checkTextIncludesCollapsed(
@@ -2304,8 +2314,8 @@ function checkReleaseGateDocs() {
     checkTextIncludesCollapsed(
       docPath,
       content,
-      "Before any publication decision for a new source-only prerelease, run the local release-candidate gate",
-      `${docPath} source-only prerelease gate docs`,
+      "Before any publication decision for a new prerelease, run the local release-candidate gate",
+      `${docPath} prerelease gate docs`,
     );
     checkTextIncludesCollapsed(
       docPath,
@@ -3311,8 +3321,8 @@ function checkOpenSourceReleaseStatus() {
   checkTextIncludesCollapsed(
     "docs/OPEN_SOURCE_RELEASE.md",
     openSourceRelease,
-    "If publication resumes, publish the current hardening snapshot only as a new source-only prerelease",
-    "open-source release source-only prerelease strategy",
+    "For `v0.1.0-rc.1`, publish a new prerelease with the Windows installer attached",
+    "open-source release Windows installer prerelease strategy",
   );
   checkTextIncludesCollapsed(
     "docs/OPEN_SOURCE_RELEASE.md",

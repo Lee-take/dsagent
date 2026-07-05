@@ -723,12 +723,28 @@ async function captureScreenshot(client, directory) {
 
 function meaningfulBodyText(value) {
   const text = String(value ?? "");
-  return (
-    text.length > 200 &&
-    ["DS Agent", "工作台", "Workbench", "Operations", "记忆", "审批"].some(
+  if (text.length > 200) {
+    return ["DS Agent", "工作台", "Workbench", "Operations", "记忆", "审批"].some(
       (token) => text.includes(token),
-    )
-  );
+    );
+  }
+
+  const compactChatFirstTokens = [
+    "新对话",
+    "运行步骤",
+    "理解任务",
+    "调用 DeepSeek",
+    "生成与导出",
+    "New chat",
+    "Run steps",
+    "Understand task",
+    "Call DeepSeek",
+    "Generate and export",
+  ];
+  const matchedCompactTokens = compactChatFirstTokens.filter((token) =>
+    text.includes(token),
+  ).length;
+  return text.length > 80 && matchedCompactTokens >= 3;
 }
 
 function hasFrameworkOverlay(value) {
@@ -867,7 +883,17 @@ class CdpClient {
 }
 
 async function runSelfTest() {
-  const attempts = ["", "DS Agent 工作台 Operations 记忆 审批 ".repeat(16)];
+  if (meaningfulBodyText("中\nEN\n设置")) {
+    throw new Error("Self-test expected short settings-only text to stay blank.");
+  }
+  if (!meaningfulBodyText("DS Agent 工作台 Operations 记忆 审批 ".repeat(16))) {
+    throw new Error("Self-test expected legacy workbench text to stay meaningful.");
+  }
+
+  const attempts = [
+    "",
+    "中\nEN\n新对话\n对话\n1\n未命名对话\n7月5日 11:25\n设置\n发送\n运行步骤\n6\n1\n理解任务\n已完成\n2\n读取证据\n已完成\n3\n选择记忆\n已完成\n4\n调用 DeepSeek\n已完成\n5\n校验结果\n已完成\n6\n生成与导出\n已完成",
+  ];
   const fakeClient = {
     async send(method) {
       if (method !== "Runtime.evaluate") {

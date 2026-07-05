@@ -12,6 +12,12 @@ The Windows build produces a normal NSIS setup executable:
 DS Agent_0.1.0_x64-setup.exe
 ```
 
+The `v0.1.0-rc.1` prerelease attaches this Windows installer for colleague
+testing. It is unsigned, so Windows may show an unknown-publisher warning. The
+installer embeds the Microsoft WebView2 bootstrapper and runs it silently when
+the target machine needs the WebView2 runtime; users do not need Node.js, pnpm,
+Rust, or a source checkout to run the installed app.
+
 The installer-selected application directory is only for program files. It is
 not the workspace, evidence folder, export folder, or event database location.
 
@@ -48,7 +54,7 @@ To run only the repository secret scan before committing or pushing:
 npx pnpm@9.15.9 test:secrets
 ```
 
-Before any publication decision for a new source-only prerelease, run the local
+Before any publication decision for a new prerelease, run the local
 release-candidate gate:
 
 ```powershell
@@ -59,10 +65,11 @@ This gate runs the full project test, working-tree and staged diff whitespace
 checks (`git diff --check` and `git diff --cached --check`), and the
 source-only release guard. The source-only guard checks version/name
 consistency, required release docs, generated WebView2 loader ignore coverage,
-and currently tracked or unignored files for accidental installer/binary release
-artifacts, local runtime artifacts, generated workflow exports, unexpected
-binary files, oversized source files, and stale smoke-test release labels. The
-local gate also runs deterministic helper checks for the Windows
+Windows WebView2 bootstrapper packaging config, and currently tracked or
+unignored files for accidental installer/binary release artifacts, local runtime
+artifacts, generated workflow exports, unexpected binary files, oversized
+source files, and stale smoke-test release labels. The local gate also runs
+deterministic helper checks for the Windows
 local Operations Briefing smoke helper, the installed UI helper, and the
 release-local helper itself; the Windows local helper self-test does not call
 DeepSeek or read local secrets. If `DEEPSEEK_API_KEY` is configured locally, the

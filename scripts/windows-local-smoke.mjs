@@ -155,6 +155,7 @@ async function buildFallbackLocalDirectories() {
 
 async function validateLocalDirectories(localDirectories) {
   for (const [label, dir] of Object.entries(localDirectories)) {
+    await mkdir(dir, { recursive: true });
     const info = await stat(dir);
     if (!info.isDirectory()) {
       throw new Error(`${label} is not a directory.`);
@@ -426,6 +427,19 @@ async function runSelfTest() {
   assertEqual(seed.written.length, 4, "self-test expected four seeded templates");
   const secondSeed = await seedEvidenceTemplates(sourceDir, evidenceDir);
   assertEqual(secondSeed.skipped.length, 4, "self-test expected existing templates to be skipped");
+
+  const settingsDirs = {
+    workspace_dir: path.join(testRoot, "settings", "workspace"),
+    evidence_dir: path.join(testRoot, "settings", "workspace", "evidence"),
+    export_dir: path.join(testRoot, "settings", "workspace", "exports"),
+  };
+  await validateLocalDirectories(settingsDirs);
+  for (const dir of Object.values(settingsDirs)) {
+    const info = await stat(dir);
+    if (!info.isDirectory()) {
+      throw new Error("Self-test expected missing settings directories to be created.");
+    }
+  }
 
   const manifest = await buildEvidenceManifest(evidenceDir);
   if (!manifest.includes("--- revenue.md ---") || !manifest.includes("Rooms revenue test evidence.")) {

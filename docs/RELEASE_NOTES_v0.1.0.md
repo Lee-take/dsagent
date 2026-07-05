@@ -1,12 +1,15 @@
 # DeepSeek Agent OS v0.1.0 Candidate Notes
 
-Status: Windows-first source-tree test candidate. The code is ready to upload
-for maintainer testing, but no new GitHub tag or release should be created
-until the maintainer finishes manual testing and explicitly resumes publication.
+Status: Windows-first release candidate. The `v0.1.0-rc.1` prerelease is
+intended for colleague testing through a GitHub release asset after the final
+local gates pass.
 
-Packaging: source-first release candidate. No public installer binaries are
-attached for this preview unless the maintainer later explicitly approves
-unsigned binary distribution for a specific release.
+Packaging: Windows installer prerelease. The GitHub prerelease should attach
+the NSIS setup executable and its SHA-256 checksum. The installer is unsigned,
+so Windows may show an unknown-publisher warning, but it embeds the Microsoft
+WebView2 bootstrapper and runs it silently when the target machine needs the
+WebView2 runtime. Ordinary users do not need Node.js, pnpm, Rust, or a source
+checkout to run the installed app.
 
 Maintainer handoff notes, decision logs, and internal planning files are kept as
 local-only continuation material and are intentionally excluded from public
@@ -94,7 +97,8 @@ Windows preview continues to pass local release gates.
     tests.
 - Local report and package export paths for Markdown, HTML, lightweight PDF,
   and work-package JSON.
-- Windows NSIS debug installer build path for local validation.
+- Windows NSIS installer build path for local validation and RC distribution,
+  including an embedded Microsoft WebView2 bootstrapper.
 
 ## Current Limits
 
@@ -105,8 +109,8 @@ Windows preview continues to pass local release gates.
 - DS Agent does not install or manage local bridge services in this preview.
 - Hosted sync, account systems, marketplaces, and arbitrary third-party
   executable plugins are not included.
-- Public binary distribution is conservative until signing, packaging, and
-  provenance are ready.
+- The Windows installer is unsigned in this RC, so users may see an
+  unknown-publisher warning until signing is added.
 - PDF export is lightweight and ASCII-safe. Use Markdown or HTML for Chinese or
   other Unicode report content.
 
