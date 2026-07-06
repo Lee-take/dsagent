@@ -3044,7 +3044,7 @@ fn run_agent_chat_with_clients_and_api_keys(
 
     {
         let store = store.lock().map_err(|_| lock_error())?;
-        apply_agent_memory_candidate_gate(&store, &mut response)?;
+        let memory_candidate_gate = apply_agent_memory_candidate_gate(&store, &mut response)?;
         record_agent_memory_candidates(&store, &response)?;
         record_agent_context_receipts(
             &store,
@@ -3054,6 +3054,7 @@ fn run_agent_chat_with_clients_and_api_keys(
             &access_mode_context,
             runtime_context.soul_profile.as_ref(),
             &runtime_context.memory_context,
+            &memory_candidate_gate,
             &telemetry,
         )?;
         for entry in telemetry {
@@ -3097,6 +3098,7 @@ fn record_agent_context_receipts(
     access_mode: &str,
     soul_profile: Option<&AgentSoulProfileContext>,
     memory_context: &AgentMemoryRuntimeContext,
+    memory_candidate_gate: &AgentMemoryCandidateGateReceipt,
     telemetry: &[DeepSeekChatTelemetry],
 ) -> Result<(), String> {
     let token_cache_state = operations_briefing_token_cache_context(telemetry);
@@ -3113,6 +3115,7 @@ fn record_agent_context_receipts(
             &token_cache_state,
             soul_profile,
             memory_context,
+            memory_candidate_gate,
         );
         store
             .append_agent_context_receipt(&receipt)
@@ -3133,6 +3136,7 @@ fn agent_context_receipt_for_action(
     token_cache_state: &str,
     soul_profile: Option<&AgentSoulProfileContext>,
     memory_context: &AgentMemoryRuntimeContext,
+    memory_candidate_gate: &AgentMemoryCandidateGateReceipt,
 ) -> AgentContextReceipt {
     let mut receipt = AgentContextReceipt::new(
         action.action_type.clone(),
@@ -3188,7 +3192,14 @@ fn agent_context_receipt_for_action(
                 .map(agent_selected_memory_receipt_line),
         )
         .collect();
+    receipt.memory_candidate_gate =
+        agent_memory_candidate_gate_receipt_lines(memory_candidate_gate);
     receipt.validation_results = agent_context_validation_results(action);
+    if memory_candidate_gate.proposed > 0 {
+        receipt
+            .validation_results
+            .push("memory candidate gate reviewed".to_string());
+    }
     receipt
         .validation_results
         .push(format!("loop_mode={}", loop_mode.as_str()));
@@ -3208,6 +3219,12 @@ fn agent_context_receipt_for_action(
     receipt
         .intentional_omissions
         .extend(memory_context.omissions.iter().cloned());
+    if memory_candidate_gate.proposed > 0 {
+        receipt.intentional_omissions.push(
+            "Rejected memory candidate bodies are omitted; only gate counts and safe kept labels are stored."
+                .to_string(),
+        );
+    }
     receipt
 }
 
@@ -3486,25 +3503,96 @@ fn agent_chat_completed_actions_followup_failed_message(error: &str) -> String {
     )
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AgentMemoryCandidateGateDropReason {
+    Sensitive,
+    Transient,
+    Archived,
+    Invalid,
+    OverLimit,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct AgentMemoryCandidateGateReceipt {
+    proposed: usize,
+    kept: usize,
+    dropped_sensitive: usize,
+    dropped_transient: usize,
+    dropped_archived: usize,
+    dropped_invalid: usize,
+    dropped_over_limit: usize,
+    kept_summaries: Vec<String>,
+}
+
+impl AgentMemoryCandidateGateReceipt {
+    fn dropped(&self) -> usize {
+        self.dropped_sensitive
+            + self.dropped_transient
+            + self.dropped_archived
+            + self.dropped_invalid
+            + self.dropped_over_limit
+    }
+
+    fn record_drop(&mut self, reason: AgentMemoryCandidateGateDropReason) {
+        match reason {
+            AgentMemoryCandidateGateDropReason::Sensitive => self.dropped_sensitive += 1,
+            AgentMemoryCandidateGateDropReason::Transient => self.dropped_transient += 1,
+            AgentMemoryCandidateGateDropReason::Archived => self.dropped_archived += 1,
+            AgentMemoryCandidateGateDropReason::Invalid => self.dropped_invalid += 1,
+            AgentMemoryCandidateGateDropReason::OverLimit => self.dropped_over_limit += 1,
+        }
+    }
+
+    fn record_kept(&mut self, candidate: &MemoryCandidate) {
+        self.kept += 1;
+        self.kept_summaries.push(format!(
+            "kept title={}; suggested_action={}; privacy_review={}",
+            agent_memory_candidate_receipt_value(&candidate.title, 96),
+            agent_memory_candidate_suggested_action_label(candidate.suggested_action),
+            candidate.privacy_review
+        ));
+    }
+}
+
 fn apply_agent_memory_candidate_gate(
     store: &EventStore,
     response: &mut AgentChatResponse,
-) -> Result<(), String> {
+) -> Result<AgentMemoryCandidateGateReceipt, String> {
     let memories = store.list_memory_records().map_err(event_store_error)?;
-    response.memory_candidates =
+    let (candidates, receipt) =
         gate_agent_memory_candidates_for_review(&response.memory_candidates, &memories);
-    Ok(())
+    response.memory_candidates = candidates;
+    Ok(receipt)
 }
 
 fn gate_agent_memory_candidates_for_review(
     candidates: &[MemoryCandidate],
     memories: &[MemoryRecord],
-) -> Vec<MemoryCandidate> {
-    candidates
-        .iter()
-        .filter_map(|candidate| gate_agent_memory_candidate_for_review(candidate, memories))
-        .take(AGENT_MEMORY_CANDIDATE_GATE_MAX_RECORDS)
-        .collect()
+) -> (Vec<MemoryCandidate>, AgentMemoryCandidateGateReceipt) {
+    let mut receipt = AgentMemoryCandidateGateReceipt {
+        proposed: candidates.len(),
+        ..AgentMemoryCandidateGateReceipt::default()
+    };
+    let mut gated_candidates = Vec::new();
+
+    for candidate in candidates {
+        if let Some(reason) = agent_memory_candidate_gate_drop_reason(candidate) {
+            receipt.record_drop(reason);
+            continue;
+        }
+        if gated_candidates.len() >= AGENT_MEMORY_CANDIDATE_GATE_MAX_RECORDS {
+            receipt.record_drop(AgentMemoryCandidateGateDropReason::OverLimit);
+            continue;
+        }
+        if let Some(gated_candidate) = gate_agent_memory_candidate_for_review(candidate, memories) {
+            receipt.record_kept(&gated_candidate);
+            gated_candidates.push(gated_candidate);
+        } else {
+            receipt.record_drop(AgentMemoryCandidateGateDropReason::Invalid);
+        }
+    }
+
+    (gated_candidates, receipt)
 }
 
 fn gate_agent_memory_candidate_for_review(
@@ -3540,10 +3628,60 @@ fn gate_agent_memory_candidate_for_review(
 }
 
 fn agent_memory_candidate_is_reviewable(candidate: &MemoryCandidate) -> bool {
-    candidate.sensitivity != MemorySensitivity::Sensitive
-        && candidate.lifecycle != MemoryLifecycle::Archived
-        && !agent_memory_candidate_contains_sensitive_text(candidate)
-        && !agent_memory_candidate_is_transient(candidate)
+    agent_memory_candidate_gate_drop_reason(candidate).is_none()
+}
+
+fn agent_memory_candidate_gate_drop_reason(
+    candidate: &MemoryCandidate,
+) -> Option<AgentMemoryCandidateGateDropReason> {
+    if candidate.sensitivity == MemorySensitivity::Sensitive
+        || agent_memory_candidate_contains_sensitive_text(candidate)
+    {
+        return Some(AgentMemoryCandidateGateDropReason::Sensitive);
+    }
+    if agent_memory_candidate_is_transient(candidate) {
+        return Some(AgentMemoryCandidateGateDropReason::Transient);
+    }
+    if candidate.lifecycle == MemoryLifecycle::Archived {
+        return Some(AgentMemoryCandidateGateDropReason::Archived);
+    }
+    if candidate.title.trim().is_empty() || candidate.body.trim().is_empty() {
+        return Some(AgentMemoryCandidateGateDropReason::Invalid);
+    }
+    None
+}
+
+fn agent_memory_candidate_gate_receipt_lines(
+    receipt: &AgentMemoryCandidateGateReceipt,
+) -> Vec<String> {
+    if receipt.proposed == 0 {
+        return Vec::new();
+    }
+
+    let mut lines = vec![format!(
+        "proposed={}; kept={}; dropped={}; reasons=sensitive={},transient={},archived={},invalid={},over_limit={}",
+        receipt.proposed,
+        receipt.kept,
+        receipt.dropped(),
+        receipt.dropped_sensitive,
+        receipt.dropped_transient,
+        receipt.dropped_archived,
+        receipt.dropped_invalid,
+        receipt.dropped_over_limit
+    )];
+    lines.extend(
+        receipt
+            .kept_summaries
+            .iter()
+            .take(AGENT_MEMORY_CANDIDATE_GATE_MAX_RECORDS)
+            .cloned(),
+    );
+    lines
+}
+
+fn agent_memory_candidate_receipt_value(value: &str, max_chars: usize) -> String {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    agent_context_truncate_chars(&normalized, max_chars)
 }
 
 fn agent_memory_candidate_contains_sensitive_text(candidate: &MemoryCandidate) -> bool {
@@ -8739,6 +8877,115 @@ mod tests {
         assert!(followup_prompt.contains(
             "Do not quote internal loop labels such as loop_mode, validators, stop_conditions, or matched_stop_conditions in the user-facing answer."
         ));
+    }
+
+    #[test]
+    fn agent_chat_records_memory_candidate_gate_receipt_without_sensitive_text() {
+        let store = Mutex::new(EventStore::open_memory().expect("memory store opens"));
+        let transport = SequencedDeepSeekTransport::new(vec![
+            r#"{
+                "protocol_version": "ds-agent-envelope/v1",
+                "reply_to_user": "I will inspect the file and propose bounded memory candidates.",
+                "agent_actions": [
+                    {
+                        "action_type": "file_read",
+                        "title": "Read evidence",
+                        "reason": "Inspect the requested evidence file",
+                        "risk": "low",
+                        "requires_confirmation": false,
+                        "target": "reports/source.md"
+                    }
+                ],
+                "missing_prerequisites": [],
+                "memory_candidates": [
+                    {
+                        "title": "Default response tone",
+                        "body": "Use concise, warm, direct Chinese unless the user asks otherwise.",
+                        "rationale": "The user wants personalized response tone memory.",
+                        "memory_type": "preference",
+                        "scope": "user",
+                        "sensitivity": "normal",
+                        "lifecycle": "active"
+                    },
+                    {
+                        "title": "Private password",
+                        "body": "The user's password is hunter2.",
+                        "rationale": "The user pasted a password.",
+                        "memory_type": "preference",
+                        "scope": "user",
+                        "sensitivity": "sensitive",
+                        "lifecycle": "active"
+                    },
+                    {
+                        "title": "Temporary draft preference",
+                        "body": "Only use this wording for today's one-off draft.",
+                        "rationale": "The user asked for it in this task.",
+                        "memory_type": "preference",
+                        "scope": "user",
+                        "sensitivity": "normal",
+                        "lifecycle": "active"
+                    }
+                ]
+            }"#
+            .to_string(),
+            r#"{
+                "protocol_version": "ds-agent-envelope/v1",
+                "reply_to_user": "The evidence file was inspected.",
+                "agent_actions": [],
+                "missing_prerequisites": []
+            }"#
+            .to_string(),
+        ]);
+        let cache = DeepSeekMemoryChatCompletionCache::default();
+        let file_client = StoreLockCheckingFileContentClient::new(&store);
+        let file_write_client = RecordingFileWriteClient::new();
+        let search_client = RecordingNetworkSearchClient::new();
+        let browser_client = RecordingBrowserPageClient::new();
+
+        let response = run_agent_chat_with_clients(
+            &store,
+            &transport,
+            &cache,
+            "test-api-key",
+            AgentChatRequest {
+                prompt: "Read reports/source.md and keep memory candidates auditable.".to_string(),
+                model_route: ModelRoute::Auto,
+                thinking_level: ThinkingLevel::Fast,
+                access_mode: AccessMode::FullAccess,
+            },
+            AgentChatRuntimeContext::default(),
+            None,
+            &file_client,
+            &file_write_client,
+            &search_client,
+            &browser_client,
+        )
+        .expect("agent chat succeeds");
+
+        assert_eq!(response.memory_candidates.len(), 1);
+        assert_eq!(response.memory_candidates[0].title, "Default response tone");
+
+        let receipt_events = store
+            .lock()
+            .expect("store locks")
+            .list_recent(50)
+            .expect("events load")
+            .into_iter()
+            .filter(|event| event.event_type == "agent_context_receipt_recorded")
+            .collect::<Vec<_>>();
+        assert_eq!(receipt_events.len(), 1);
+
+        let payload = &receipt_events[0].payload_json;
+        assert!(payload.contains("\"memory_candidate_gate\""));
+        assert!(payload.contains("proposed=3"));
+        assert!(payload.contains("kept=1"));
+        assert!(payload.contains("dropped=2"));
+        assert!(payload.contains("sensitive=1"));
+        assert!(payload.contains("transient=1"));
+        assert!(payload.contains("kept title=Default response tone"));
+        assert!(!payload.contains("hunter2"));
+        assert!(!payload.contains("The user's password"));
+        assert!(!payload.contains("Only use this wording"));
     }
 
     #[test]

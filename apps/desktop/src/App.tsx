@@ -6772,6 +6772,12 @@ export function App() {
                               {summary.memories.join(" · ")}
                             </p>
                           ) : null}
+                          {summary.memoryCandidateGate.length > 0 ? (
+                            <p>
+                              {copy.operationsBriefing.contextMemoryCandidateGate}:{" "}
+                              {summary.memoryCandidateGate.join(" · ")}
+                            </p>
+                          ) : null}
                           {summary.validation.length > 0 ? (
                             <p>
                               {copy.operationsBriefing.contextValidation}:{" "}

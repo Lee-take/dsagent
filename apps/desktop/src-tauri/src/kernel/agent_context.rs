@@ -201,6 +201,8 @@ pub struct AgentContextReceipt {
     pub workflow_run_id: Option<Uuid>,
     pub selected_evidence: Vec<String>,
     pub selected_memories: Vec<String>,
+    #[serde(default)]
+    pub memory_candidate_gate: Vec<String>,
     pub model_route: String,
     pub thinking_level: String,
     pub token_cache_state: String,
@@ -241,6 +243,7 @@ impl AgentContextReceipt {
             workflow_run_id: None,
             selected_evidence: Vec::new(),
             selected_memories: Vec::new(),
+            memory_candidate_gate: Vec::new(),
             model_route: model_route.into(),
             thinking_level: thinking_level.into(),
             token_cache_state: token_cache_state.into(),

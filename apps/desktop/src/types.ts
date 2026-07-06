@@ -609,6 +609,7 @@ export type AgentContextReceipt = {
   workflow_run_id: string | null;
   selected_evidence: string[];
   selected_memories: string[];
+  memory_candidate_gate: string[];
   model_route: string;
   thinking_level: string;
   token_cache_state: string;

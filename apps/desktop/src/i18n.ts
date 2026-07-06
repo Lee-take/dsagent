@@ -386,6 +386,7 @@ type TranslationSet = {
     contextWorkflowPolicy: string;
     contextSelectedEvidence: string;
     contextSelectedMemories: string;
+    contextMemoryCandidateGate: string;
     contextNoSelectedMemories: string;
     contextModelRoute: string;
     contextThinkingLevel: string;
@@ -1231,6 +1232,7 @@ export const translations: Record<Language, TranslationSet> = {
       contextWorkflowPolicy: "工作流策略",
       contextSelectedEvidence: "选入证据",
       contextSelectedMemories: "选入记忆",
+      contextMemoryCandidateGate: "候选闸门",
       contextNoSelectedMemories: "本次未选入记忆",
       contextModelRoute: "模型类型",
       contextThinkingLevel: "思考等级",
@@ -2126,6 +2128,7 @@ export const translations: Record<Language, TranslationSet> = {
       contextWorkflowPolicy: "Workflow policy",
       contextSelectedEvidence: "Selected evidence",
       contextSelectedMemories: "Selected memories",
+      contextMemoryCandidateGate: "Memory candidate gate",
       contextNoSelectedMemories: "No memory selected for this run",
       contextModelRoute: "Model route",
       contextThinkingLevel: "Thinking level",
