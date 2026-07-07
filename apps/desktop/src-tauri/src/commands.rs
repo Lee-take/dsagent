@@ -72,7 +72,7 @@ use crate::kernel::models::{
     MemoryCandidateReplacePreview, MemoryCandidateResolution, MemoryCandidateSource,
     MemoryCandidateStatus, MemoryCandidateSuggestedAction, MemoryLifecycle, MemoryRecord,
     MemoryRecordDeletion, MemoryRecordLink, MemoryRecordUpdate, MemoryRelationKind, MemoryScope,
-    MemorySensitivity, MemoryType,
+    MemorySelectedFeedback, MemorySelectedFeedbackKind, MemorySensitivity, MemoryType,
 };
 use crate::kernel::network_search::{
     network_search_route_status_for_strategy, NetworkSearchRouteStatus,
@@ -134,7 +134,7 @@ const APP_UPDATE_RELEASES_API_URL: &str =
 const APP_UPDATE_RELEASE_DOWNLOAD_PREFIX: &str =
     "https://github.com/Lee-take/deepseek-agent-os/releases/download/";
 const APP_UPDATE_USER_AGENT: &str = "DS-Agent-Updater/0.1.0";
-const APP_UPDATE_CURRENT_RELEASE_TAG: &str = "v0.1.0-rc.6";
+const APP_UPDATE_CURRENT_RELEASE_TAG: &str = "v0.1.0-rc.7";
 const AGENT_SOUL_PROFILE_FILE_NAME: &str = "soul.md";
 const AGENT_SOUL_PROFILE_CONTEXT_MAX_BYTES: usize = 800;
 const AGENT_SOUL_PROFILE_MAX_BYTES: usize = 16 * 1024;
@@ -6795,6 +6795,46 @@ pub fn replace_memory_candidate_conflicts(
     let store = state.event_store.lock().map_err(|_| lock_error())?;
     store
         .replace_memory_candidate_conflicts(candidate_id, target_memory_ids, note)
+        .map_err(event_store_error)
+}
+
+#[tauri::command]
+pub fn update_memory_candidate_conflict(
+    candidate_id: Uuid,
+    target_memory_id: Uuid,
+    note: String,
+    state: State<'_, AppState>,
+) -> Result<MemoryCandidateResolution, String> {
+    let store = state.event_store.lock().map_err(|_| lock_error())?;
+    store
+        .update_memory_candidate_conflict(candidate_id, target_memory_id, note)
+        .map_err(event_store_error)
+}
+
+#[tauri::command]
+pub fn archive_memory_candidate_conflicts(
+    candidate_id: Uuid,
+    target_memory_ids: Vec<Uuid>,
+    note: String,
+    state: State<'_, AppState>,
+) -> Result<MemoryCandidateResolution, String> {
+    let store = state.event_store.lock().map_err(|_| lock_error())?;
+    store
+        .archive_memory_candidate_conflicts(candidate_id, target_memory_ids, note)
+        .map_err(event_store_error)
+}
+
+#[tauri::command]
+pub fn record_selected_memory_feedback(
+    memory_id: Uuid,
+    context_receipt_id: Option<Uuid>,
+    feedback: MemorySelectedFeedbackKind,
+    note: String,
+    state: State<'_, AppState>,
+) -> Result<MemorySelectedFeedback, String> {
+    let store = state.event_store.lock().map_err(|_| lock_error())?;
+    store
+        .record_selected_memory_feedback(memory_id, context_receipt_id, feedback, note)
         .map_err(event_store_error)
 }
 

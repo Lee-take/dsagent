@@ -2900,6 +2900,28 @@ dd {
   overflow-wrap: anywhere;
 }
 
+.memory-feedback-panel {
+  display: grid;
+  grid-template-columns: 1fr;
+  align-items: stretch;
+  gap: 7px;
+}
+
+.memory-feedback-row {
+  display: grid;
+  gap: 6px;
+}
+
+.memory-feedback-row > span {
+  color: var(--body-text);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.memory-feedback-row .sidebar-row-actions {
+  justify-content: flex-start;
+}
+
 .tool-output-row footer {
   display: grid;
   gap: 3px;

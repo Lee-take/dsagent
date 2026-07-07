@@ -301,6 +301,13 @@ export type MemoryCandidateSource =
 
 export type MemoryCandidateStatus = "pending" | "accepted" | "rejected";
 
+export type MemorySelectedFeedbackKind =
+  | "useful"
+  | "irrelevant"
+  | "stale"
+  | "conflicting"
+  | "should_update";
+
 export type MemoryCandidateSuggestedAction =
   | "new"
   | "merge"
@@ -440,6 +447,15 @@ export type MemoryRecordDeletion = {
   memory_id: string;
   note: string;
   deleted_at: string;
+};
+
+export type MemorySelectedFeedback = {
+  id: string;
+  memory_id: string;
+  context_receipt_id: string | null;
+  feedback: MemorySelectedFeedbackKind;
+  note: string;
+  created_at: string;
 };
 
 export type MemoryRecordUpdate = {

@@ -15,7 +15,8 @@ use crate::kernel::models::{
     MemoryCandidateReplacePreview, MemoryCandidateResolution, MemoryCandidateSource,
     MemoryCandidateStatus, MemoryConflictSummary, MemoryRecord, MemoryRecordDeletion,
     MemoryRecordLink, MemoryRecordLinkSummary, MemoryRecordUpdate, MemoryRelationKind,
-    MemorySearchMatch, MemorySearchMatchSource, TaskRecord,
+    MemorySearchMatch, MemorySearchMatchSource, MemorySelectedFeedback, MemorySelectedFeedbackKind,
+    TaskRecord,
 };
 use crate::kernel::policy::{
     capability_risk, CapabilityAccessRecord, CapabilityAccessRequest, CapabilityAccessStatus,
@@ -40,6 +41,7 @@ pub const MEMORY_RECORD_CREATED_EVENT: &str = "memory_record.created";
 pub const MEMORY_RECORD_UPDATED_EVENT: &str = "memory_record.updated";
 pub const MEMORY_RECORD_DELETED_EVENT: &str = "memory_record.deleted";
 pub const MEMORY_RECORD_LINKED_EVENT: &str = "memory_record.linked";
+pub const MEMORY_SELECTED_FEEDBACK_RECORDED_EVENT: &str = "memory_selected_feedback.recorded";
 pub const OPERATIONS_BRIEFING_RUN_RECORDED_EVENT: &str = "operations_briefing.run_recorded";
 pub const PERMISSION_AUDIT_RECORDED_EVENT: &str = "permission_audit.recorded";
 pub const PERMISSION_RESOLUTION_RECORDED_EVENT: &str = "permission_resolution.recorded";
@@ -579,6 +581,40 @@ impl EventStore {
         Ok(deletion)
     }
 
+    pub fn record_selected_memory_feedback(
+        &self,
+        memory_id: Uuid,
+        context_receipt_id: Option<Uuid>,
+        feedback: MemorySelectedFeedbackKind,
+        note: String,
+    ) -> EventStoreResult<MemorySelectedFeedback> {
+        let exists = self
+            .list_memory_records()?
+            .into_iter()
+            .any(|memory| memory.id == memory_id);
+        if !exists {
+            return Err(EventStoreError::NotFound(format!(
+                "memory record {memory_id} was not found"
+            )));
+        }
+
+        let feedback = MemorySelectedFeedback::new(memory_id, context_receipt_id, feedback, note);
+        let event = KernelEvent::new(MEMORY_SELECTED_FEEDBACK_RECORDED_EVENT, &feedback)?;
+        self.append(&event)?;
+        Ok(feedback)
+    }
+
+    pub fn list_selected_memory_feedback(&self) -> EventStoreResult<Vec<MemorySelectedFeedback>> {
+        let events = self.list_by_type(MEMORY_SELECTED_FEEDBACK_RECORDED_EVENT, 500)?;
+        events
+            .into_iter()
+            .map(|event| {
+                serde_json::from_str::<MemorySelectedFeedback>(&event.payload_json)
+                    .map_err(Into::into)
+            })
+            .collect()
+    }
+
     pub fn append_memory_record_link(&self, link: &MemoryRecordLink) -> EventStoreResult<()> {
         let visible_memory_ids = self
             .list_memory_records()?
@@ -1036,6 +1072,100 @@ impl EventStore {
             )
             .map_err(EventStoreError::InvalidState)?;
             self.append_memory_record_link(&link)?;
+            self.delete_memory_record(memory_id, note.clone())?;
+        }
+
+        Ok(resolution)
+    }
+
+    pub fn update_memory_candidate_conflict(
+        &self,
+        candidate_id: Uuid,
+        target_memory_id: Uuid,
+        note: String,
+    ) -> EventStoreResult<MemoryCandidateResolution> {
+        let record = self
+            .list_memory_candidate_records()?
+            .into_iter()
+            .find(|record| record.candidate.id == candidate_id)
+            .ok_or_else(|| {
+                EventStoreError::NotFound("memory candidate does not exist".to_string())
+            })?;
+        if record.resolution.is_some() {
+            return Err(EventStoreError::InvalidState(
+                "memory candidate is already resolved".to_string(),
+            ));
+        }
+        if !record.conflicting_memory_ids.contains(&target_memory_id) {
+            return Err(EventStoreError::InvalidState(format!(
+                "memory record {target_memory_id} is not a current candidate conflict"
+            )));
+        }
+
+        let resolution = MemoryCandidateResolution::new(candidate_id, true, note.clone());
+        self.append_memory_candidate_resolution(&resolution)?;
+        self.update_memory_record(
+            target_memory_id,
+            record.candidate.title,
+            record.candidate.body,
+            record.candidate.memory_type,
+            record.candidate.scope,
+            record.candidate.sensitivity,
+            record.candidate.lifecycle,
+            record.candidate.expires_at,
+            note,
+        )?;
+
+        Ok(resolution)
+    }
+
+    pub fn archive_memory_candidate_conflicts(
+        &self,
+        candidate_id: Uuid,
+        target_memory_ids: Vec<Uuid>,
+        note: String,
+    ) -> EventStoreResult<MemoryCandidateResolution> {
+        let mut unique_target_memory_ids = Vec::new();
+        let mut seen_target_memory_ids = std::collections::HashSet::new();
+        for memory_id in target_memory_ids {
+            if seen_target_memory_ids.insert(memory_id) {
+                unique_target_memory_ids.push(memory_id);
+            }
+        }
+        if unique_target_memory_ids.is_empty() {
+            return Err(EventStoreError::InvalidState(
+                "memory candidate archive requires at least one target memory".to_string(),
+            ));
+        }
+
+        let record = self
+            .list_memory_candidate_records()?
+            .into_iter()
+            .find(|record| record.candidate.id == candidate_id)
+            .ok_or_else(|| {
+                EventStoreError::NotFound("memory candidate does not exist".to_string())
+            })?;
+        if record.resolution.is_some() {
+            return Err(EventStoreError::InvalidState(
+                "memory candidate is already resolved".to_string(),
+            ));
+        }
+        let conflicting_memory_ids = record
+            .conflicting_memory_ids
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        for memory_id in &unique_target_memory_ids {
+            if !conflicting_memory_ids.contains(memory_id) {
+                return Err(EventStoreError::InvalidState(format!(
+                    "memory record {memory_id} is not a current candidate conflict"
+                )));
+            }
+        }
+
+        let resolution = MemoryCandidateResolution::new(candidate_id, true, note.clone());
+        self.append_memory_candidate_resolution(&resolution)?;
+        for memory_id in unique_target_memory_ids {
             self.delete_memory_record(memory_id, note.clone())?;
         }
 
@@ -1619,7 +1749,8 @@ mod tests {
         KernelEvent, MemoryCandidate, MemoryCandidateSource, MemoryCandidateStatus,
         MemoryLifecycle, MemoryRecord, MemoryRecordLink, MemoryRecordLinkSummary,
         MemoryRecordSource, MemoryRelationKind, MemoryScope, MemorySearchMatch,
-        MemorySearchMatchSource, MemorySensitivity, MemoryType, TaskRecord,
+        MemorySearchMatchSource, MemorySelectedFeedbackKind, MemorySensitivity, MemoryType,
+        TaskRecord,
     };
     use crate::kernel::policy::{
         request_capability_access, CapabilityAccessStatus, CapabilityGrantState, CapabilityKind,
@@ -3225,6 +3356,124 @@ mod tests {
     }
 
     #[test]
+    fn updating_memory_candidate_conflict_updates_target_without_writing_new_memory() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let task = TaskRecord::new(
+            "Preferred report tone".to_string(),
+            "Use concise operating language.".to_string(),
+        )
+        .expect("task is valid");
+        let existing_memory = MemoryRecord::from_task_record(&task);
+        let candidate = MemoryCandidate::new_with_metadata(
+            "Preferred report tone".to_string(),
+            "Use concise operating language with owners and evidence.".to_string(),
+            MemoryCandidateSource::Manual,
+            None,
+            "User said the existing memory should be updated, not duplicated.".to_string(),
+            MemoryType::WorkflowRule,
+            MemoryScope::Project,
+            MemorySensitivity::Sensitive,
+            MemoryLifecycle::Active,
+        )
+        .expect("candidate is valid");
+
+        store
+            .append_memory_record(&existing_memory)
+            .expect("memory appends");
+        store
+            .append_memory_candidate(&candidate)
+            .expect("candidate appends");
+        let resolution = store
+            .update_memory_candidate_conflict(
+                candidate.id,
+                existing_memory.id,
+                "Update existing memory from accepted candidate.".to_string(),
+            )
+            .expect("candidate updates existing memory");
+        let candidate_records = store
+            .list_memory_candidate_records()
+            .expect("candidate records load");
+        let memories = store.list_memory_records().expect("memories load");
+        let updates = store.list_memory_record_updates().expect("updates load");
+
+        assert!(resolution.accepted);
+        assert_eq!(resolution.candidate_id, candidate.id);
+        assert_eq!(
+            candidate_records[0].effective_status,
+            MemoryCandidateStatus::Accepted
+        );
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].id, existing_memory.id);
+        assert_eq!(memories[0].source, MemoryRecordSource::TaskRecord);
+        assert_eq!(memories[0].source_id, Some(task.id));
+        assert_eq!(memories[0].title, candidate.title);
+        assert_eq!(memories[0].body, candidate.body);
+        assert_eq!(memories[0].memory_type, MemoryType::WorkflowRule);
+        assert_eq!(memories[0].scope, MemoryScope::Project);
+        assert_eq!(memories[0].sensitivity, MemorySensitivity::Sensitive);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].memory_id, existing_memory.id);
+        assert_eq!(
+            updates[0].note,
+            "Update existing memory from accepted candidate."
+        );
+    }
+
+    #[test]
+    fn archiving_memory_candidate_conflicts_resolves_candidate_and_hides_targets() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let task = TaskRecord::new(
+            "Outdated project rule".to_string(),
+            "Use the old weekly review flow.".to_string(),
+        )
+        .expect("task is valid");
+        let stale_memory = MemoryRecord::from_task_record(&task);
+        let candidate = MemoryCandidate::new(
+            "Outdated project rule".to_string(),
+            "This memory is stale and should not guide retrieval.".to_string(),
+            MemoryCandidateSource::Manual,
+            None,
+            "User marked the selected memory as stale.".to_string(),
+        )
+        .expect("candidate is valid");
+
+        store
+            .append_memory_record(&stale_memory)
+            .expect("memory appends");
+        store
+            .append_memory_candidate(&candidate)
+            .expect("candidate appends");
+        let resolution = store
+            .archive_memory_candidate_conflicts(
+                candidate.id,
+                vec![stale_memory.id],
+                "Archive stale target from candidate review.".to_string(),
+            )
+            .expect("candidate archives stale target");
+        let candidate_records = store
+            .list_memory_candidate_records()
+            .expect("candidate records load");
+        let memories = store.list_memory_records().expect("memories load");
+        let deletions = store
+            .list_memory_record_deletions()
+            .expect("deletions load");
+
+        assert!(resolution.accepted);
+        assert_eq!(resolution.candidate_id, candidate.id);
+        assert_eq!(
+            candidate_records[0].effective_status,
+            MemoryCandidateStatus::Accepted
+        );
+        assert!(memories.is_empty());
+        assert_eq!(deletions.len(), 1);
+        assert_eq!(deletions[0].memory_id, stale_memory.id);
+        assert_eq!(
+            deletions[0].note,
+            "Archive stale target from candidate review."
+        );
+    }
+
+    #[test]
     fn replacing_memory_candidate_rejects_already_written_candidate_without_resolution() {
         let store = EventStore::open_memory().expect("memory store opens");
         let task = TaskRecord::new(
@@ -3594,6 +3843,45 @@ mod tests {
             .expect_err("deleted memory cannot be updated");
 
         assert!(matches!(error, EventStoreError::NotFound(_)));
+    }
+
+    #[test]
+    fn selected_memory_feedback_appends_without_mutating_memory_records() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let task = TaskRecord::new(
+            "Project memory rule".to_string(),
+            "Keep selected memory snippets compact.".to_string(),
+        )
+        .expect("task is valid");
+        let memory = MemoryRecord::from_task_record(&task);
+        let receipt_id = Uuid::new_v4();
+
+        store.append_memory_record(&memory).expect("memory appends");
+        let feedback = store
+            .record_selected_memory_feedback(
+                memory.id,
+                Some(receipt_id),
+                MemorySelectedFeedbackKind::ShouldUpdate,
+                "The selected memory is useful but needs fresher wording.".to_string(),
+            )
+            .expect("feedback appends");
+        let feedback_events = store
+            .list_selected_memory_feedback()
+            .expect("feedback events load");
+        let memories = store.list_memory_records().expect("memories load");
+
+        assert_eq!(feedback.memory_id, memory.id);
+        assert_eq!(feedback.context_receipt_id, Some(receipt_id));
+        assert_eq!(feedback.feedback, MemorySelectedFeedbackKind::ShouldUpdate);
+        assert_eq!(
+            feedback.note,
+            "The selected memory is useful but needs fresher wording."
+        );
+        assert_eq!(feedback_events, vec![feedback]);
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].id, memory.id);
+        assert_eq!(memories[0].title, memory.title);
+        assert_eq!(memories[0].body, memory.body);
     }
 
     #[test]

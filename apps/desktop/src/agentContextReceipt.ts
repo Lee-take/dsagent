@@ -6,6 +6,7 @@ export type AgentContextReceiptSummary = {
   meta: string[];
   evidence: string[];
   memories: string[];
+  memoryFeedbackTargets: AgentContextReceiptMemoryFeedbackTarget[];
   memoryRetrieval: string[];
   memoryScores: string[];
   memoryConflictHints: string[];
@@ -13,6 +14,11 @@ export type AgentContextReceiptSummary = {
   validation: string[];
   policy: string[];
   omissions: string[];
+};
+
+export type AgentContextReceiptMemoryFeedbackTarget = {
+  memoryId: string;
+  title: string;
 };
 
 const MAX_LIST_ITEMS = 2;
@@ -30,6 +36,7 @@ export function summarizeAgentContextReceipt(
     meta: compactList([receipt.model_route, receipt.thinking_level, receipt.token_cache_state]),
     evidence: receipt.selected_evidence.slice(0, MAX_LIST_ITEMS),
     memories: memoryTitleSummary(selectedMemoryLines),
+    memoryFeedbackTargets: memoryFeedbackTargetSummary(selectedMemoryLines),
     memoryRetrieval: retrieval.overview,
     memoryScores: memoryScoreSummary(selectedMemoryLines),
     memoryConflictHints: retrieval.conflictHints,
@@ -88,6 +95,21 @@ function memoryRetrievalSummary(selectedMemories: string[]): {
   ]);
 
   return { overview, conflictHints };
+}
+
+function memoryFeedbackTargetSummary(memoryLines: string[]): AgentContextReceiptMemoryFeedbackTarget[] {
+  return memoryLines
+    .map((memory) => {
+      const fields = parseReceiptFields(memory);
+      const memoryId = fieldValue(fields, "memory_id");
+      const title = fieldValue(fields, "title");
+      if (!memoryId || !title) {
+        return null;
+      }
+      return { memoryId, title };
+    })
+    .filter((target): target is AgentContextReceiptMemoryFeedbackTarget => target !== null)
+    .slice(0, MAX_LIST_ITEMS);
 }
 
 function memoryTitleSummary(memoryLines: string[]): string[] {

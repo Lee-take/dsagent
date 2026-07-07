@@ -110,6 +110,16 @@ pub enum MemoryCandidateStatus {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum MemorySelectedFeedbackKind {
+    Useful,
+    Irrelevant,
+    Stale,
+    Conflicting,
+    ShouldUpdate,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MemoryCandidateSuggestedAction {
     New,
     Merge,
@@ -793,6 +803,43 @@ impl MemoryRecordDeletion {
             deleted_at: Utc::now(),
         }
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MemorySelectedFeedback {
+    pub id: Uuid,
+    pub memory_id: Uuid,
+    pub context_receipt_id: Option<Uuid>,
+    pub feedback: MemorySelectedFeedbackKind,
+    pub note: String,
+    pub created_at: DateTime<Utc>,
+}
+
+impl MemorySelectedFeedback {
+    pub fn new(
+        memory_id: Uuid,
+        context_receipt_id: Option<Uuid>,
+        feedback: MemorySelectedFeedbackKind,
+        note: String,
+    ) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            memory_id,
+            context_receipt_id,
+            feedback,
+            note: compact_feedback_note(note),
+            created_at: Utc::now(),
+        }
+    }
+}
+
+fn compact_feedback_note(note: String) -> String {
+    note.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(280)
+        .collect()
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

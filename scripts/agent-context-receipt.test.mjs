@@ -113,4 +113,19 @@ test("App wires the context receipt list into the capability inspector", () => {
   assert.match(appSource, /summary\.memoryScores\.length > 0/);
   assert.match(appSource, /summary\.memoryConflictHints\.length > 0/);
   assert.match(appSource, /summary\.memoryCandidateGate\.length > 0/);
+  assert.match(appSource, /summary\.memoryFeedbackTargets\.length > 0/);
+  assert.match(appSource, /recordSelectedMemoryFeedback/);
+  assert.match(appSource, /"record_selected_memory_feedback"/);
+  assert.match(appSource, /copy\.memoryFeedback\.shouldUpdate/);
+});
+
+test("App exposes update and archive candidate actions in Memory Studio", () => {
+  const appSource = readFileSync(appSourceUrl, "utf8");
+
+  assert.match(appSource, /updateMemoryCandidateConflict/);
+  assert.match(appSource, /"update_memory_candidate_conflict"/);
+  assert.match(appSource, /archiveMemoryCandidateConflicts/);
+  assert.match(appSource, /"archive_memory_candidate_conflicts"/);
+  assert.match(appSource, /copy\.memory\.updateAndAccept/);
+  assert.match(appSource, /copy\.memory\.archiveStaleTarget/);
 });

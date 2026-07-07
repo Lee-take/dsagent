@@ -1,6 +1,6 @@
 # DeepSeek Agent OS v0.1.0 Candidate Notes
 
-Status: Windows-first release candidate. The `v0.1.0-rc.6` prerelease is
+Status: Windows-first release candidate. The `v0.1.0-rc.7` prerelease is
 intended for colleague testing through a GitHub release asset after the final
 local gates pass.
 
@@ -10,6 +10,19 @@ so Windows may show an unknown-publisher warning, but it embeds the Microsoft
 WebView2 bootstrapper and runs it silently when the target machine needs the
 WebView2 runtime. Ordinary users do not need Node.js, pnpm, Rust, or a source
 checkout to run the installed app.
+
+## v0.1.0-rc.7 Update
+
+- Adds Context Receipt feedback controls for selected memories so users can mark
+  recalled context as useful, irrelevant, stale, conflicting, or needing an
+  update without exposing full memory bodies in the receipt UI.
+- Adds Memory Studio conflict-candidate actions for updating an existing memory
+  or archiving stale target memories through explicit audited review paths.
+- Keeps feedback append-only and reviewable: selected-memory feedback records do
+  not mutate memory records, and conflict/update candidates do not silently
+  write long-term memory.
+- Keeps memory runtime context bounded while surfacing compact feedback targets
+  and update/archive candidate hints for local testing.
 
 ## v0.1.0-rc.6 Update
 

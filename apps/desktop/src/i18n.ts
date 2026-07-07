@@ -15,6 +15,7 @@ import type {
   MemoryLifecycle,
   MemoryRelationKind,
   MemorySearchMatchSource,
+  MemorySelectedFeedbackKind,
   MemoryScope,
   MemorySensitivity,
   MemoryCandidateSuggestedAction,
@@ -515,6 +516,12 @@ type TranslationSet = {
     replaceAndAccept: string;
     replaced: string;
     replaceFailed: string;
+    updateAndAccept: string;
+    updatedFromCandidate: string;
+    updateCandidateFailed: string;
+    archiveStaleTarget: string;
+    archivedFromCandidate: string;
+    archiveCandidateFailed: string;
     linkAndAccept: string;
     linkRelation: string;
     linkExisting: string;
@@ -544,6 +551,17 @@ type TranslationSet = {
     sensitivityOptions: Record<MemorySensitivity, string>;
     lifecycleOptions: Record<MemoryLifecycle, string>;
     relationOptions: Record<MemoryRelationKind, string>;
+  };
+  memoryFeedback: {
+    title: string;
+    useful: string;
+    irrelevant: string;
+    stale: string;
+    conflicting: string;
+    shouldUpdate: string;
+    recorded: string;
+    recordFailed: string;
+    options: Record<MemorySelectedFeedbackKind, string>;
   };
   audit: {
     title: string;
@@ -1369,6 +1387,12 @@ export const translations: Record<Language, TranslationSet> = {
       replaceAndAccept: "替换并接受",
       replaced: "候选记忆已接受，被替换记忆已归档。",
       replaceFailed: "候选记忆替换失败。",
+      updateAndAccept: "更新已有记忆",
+      updatedFromCandidate: "候选记忆已接受，已有记忆已更新。",
+      updateCandidateFailed: "候选记忆更新失败。",
+      archiveStaleTarget: "归档过时目标",
+      archivedFromCandidate: "候选记忆已接受，过时记忆已归档。",
+      archiveCandidateFailed: "候选记忆归档失败。",
       linkAndAccept: "关联并接受",
       linkRelation: "关联关系",
       linkExisting: "关联已有记忆",
@@ -1434,6 +1458,23 @@ export const translations: Record<Language, TranslationSet> = {
         updates: "更新",
         extends: "扩展",
         derives: "推导",
+      },
+    },
+    memoryFeedback: {
+      title: "选中记忆反馈",
+      useful: "有用",
+      irrelevant: "无关",
+      stale: "过时",
+      conflicting: "冲突",
+      shouldUpdate: "应更新",
+      recorded: "记忆反馈已记录。",
+      recordFailed: "记忆反馈记录失败。",
+      options: {
+        useful: "有用",
+        irrelevant: "无关",
+        stale: "过时",
+        conflicting: "冲突",
+        should_update: "应更新",
       },
     },
     audit: {
@@ -2275,6 +2316,12 @@ export const translations: Record<Language, TranslationSet> = {
       replaceAndAccept: "Replace and accept",
       replaced: "Memory candidate accepted and replaced memories archived.",
       replaceFailed: "Memory candidate replace failed.",
+      updateAndAccept: "Update existing",
+      updatedFromCandidate: "Memory candidate accepted and existing memory updated.",
+      updateCandidateFailed: "Memory candidate update failed.",
+      archiveStaleTarget: "Archive stale target",
+      archivedFromCandidate: "Memory candidate accepted and stale memory archived.",
+      archiveCandidateFailed: "Memory candidate archive failed.",
       linkAndAccept: "Link and accept",
       linkRelation: "Link relation",
       linkExisting: "Link existing memories",
@@ -2340,6 +2387,23 @@ export const translations: Record<Language, TranslationSet> = {
         updates: "Updates",
         extends: "Extends",
         derives: "Derives",
+      },
+    },
+    memoryFeedback: {
+      title: "Selected memory feedback",
+      useful: "Useful",
+      irrelevant: "Irrelevant",
+      stale: "Stale",
+      conflicting: "Conflicting",
+      shouldUpdate: "Should update",
+      recorded: "Memory feedback recorded.",
+      recordFailed: "Memory feedback failed to record.",
+      options: {
+        useful: "Useful",
+        irrelevant: "Irrelevant",
+        stale: "Stale",
+        conflicting: "Conflicting",
+        should_update: "Should update",
       },
     },
     audit: {

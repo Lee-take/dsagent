@@ -100,6 +100,8 @@ import type {
   MemorySearchMatch,
   MemoryRecordUpdate,
   MemoryRelationKind,
+  MemorySelectedFeedback,
+  MemorySelectedFeedbackKind,
   MemoryScope,
   MemorySensitivity,
   MemoryType,
@@ -859,6 +861,8 @@ export function App() {
   const [computerControlUnlockError, setComputerControlUnlockError] = useState("");
   const [briefingNotice, setBriefingNotice] = useState("");
   const [briefingError, setBriefingError] = useState("");
+  const [memoryFeedbackNotice, setMemoryFeedbackNotice] = useState("");
+  const [memoryFeedbackError, setMemoryFeedbackError] = useState("");
   const [setupNotice, setSetupNotice] = useState("");
   const [setupError, setSetupError] = useState("");
   const [soulProfileNotice, setSoulProfileNotice] = useState("");
@@ -882,6 +886,7 @@ export function App() {
   const [memoryReplacePreviewPending, setMemoryReplacePreviewPending] =
     useState<string | null>(null);
   const [memoryLinkRelation, setMemoryLinkRelation] = useState<MemoryRelationKind>("extends");
+  const [memoryFeedbackPending, setMemoryFeedbackPending] = useState<string | null>(null);
   const [memoryUpdatePending, setMemoryUpdatePending] = useState<string | null>(null);
   const [memoryDeletionPending, setMemoryDeletionPending] = useState<string | null>(null);
   const [browserPending, setBrowserPending] = useState(false);
@@ -2215,6 +2220,86 @@ export function App() {
       setMemoryCandidateError(String(error) || copy.memory.replaceFailed);
     } finally {
       setMemoryCandidateResolutionPending(null);
+    }
+  };
+
+  const updateMemoryCandidateConflict = async (candidateId: string, targetMemoryId: string) => {
+    setMemoryCandidateResolutionPending(candidateId);
+    setMemoryCandidateError("");
+    setMemoryCandidateNotice("");
+
+    try {
+      await invoke("update_memory_candidate_conflict", {
+        candidateId,
+        targetMemoryId,
+        note: copy.memory.updateAndAccept,
+      });
+      const [memories] = await Promise.all([
+        loadMemoryRecords(memoryQuery),
+        refreshMemoryCandidateRecords(),
+      ]);
+      setMemoryRecords(memories);
+      setMemoryCandidateNotice(copy.memory.updatedFromCandidate);
+      setMemoryMergePreview(null);
+      setMemoryReplacePreview(null);
+    } catch (error) {
+      setMemoryCandidateError(String(error) || copy.memory.updateCandidateFailed);
+    } finally {
+      setMemoryCandidateResolutionPending(null);
+    }
+  };
+
+  const archiveMemoryCandidateConflicts = async (
+    candidateId: string,
+    targetMemoryIds: string[],
+  ) => {
+    setMemoryCandidateResolutionPending(candidateId);
+    setMemoryCandidateError("");
+    setMemoryCandidateNotice("");
+
+    try {
+      await invoke("archive_memory_candidate_conflicts", {
+        candidateId,
+        targetMemoryIds,
+        note: copy.memory.archiveStaleTarget,
+      });
+      const [memories] = await Promise.all([
+        loadMemoryRecords(memoryQuery),
+        refreshMemoryCandidateRecords(),
+      ]);
+      setMemoryRecords(memories);
+      setMemoryCandidateNotice(copy.memory.archivedFromCandidate);
+      setMemoryMergePreview(null);
+      setMemoryReplacePreview(null);
+    } catch (error) {
+      setMemoryCandidateError(String(error) || copy.memory.archiveCandidateFailed);
+    } finally {
+      setMemoryCandidateResolutionPending(null);
+    }
+  };
+
+  const recordSelectedMemoryFeedback = async (
+    receiptId: string,
+    memoryId: string,
+    feedback: MemorySelectedFeedbackKind,
+  ) => {
+    const pendingKey = `${receiptId}:${memoryId}:${feedback}`;
+    setMemoryFeedbackPending(pendingKey);
+    setMemoryFeedbackNotice("");
+    setMemoryFeedbackError("");
+
+    try {
+      await invoke<MemorySelectedFeedback>("record_selected_memory_feedback", {
+        memoryId,
+        contextReceiptId: receiptId,
+        feedback,
+        note: copy.memoryFeedback.options[feedback],
+      });
+      setMemoryFeedbackNotice(copy.memoryFeedback.recorded);
+    } catch (error) {
+      setMemoryFeedbackError(String(error) || copy.memoryFeedback.recordFailed);
+    } finally {
+      setMemoryFeedbackPending(null);
     }
   };
 
@@ -5915,6 +6000,40 @@ export function App() {
                                   </button>
                                 </>
                               ) : null}
+                              {record.conflicting_memory_ids.length > 0 ? (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    void updateMemoryCandidateConflict(
+                                      record.candidate.id,
+                                      record.conflicting_memory_ids[0],
+                                    )
+                                  }
+                                  disabled={memoryCandidateResolutionPending !== null}
+                                >
+                                  <Pencil size={14} aria-hidden="true" />
+                                  {memoryCandidateResolutionPending === record.candidate.id
+                                    ? copy.memory.resolving
+                                    : copy.memory.updateAndAccept}
+                                </button>
+                              ) : null}
+                              {record.conflicting_memory_ids.length > 0 ? (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    void archiveMemoryCandidateConflicts(
+                                      record.candidate.id,
+                                      record.conflicting_memory_ids,
+                                    )
+                                  }
+                                  disabled={memoryCandidateResolutionPending !== null}
+                                >
+                                  <Archive size={14} aria-hidden="true" />
+                                  {memoryCandidateResolutionPending === record.candidate.id
+                                    ? copy.memory.resolving
+                                    : copy.memory.archiveStaleTarget}
+                                </button>
+                              ) : null}
                               <button
                                 type="button"
                                 onClick={() => void resolveMemoryCandidate(record.candidate.id, true)}
@@ -6746,12 +6865,28 @@ export function App() {
                 <div className="recent-audit-heading">
                   {copy.operationsBriefing.contextReceipt}
                 </div>
+                {memoryFeedbackNotice ? (
+                  <p className="package-message">{memoryFeedbackNotice}</p>
+                ) : null}
+                {memoryFeedbackError ? (
+                  <p className="package-error">{memoryFeedbackError}</p>
+                ) : null}
                 {agentContextReceipts.length === 0 ? (
                   <p className="empty-state">{copy.operationsBriefing.contextNoItems}</p>
                 ) : (
                   <div className="tool-output-list">
                     {agentContextReceipts.slice(0, 3).map((receipt) => {
                       const summary = summarizeAgentContextReceipt(receipt);
+                      const memoryFeedbackActions: Array<{
+                        feedback: MemorySelectedFeedbackKind;
+                        label: string;
+                      }> = [
+                        { feedback: "useful", label: copy.memoryFeedback.useful },
+                        { feedback: "irrelevant", label: copy.memoryFeedback.irrelevant },
+                        { feedback: "stale", label: copy.memoryFeedback.stale },
+                        { feedback: "conflicting", label: copy.memoryFeedback.conflicting },
+                        { feedback: "should_update", label: copy.memoryFeedback.shouldUpdate },
+                      ];
                       return (
                         <article className="tool-output-row context-receipt-row" key={receipt.id}>
                           <div>
@@ -6795,6 +6930,39 @@ export function App() {
                               {copy.operationsBriefing.contextMemoryCandidateGate}:{" "}
                               {summary.memoryCandidateGate.join(" · ")}
                             </p>
+                          ) : null}
+                          {summary.memoryFeedbackTargets.length > 0 ? (
+                            <div className="memory-feedback-panel">
+                              <strong>{copy.memoryFeedback.title}</strong>
+                              {summary.memoryFeedbackTargets.map((target) => (
+                                <div className="memory-feedback-row" key={target.memoryId}>
+                                  <span>{target.title}</span>
+                                  <div className="sidebar-row-actions">
+                                    {memoryFeedbackActions.map((action) => {
+                                      const pendingKey = `${receipt.id}:${target.memoryId}:${action.feedback}`;
+                                      return (
+                                        <button
+                                          type="button"
+                                          key={action.feedback}
+                                          onClick={() =>
+                                            void recordSelectedMemoryFeedback(
+                                              receipt.id,
+                                              target.memoryId,
+                                              action.feedback,
+                                            )
+                                          }
+                                          disabled={memoryFeedbackPending !== null}
+                                        >
+                                          {memoryFeedbackPending === pendingKey
+                                            ? copy.memory.resolving
+                                            : action.label}
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
                           ) : null}
                           {summary.validation.length > 0 ? (
                             <p>
