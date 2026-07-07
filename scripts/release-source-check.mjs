@@ -4248,6 +4248,31 @@ function checkLocalReleaseHelperSelfTests() {
     "windows-local-smoke self-test ok",
     "Windows local smoke helper self-test success message",
   );
+  const windowsInstalledUiSmoke = readText("scripts/windows-installed-ui-smoke.mjs");
+  checkTextIncludes(
+    "scripts/windows-installed-ui-smoke.mjs",
+    windowsInstalledUiSmoke,
+    "--memory-feedback",
+    "Windows installed UI memory-feedback smoke flag",
+  );
+  checkTextIncludes(
+    "scripts/windows-installed-ui-smoke.mjs",
+    windowsInstalledUiSmoke,
+    "runInstalledMemoryFeedbackSmoke",
+    "Windows installed UI memory-feedback smoke helper",
+  );
+  checkTextIncludes(
+    "scripts/windows-installed-ui-smoke.mjs",
+    windowsInstalledUiSmoke,
+    "app_data_events_restored: true",
+    "Windows installed UI memory-feedback restores app-data event store",
+  );
+  checkTextIncludes(
+    "scripts/windows-installed-ui-smoke.mjs",
+    windowsInstalledUiSmoke,
+    "memory_feedback:",
+    "Windows installed UI memory-feedback JSON output",
+  );
 
   const releaseLocal = readText("scripts/release-local-check.mjs");
   checkTextIncludes(

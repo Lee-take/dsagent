@@ -9,8 +9,15 @@ import net from "node:net";
 
 const isWindows = process.platform === "win32";
 const rawArgs = process.argv.slice(2).filter((arg) => arg !== "--");
-const allowedArgs = new Set(["--agent-chat", "--help", "--self-test", "--workflow"]);
+const allowedArgs = new Set([
+  "--agent-chat",
+  "--help",
+  "--memory-feedback",
+  "--self-test",
+  "--workflow",
+]);
 validateArgs(rawArgs, allowedArgs, "test:windows-installed-ui");
+validateInstalledUiSmokeFlagCombination(rawArgs);
 
 if (rawArgs.includes("--help")) {
   console.log(
@@ -19,6 +26,7 @@ if (rawArgs.includes("--help")) {
       "",
       "Flags:",
       "  --agent-chat Exercise the installed Tauri agent chat command bridge.",
+      "  --memory-feedback Exercise installed memory candidate + selected-memory feedback bridge.",
       "  --self-test Run deterministic helper checks without launching DS Agent.",
       "  --workflow  Exercise the installed Tauri workflow and report exports.",
     ].join("\n"),
@@ -35,6 +43,9 @@ const includeWorkflowSmoke =
 const includeAgentChatSmoke =
   args.has("--agent-chat") ||
   process.env.DEEPSEEK_AGENT_OS_INSTALLED_AGENT_CHAT_SMOKE === "1";
+const includeMemoryFeedbackSmoke =
+  args.has("--memory-feedback") ||
+  process.env.DEEPSEEK_AGENT_OS_INSTALLED_MEMORY_FEEDBACK_SMOKE === "1";
 const expectModelTelemetry = Boolean(process.env.DEEPSEEK_API_KEY?.trim());
 const timeoutMs = readPositiveInteger(
   process.env.DEEPSEEK_AGENT_OS_INSTALLED_UI_TIMEOUT_MS ?? "20000",
@@ -108,6 +119,9 @@ async function main() {
     const agentChat = includeAgentChatSmoke
       ? await runInstalledAgentChatSmoke(cdp)
       : null;
+    const memoryFeedback = includeMemoryFeedbackSmoke
+      ? await runInstalledMemoryFeedbackSmoke(cdp)
+      : null;
     const workflow = includeWorkflowSmoke
       ? await runInstalledWorkflowSmoke(cdp)
       : null;
@@ -138,6 +152,7 @@ async function main() {
           checks,
           screenshot: screenshotPath,
           agent_chat: agentChat ?? "skipped",
+          memory_feedback: memoryFeedback ?? "skipped",
           workflow: workflow ?? "skipped",
         },
         null,
@@ -377,6 +392,106 @@ async function runInstalledAgentChatSmoke(client) {
       latest_cache_status: latest.cache_status ?? null,
       latest_total_tokens: latest.total_tokens ?? null,
     },
+  };
+}
+
+async function runInstalledMemoryFeedbackSmoke(client) {
+  const directoryState = await invokeTauri(client, "get_local_directory_state", {});
+  const appDataEventsBackup = await backupAppDataEventsFile(
+    directoryState?.settings_file,
+  );
+  let smokeResult = null;
+  let appDataEventsRestored = false;
+
+  try {
+    const beforeRecords = await invokeTauri(client, "list_memory_records", {});
+    const stamp = new Date().toISOString().replaceAll(":", "-").replaceAll(".", "-");
+    const title = `Installed memory feedback smoke ${stamp}`;
+    const body =
+      "Temporary memory used only to verify installed selected-memory feedback bridge.";
+    const candidateRecord = await invokeTauri(client, "propose_memory_candidate", {
+      title,
+      body,
+      memoryType: "project_context",
+      scope: "workspace",
+      sensitivity: "normal",
+      lifecycle: "active",
+      expiresAt: null,
+    });
+    const candidateId = candidateRecord?.candidate?.id;
+    if (!candidateId) {
+      throw new Error("Installed memory feedback smoke did not create a candidate id.");
+    }
+
+    await invokeTauri(client, "resolve_memory_candidate", {
+      candidateId,
+      accepted: true,
+      note: "Installed memory feedback smoke accepted temporary candidate.",
+    });
+    const afterAcceptRecords = await invokeTauri(client, "list_memory_records", {});
+    const acceptedMemory = afterAcceptRecords.find(
+      (memory) => memory?.source_id === candidateId,
+    );
+    if (!acceptedMemory?.id) {
+      throw new Error("Installed memory feedback smoke did not find accepted memory.");
+    }
+
+    const feedback = await invokeTauri(client, "record_selected_memory_feedback", {
+      memoryId: acceptedMemory.id,
+      contextReceiptId: null,
+      feedback: "useful",
+      note: "Installed UI smoke selected-memory feedback.",
+    });
+    if (feedback?.memory_id !== acceptedMemory.id || feedback?.feedback !== "useful") {
+      throw new Error("Installed memory feedback smoke received an unexpected feedback record.");
+    }
+
+    const afterFeedbackRecords = await invokeTauri(client, "list_memory_records", {});
+    const afterFeedbackMemory = afterFeedbackRecords.find(
+      (memory) => memory?.id === acceptedMemory.id,
+    );
+    if (!afterFeedbackMemory) {
+      throw new Error("Installed memory feedback smoke lost the target memory.");
+    }
+    if (
+      afterFeedbackMemory.title !== acceptedMemory.title ||
+      afterFeedbackMemory.body !== acceptedMemory.body ||
+      afterFeedbackRecords.length !== afterAcceptRecords.length
+    ) {
+      throw new Error("Installed memory feedback smoke mutated memory records.");
+    }
+
+    smokeResult = {
+      ok: true,
+      mode: "memory_feedback",
+      created_candidate: Boolean(candidateId),
+      target_memory_id: acceptedMemory.id,
+      feedback_kind: feedback.feedback,
+      memory_count_before: Array.isArray(beforeRecords) ? beforeRecords.length : null,
+      memory_count_after_accept: Array.isArray(afterAcceptRecords)
+        ? afterAcceptRecords.length
+        : null,
+      memory_count_after_feedback: Array.isArray(afterFeedbackRecords)
+        ? afterFeedbackRecords.length
+        : null,
+      app_data_events: "pending_restore",
+      app_data_events_restored: false,
+    };
+  } finally {
+    await closeInstalledAppForAppDataRestore();
+    appDataEventsRestored = await restoreAppDataEventsFile(appDataEventsBackup);
+  }
+
+  if (appDataEventsRestored !== true) {
+    throw new Error(
+      "Installed memory feedback smoke could not verify restored app-data event store.",
+    );
+  }
+
+  return {
+    ...smokeResult,
+    app_data_events: "restored",
+    app_data_events_restored: true,
   };
 }
 
@@ -883,6 +998,14 @@ class CdpClient {
 }
 
 async function runSelfTest() {
+  if (!allowedArgs.has("--memory-feedback")) {
+    throw new Error("Self-test expected --memory-feedback to be a supported installed UI smoke flag.");
+  }
+  validateInstalledUiSmokeFlagCombination(["--memory-feedback", "--agent-chat"]);
+  assertSelfTestThrows(
+    () => validateInstalledUiSmokeFlagCombination(["--memory-feedback", "--workflow"]),
+    "cannot be combined",
+  );
   if (meaningfulBodyText("中\nEN\n设置")) {
     throw new Error("Self-test expected short settings-only text to stay blank.");
   }
@@ -993,6 +1116,13 @@ function assertSelfTestThrows(action, expectedMessage) {
   }
 
   throw new Error(`Self-test expected error containing: ${expectedMessage}`);
+}
+
+function validateInstalledUiSmokeFlagCombination(values) {
+  const valueSet = new Set(values);
+  if (valueSet.has("--memory-feedback") && valueSet.has("--workflow")) {
+    throw new Error("--memory-feedback cannot be combined with --workflow.");
+  }
 }
 
 if (args.has("--self-test")) {
