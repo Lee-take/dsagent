@@ -1,0 +1,81 @@
+{
+  "id": "ds-agent.builtin.office-control",
+  "kind": "builtin_skill_pack",
+  "version": "0.1.0",
+  "name": "DS Agent Built-in Office Control",
+  "builtin": true,
+  "entry": "skills/office-control.md",
+  "description": "Built-in DS Agent skills for creating Word, Excel, and PowerPoint artifacts and for safely routing app UI control through Computer Use when needed.",
+  "capabilities": [
+    "file_read",
+    "file_write",
+    "computer_screenshot",
+    "computer_control"
+  ],
+  "actions": [
+    {
+      "action_type": "office_create",
+      "description": "Create a local .docx, .xlsx, or .pptx artifact in the configured DS Agent workspace."
+    },
+    {
+      "action_type": "office_update",
+      "description": "Update an existing workspace .docx, .xlsx, or .pptx file by appending Word paragraphs, Excel rows, or PowerPoint slides."
+    },
+    {
+      "action_type": "office_open",
+      "description": "Open a workspace .docx, .xlsx, or .pptx file with the matching Microsoft Office app when available, falling back to the system default app."
+    },
+    {
+      "action_type": "computer_screenshot",
+      "description": "Inspect the visible desktop before screen-dependent Office UI control."
+    },
+    {
+      "action_type": "computer_control",
+      "description": "Execute one approved structured Office UI input action at a time."
+    }
+  ],
+  "office_apps": [
+    {
+      "id": "word",
+      "display_name": "Microsoft Word",
+      "extensions": [
+        ".docx"
+      ],
+      "skill": "skills/word-control.md"
+    },
+    {
+      "id": "excel",
+      "display_name": "Microsoft Excel",
+      "extensions": [
+        ".xlsx"
+      ],
+      "skill": "skills/excel-control.md"
+    },
+    {
+      "id": "powerpoint",
+      "display_name": "Microsoft PowerPoint",
+      "extensions": [
+        ".pptx"
+      ],
+      "skill": "skills/powerpoint-control.md"
+    }
+  ],
+  "skills": [
+    {
+      "id": "office-control",
+      "path": "skills/office-control.md"
+    },
+    {
+      "id": "word-control",
+      "path": "skills/word-control.md"
+    },
+    {
+      "id": "excel-control",
+      "path": "skills/excel-control.md"
+    },
+    {
+      "id": "powerpoint-control",
+      "path": "skills/powerpoint-control.md"
+    }
+  ]
+}

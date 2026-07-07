@@ -40,7 +40,10 @@ const localCredentialArtifactExtensions = new Set([
   ".cer",
 ]);
 const generatedDirectorySegments = new Set(["node_modules", "dist", "target"]);
-const allowedSourceBinaryFiles = new Set(["apps/desktop/src-tauri/icons/icon.ico"]);
+const allowedSourceBinaryFiles = new Set([
+  "apps/desktop/public/ds-agent-mark.png",
+  "apps/desktop/src-tauri/icons/icon.ico",
+]);
 const requiredDocs = [
   "README.md",
   "docs/INSTALLATION.md",
@@ -334,6 +337,7 @@ const requiredPackageScripts = new Map([
   ["stage:webview2-loader", "node scripts/stage-webview2-loader.mjs"],
   ["test:deepseek", "node scripts/deepseek-smoke.mjs"],
   ["test:deepseek:briefing", "node scripts/deepseek-operations-briefing-smoke.mjs"],
+  ["test:builtin-plugins", "node scripts/validate-builtin-plugins.mjs"],
   ["test:windows-local", "node scripts/windows-local-smoke.mjs"],
   ["test:windows-installed-ui", "node scripts/windows-installed-ui-smoke.mjs"],
   ["test:release-source", "node scripts/release-source-check.mjs"],
@@ -343,6 +347,7 @@ const requiredGitignoreEntries = [
   "node_modules/",
   "dist/",
   "target/",
+  "tmp/",
   ".DS_Store",
   ".env",
   ".env.*",
@@ -423,9 +428,20 @@ checkJsonField("apps/desktop/src-tauri/tauri.windows.conf.json", "bundle.active"
 checkJsonField("apps/desktop/src-tauri/tauri.windows.conf.json", "bundle.targets.0", "nsis");
 checkJsonField(
   "apps/desktop/src-tauri/tauri.windows.conf.json",
+  "bundle.windows.webviewInstallMode.type",
+  "embedBootstrapper",
+);
+checkJsonField(
+  "apps/desktop/src-tauri/tauri.windows.conf.json",
+  "bundle.windows.webviewInstallMode.silent",
+  true,
+);
+checkJsonField(
+  "apps/desktop/src-tauri/tauri.windows.conf.json",
   "bundle.resources.generated/windows/WebView2Loader.dll",
   "WebView2Loader.dll",
 );
+checkWindowsAppIconPackaging();
 checkCargoLicense();
 checkPackageScripts();
 checkSecretScanHygiene();
@@ -445,6 +461,8 @@ checkAppFallbackCopyPositioning();
 checkRuntimeWebSearchCopyPositioning();
 checkRuntimeComputerUseCopyPositioning();
 checkRuntimeLocalDesktopRouteFailureCopyPositioning();
+checkChatFirstRunStatusUi();
+checkChatFirstCenterWorkbenchUi();
 checkHistoricalReleaseNotes();
 checkWindowsValidationStatusDocs();
 checkReleaseGateDocs();
@@ -454,6 +472,7 @@ checkOperationsBriefingArchiveReplayUi();
 checkWorkPackageImportPreviewUi();
 checkOperationsBriefingSmokeEvidence();
 checkOperationsBriefingSeedEvidence();
+checkBuiltinPluginPackages();
 checkGitignoreEntries();
 checkLineEndingPolicy();
 checkPublicPeerProductTermGuardSelfTest();
@@ -529,6 +548,107 @@ function getJsonPathValue(value, segments) {
     return getJsonPathValue(value[head], tail);
   }
   return undefined;
+}
+
+function checkWindowsAppIconPackaging() {
+  checkJsonField(
+    "apps/desktop/src-tauri/tauri.windows.conf.json",
+    "bundle.windows.nsis.installerHooks",
+    "nsis/shortcut-icons.nsh",
+  );
+  checkJsonField(
+    "apps/desktop/src-tauri/tauri.windows.conf.json",
+    "bundle.resources.icons/icon.ico",
+    "ds-agent-icon.ico",
+  );
+
+  const mainSource = readText("apps/desktop/src-tauri/src/main.rs");
+  checkTextIncludes(
+    "apps/desktop/src-tauri/src/main.rs",
+    mainSource,
+    '#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]',
+    "desktop release binary uses Windows GUI subsystem",
+  );
+  checkTextIncludes(
+    "apps/desktop/src-tauri/src/main.rs",
+    mainSource,
+    'include_bytes!("../icons/icon.ico")',
+    "desktop runtime window icon embeds checked-in app icon",
+  );
+  checkTextIncludes(
+    "apps/desktop/src-tauri/src/main.rs",
+    mainSource,
+    ".set_icon(",
+    "desktop runtime window icon is applied at startup",
+  );
+  checkTextIncludes(
+    "apps/desktop/src-tauri/src/main.rs",
+    mainSource,
+    "apply_windows_window_icons",
+    "desktop runtime window icon applies Windows-specific icon handles",
+  );
+  checkTextIncludes(
+    "apps/desktop/src-tauri/src/main.rs",
+    mainSource,
+    "WM_SETICON",
+    "desktop runtime window icon sets Win32 window icon handles",
+  );
+  checkTextIncludes(
+    "apps/desktop/src-tauri/src/main.rs",
+    mainSource,
+    "ICON_BIG",
+    "desktop runtime window icon sets the large taskbar icon",
+  );
+  checkTextIncludes(
+    "apps/desktop/src-tauri/src/main.rs",
+    mainSource,
+    "ICON_SMALL2",
+    "desktop runtime window icon sets the secondary small icon",
+  );
+  checkTextIncludes(
+    "apps/desktop/src-tauri/src/main.rs",
+    mainSource,
+    "select_ico_resource",
+    "desktop runtime window icon selects an ICO resource frame",
+  );
+
+  const hooks = readText("apps/desktop/src-tauri/nsis/shortcut-icons.nsh");
+  checkTextIncludes(
+    "apps/desktop/src-tauri/nsis/shortcut-icons.nsh",
+    hooks,
+    "!macro NSIS_HOOK_POSTINSTALL",
+    "NSIS postinstall hook refreshes shortcut icons",
+  );
+  checkTextIncludes(
+    "apps/desktop/src-tauri/nsis/shortcut-icons.nsh",
+    hooks,
+    'CreateShortcut "$SMPROGRAMS\\${PRODUCTNAME}.lnk" "$INSTDIR\\${MAINBINARYNAME}.exe" "" "$INSTDIR\\ds-agent-icon.ico" 0',
+    "start menu shortcut explicitly uses installed app icon file",
+  );
+  checkTextIncludes(
+    "apps/desktop/src-tauri/nsis/shortcut-icons.nsh",
+    hooks,
+    'CreateShortcut "$SMPROGRAMS\\$AppStartMenuFolder\\${PRODUCTNAME}.lnk" "$INSTDIR\\${MAINBINARYNAME}.exe" "" "$INSTDIR\\ds-agent-icon.ico" 0',
+    "start menu folder shortcut explicitly uses installed app icon file",
+  );
+  checkTextIncludes(
+    "apps/desktop/src-tauri/nsis/shortcut-icons.nsh",
+    hooks,
+    'CreateShortcut "$DESKTOP\\${PRODUCTNAME}.lnk" "$INSTDIR\\${MAINBINARYNAME}.exe" "" "$INSTDIR\\ds-agent-icon.ico" 0',
+    "desktop shortcut explicitly uses installed app icon file",
+  );
+  checkTextIncludes(
+    "apps/desktop/src-tauri/nsis/shortcut-icons.nsh",
+    hooks,
+    'Delete "$DESKTOP\\${PRODUCTNAME}.lnk"',
+    "desktop shortcut is deleted before recreation to avoid stale icon metadata",
+  );
+  checkTextIncludes(
+    "apps/desktop/src-tauri/nsis/shortcut-icons.nsh",
+    hooks,
+    "SHChangeNotify",
+    "installer notifies Windows shell after refreshing shortcut icons",
+  );
 }
 
 function checkRequiredDocs() {
@@ -774,10 +894,10 @@ function checkRequiredDocs() {
     "Optional local web-search bridge readiness v1",
     "uses only a configured local loopback bridge for supported providers",
     "maps returned source URLs into the same evidence and audit trail",
-    "Setup directory clarity v1",
-    "keeps program files, app data, workspace, evidence, and export folders separate",
-    "stores setup choices in the current user's app data directory",
-    "uses native folder pickers for workspace, evidence, and export locations",
+    "Setup directory clarity v2",
+    "keeps program files and app data separate from the user-selected workspace",
+    "stores that single setup choice in the current user's app data directory",
+    "automatically manages evidence, exports, reports, runs, sources, work packages, memory, and logs under that workspace",
     "Windows packaging clarity v1",
     "builds the local Windows preview as an NSIS installer",
     "keeps macOS packaging configured but pending verification on a macOS host",
@@ -786,8 +906,8 @@ function checkRequiredDocs() {
     "keeps pending and failed attempts in the approval trail so users can see why screen inspection did not run",
     "Screen inspection consent v1",
     "treats screen capture as a sensitive desktop read",
-    "asks for approval before capture in the default risk-aware mode",
-    "allows medium-risk reads only after policy evaluation in limited automation mode",
+    "runs screen capture without an extra prompt in the default full-access mode",
+    "medium-risk reads remain policy-evaluated in limited automation mode",
     "Local screenshot storage clarity v1",
     "saves approved PNG screenshots under `computer-screenshots/`",
     "uses the selected evidence folder, or app data before first-run setup",
@@ -999,12 +1119,12 @@ function checkRequiredDocs() {
   );
 
   if (
-    !releaseNotes.includes("source-first release") ||
-    !releaseNotes.includes("No public installer binaries")
+    !releaseNotes.includes("Windows installer prerelease") ||
+    !releaseNotes.includes("WebView2 bootstrapper")
   ) {
-    failures.push("release notes must document source-first public release packaging");
+    failures.push("release notes must document Windows installer prerelease packaging");
   } else {
-    checks.push("release notes source-first packaging");
+    checks.push("release notes Windows installer prerelease packaging");
   }
 }
 
@@ -1487,6 +1607,24 @@ function checkPublicReleaseCopyPositioning() {
     "README.md bounded repair loop positioning",
   );
   checkTextIncludesCollapsed(
+    "README.md",
+    readme,
+    "goal loop contract",
+    "README.md goal loop contract positioning",
+  );
+  checkTextIncludesCollapsed(
+    "README.md",
+    readme,
+    "done-when criteria, completion verifier, stop conditions, and near-miss guardrails",
+    "README.md goal completion verifier positioning",
+  );
+  checkTextIncludesCollapsed(
+    "README.md",
+    readme,
+    "one short, task-grounded next-better suggestion",
+    "README.md completion advice positioning",
+  );
+  checkTextIncludesCollapsed(
     "docs/RELEASE_NOTES_v0.1.0.md",
     releaseNotes,
     "harness architecture",
@@ -1521,6 +1659,78 @@ function checkPublicReleaseCopyPositioning() {
     releaseNotes,
     "bounded repair loops keep failed-step retries small",
     "release notes bounded repair loop positioning",
+  );
+  checkTextIncludesCollapsed(
+    "docs/RELEASE_NOTES_v0.1.0.md",
+    releaseNotes,
+    "v0.1.0-rc.6 Update",
+    "release notes rc.6 update heading",
+  );
+  checkTextIncludes(
+    "apps/desktop/src-tauri/src/commands.rs",
+    readText("apps/desktop/src-tauri/src/commands.rs"),
+    'APP_UPDATE_CURRENT_RELEASE_TAG: &str = "v0.1.0-rc.6"',
+    "app updater current release tag rc.6",
+  );
+  checkTextIncludes(
+    "apps/desktop/src-tauri/src/commands.rs",
+    readText("apps/desktop/src-tauri/src/commands.rs"),
+    'pub fn download_app_update() -> Result<AppUpdateDownloadResult, String>',
+    "app updater has background download command",
+  );
+  checkTextIncludes(
+    "apps/desktop/src-tauri/src/commands.rs",
+    readText("apps/desktop/src-tauri/src/commands.rs"),
+    'args: vec!["/S".to_string()]',
+    "app updater uses silent NSIS installer flag",
+  );
+  checkTextIncludes(
+    "apps/desktop/src/App.tsx",
+    readText("apps/desktop/src/App.tsx"),
+    'invoke<AppUpdateDownloadResult>("download_app_update")',
+    "app update UI downloads update before install click",
+  );
+  checkTextIncludes(
+    "apps/desktop/src/App.tsx",
+    readText("apps/desktop/src/App.tsx"),
+    "copy.appUpdate.downloading",
+    "app update UI shows downloading state",
+  );
+  checkTextIncludes(
+    "apps/desktop/src/App.tsx",
+    readText("apps/desktop/src/App.tsx"),
+    "copy.appUpdate.install",
+    "app update UI shows install-ready state",
+  );
+  checkTextIncludesCollapsed(
+    "docs/RELEASE_NOTES_v0.1.0.md",
+    releaseNotes,
+    "Lets users drag local files onto the input box",
+    "release notes attachment drag-drop update",
+  );
+  checkTextIncludesCollapsed(
+    "docs/RELEASE_NOTES_v0.1.0.md",
+    releaseNotes,
+    "shows compact attachment cards above the input",
+    "release notes attachment composer card update",
+  );
+  checkTextIncludesCollapsed(
+    "docs/RELEASE_NOTES_v0.1.0.md",
+    releaseNotes,
+    "Fixes the Windows desktop shortcut and taskbar icon refresh path",
+    "release notes Windows shortcut icon refresh fix",
+  );
+  checkTextIncludesCollapsed(
+    "docs/RELEASE_NOTES_v0.1.0.md",
+    releaseNotes,
+    "goal contract context with the user's real goal, constraints, done-when criteria, completion verifier, stop conditions, and near-miss guardrails",
+    "release notes goal loop contract feature",
+  );
+  checkTextIncludesCollapsed(
+    "docs/RELEASE_NOTES_v0.1.0.md",
+    releaseNotes,
+    "one short, task-grounded suggestion for a better next step",
+    "release notes completion advice feature",
   );
 
   const workflow = readText("apps/desktop/src-tauri/src/kernel/workflow.rs");
@@ -1712,6 +1922,136 @@ function checkAppFallbackCopyPositioning() {
     } else {
       checks.push(`${filePath} fallback copy user-facing wording: ${phrase}`);
     }
+  }
+}
+
+function checkChatFirstRunStatusUi() {
+  const appPath = "apps/desktop/src/App.tsx";
+  const i18nPath = "apps/desktop/src/i18n.ts";
+  const stylesPath = "apps/desktop/src/styles.css";
+
+  for (const filePath of [appPath, i18nPath, stylesPath]) {
+    if (!existsSync(filePath)) {
+      failures.push(`${filePath} is required for chat-first run status UI`);
+      return;
+    }
+  }
+
+  const app = readText(appPath);
+  const i18n = readText(i18nPath);
+  const styles = readText(stylesPath);
+
+  const requiredAppSnippets = [
+    "runStatusSteps",
+    "className=\"run-status-panel\"",
+    "className=\"workflow-step-list\"",
+    "className=\"inspector-details\"",
+    "copy.runStatus.title",
+    "copy.runStatus.workflowSteps",
+  ];
+
+  for (const snippet of requiredAppSnippets) {
+    checkTextIncludes(appPath, app, snippet, `chat-first run status app snippet: ${snippet}`);
+  }
+
+  for (const phrase of [
+    "任务状态",
+    "运行步骤",
+    "Run Status",
+    "Workflow Steps",
+  ]) {
+    checkTextIncludes(i18nPath, i18n, phrase, `chat-first run status copy: ${phrase}`);
+  }
+
+  for (const snippet of [
+    ".run-status-panel",
+    ".workflow-step-list",
+    ".workflow-step-marker",
+    ".inspector-details",
+    ".setup-disclosure",
+  ]) {
+    checkTextIncludes(stylesPath, styles, snippet, `chat-first run status style: ${snippet}`);
+  }
+}
+
+function checkChatFirstCenterWorkbenchUi() {
+  const appPath = "apps/desktop/src/App.tsx";
+  const i18nPath = "apps/desktop/src/i18n.ts";
+  const stylesPath = "apps/desktop/src/styles.css";
+
+  for (const filePath of [appPath, i18nPath, stylesPath]) {
+    if (!existsSync(filePath)) {
+      failures.push(`${filePath} is required for chat-first center workbench UI`);
+      return;
+    }
+  }
+
+  const app = readText(appPath);
+  const i18n = readText(i18nPath);
+  const styles = readText(stylesPath);
+
+  for (const snippet of [
+    "className=\"sidebar-controls\"",
+    "className=\"sidebar-tool operations-tool\"",
+    "className=\"sidebar-tool package-tool\"",
+    "className=\"sidebar-tool memory-tool\"",
+    "className=\"sidebar-tool settings-tool\"",
+    "copy.skills.title",
+    "className=\"skill-plugin-card\"",
+    "className=\"brand-row\"",
+    "className=\"app-update-slot brand-update-slot\"",
+    "renderLegacyCenterManagementPanels",
+    "className=\"agent-chat-panel\"",
+    "aria-label={copy.chatWorkbench.title}",
+    "className=\"chat-thread\"",
+    "className=\"chat-message assistant pending\"",
+    'className={`chat-composer${agentAttachmentDragActive ? " drag-active" : ""}`}',
+    "className=\"sidebar-record-list\"",
+    "onSubmit={sendAgentMessage}",
+    "agentMessages.map",
+    "run_agent_chat",
+    "className=\"setup-modal-backdrop\"",
+    "copy.chatWorkbench.deepSeekKeyTitle",
+    "copy.chatWorkbench.workspaceTitle",
+    "copy.chatWorkbench.networkSearchTitle",
+    "copy.chatWorkbench.title",
+    "copy.chatWorkbench.composerPlaceholder",
+  ]) {
+    checkTextIncludes(appPath, app, snippet, `chat-first center workbench app snippet: ${snippet}`);
+  }
+
+  for (const phrase of [
+    "DeepSeek 对话工作台",
+    "输入问题、文字或指令",
+    "技能与插件",
+    "请输入 DeepSeek API key",
+    "DeepSeek Chat Workbench",
+    "Enter a question, text, or instruction",
+    "Skills & Plugins",
+    "Enter a DeepSeek API key",
+  ]) {
+    checkTextIncludes(i18nPath, i18n, phrase, `chat-first center workbench copy: ${phrase}`);
+  }
+
+  for (const snippet of [
+    ".sidebar-controls",
+    ".brand-row",
+    ".brand-update-slot",
+    ".sidebar-tools",
+    ".sidebar-tool",
+    ".sidebar-record-row",
+    ".skill-plugin-card",
+    ".agent-chat-panel",
+    ".chat-thread",
+    ".chat-message",
+    ".chat-message.pending",
+    ".chat-composer",
+    ".chat-session-meta",
+    ".composer-actions",
+    ".setup-modal-backdrop",
+    ".setup-modal",
+  ]) {
+    checkTextIncludes(stylesPath, styles, snippet, `chat-first center workbench style: ${snippet}`);
   }
 }
 
@@ -2032,7 +2372,7 @@ function checkWindowsValidationStatusDocs() {
   checkTextIncludesCollapsed(
     "README.md",
     readme,
-    "Windows build/install/launch/run path is locally verified",
+    "Windows build/install/launch/run path is verified through the repeatable release gate",
     "README.md Windows local validation status",
   );
   checkTextIncludesCollapsed(
@@ -2170,8 +2510,8 @@ function checkReleaseGateDocs() {
     checkTextIncludesCollapsed(
       docPath,
       content,
-      "Before any publication decision for a new source-only prerelease, run the local release-candidate gate",
-      `${docPath} source-only prerelease gate docs`,
+      "Before any publication decision for a new prerelease, run the local release-candidate gate",
+      `${docPath} prerelease gate docs`,
     );
     checkTextIncludesCollapsed(
       docPath,
@@ -2799,6 +3139,12 @@ function checkComputerUseDocs() {
   checkTextIncludesCollapsed(
     "docs/RELEASE_NOTES_v0.1.0.md",
     releaseNotes,
+    "screen capture follows the selected access-mode policy",
+    "release notes screen-capture access-mode policy",
+  );
+  checkTextIncludesCollapsed(
+    "docs/RELEASE_NOTES_v0.1.0.md",
+    releaseNotes,
     "computer control also needs a one-shot approval",
     "release notes user-facing computer-control one-shot wording",
   );
@@ -3171,8 +3517,8 @@ function checkOpenSourceReleaseStatus() {
   checkTextIncludesCollapsed(
     "docs/OPEN_SOURCE_RELEASE.md",
     openSourceRelease,
-    "If publication resumes, publish the current hardening snapshot only as a new source-only prerelease",
-    "open-source release source-only prerelease strategy",
+    "For the `v0.1.0` RC line, publish a new prerelease with the Windows installer attached after final verification passes",
+    "open-source release Windows installer prerelease strategy",
   );
   checkTextIncludesCollapsed(
     "docs/OPEN_SOURCE_RELEASE.md",
@@ -3907,6 +4253,21 @@ function checkOperationsBriefingSeedEvidence() {
     }
     checks.push(`${docPath} seed evidence blank-template docs`);
   }
+}
+
+function checkBuiltinPluginPackages() {
+  const result = spawnSync(process.execPath, ["scripts/validate-builtin-plugins.mjs"], {
+    encoding: "utf8",
+  });
+
+  if (result.status !== 0) {
+    failures.push(
+      `builtin plugin package validation failed: ${(result.stderr || result.stdout).trim()}`,
+    );
+    return;
+  }
+
+  checks.push("builtin plugin package validation");
 }
 
 function checkGitignoreEntries() {

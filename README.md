@@ -58,21 +58,22 @@ engineering inspiration, with respect for their licenses and maintainers.
 
 ## 0.1.0 Status / 0.1.0 状态
 
-Version `0.1.0` is the current Windows-first test candidate in the source tree.
-The codebase is not a finished agent product yet. The current Windows
-build/install/launch/run path is locally verified through the repeatable
-release gate and installed UI workflow smoke. This commit is intended for
-maintainer testing before any new GitHub tag or release is published.
+Version `0.1.0` is the current Windows-first release-candidate line. The
+codebase is not a finished agent product yet. The current Windows
+build/install/launch/run path is verified through the repeatable release gate
+and installed UI workflow smoke before each prerelease. The `v0.1.0` candidate
+prereleases include a Windows NSIS installer for ordinary colleagues to
+download and test.
 
 After the Windows preview continues to pass local release gates, the next
 platform target is macOS. A macOS Tauri packaging config already exists in the
 repository, but macOS validation and release work will follow after the Windows
 preview continues to pass local release gates.
 
-`0.1.0` 是当前源码树里的 Windows 优先测试候选版本，还不是完整成熟的 Agent 产品。
-当前 Windows 构建、安装、启动和运行路径已经通过本地 release gate 与 installed UI
-workflow smoke 验证。本次先上传代码供维护者人工测试，暂不创建新的 GitHub tag 或
-release。
+`0.1.0` 是当前 Windows 优先 release-candidate 版本线，还不是完整成熟的 Agent 产品。
+每次 prerelease 前，当前 Windows 构建、安装、启动和运行路径都要通过本地 release gate
+与 installed UI workflow smoke 验证。`v0.1.0` candidate prerelease 附带 Windows
+NSIS 安装包，方便普通同事直接下载测试。
 
 Windows 预览版持续通过本地 release gates 后，下一步会推进 macOS 版本。仓库里已经保
 留了 macOS 的 Tauri 打包配置，macOS 的验证和发布会在 Windows 预览版持续通过本地
@@ -80,9 +81,11 @@ release gates 后推进。
 
 License: Apache-2.0.
 
-The public `v0.0.1` release remains unchanged. Windows installer artifacts can
-be built locally for validation, but public binary distribution should stay
-conservative until signing, packaging, and provenance are ready.
+The public `v0.0.1` release remains unchanged. The `v0.1.0` prerelease line is
+the first Windows installer candidate line for colleague testing. The installer
+is unsigned, so Windows may show an unknown-publisher warning, but the NSIS
+package is built with the Microsoft WebView2 bootstrapper embedded and run
+silently so ordinary Windows users do not need a developer toolchain.
 
 ## Basic Functions / 基本功能
 
@@ -100,6 +103,8 @@ The current codebase is intended to provide these basic functions:
 - Permissioned tool surfaces for file, network, browser, terminal,
   local-folder read/export, email read/draft/send approval records, and
   Computer Use operations.
+- Audited Windows local filesystem mutations from chat for explicit file and
+  directory create, update, delete, and rename requests.
 - Append-only local audit records for access requests, approvals, tool
   attempts, workflow runs, memory records, and work packages.
 - Memory Studio for reviewable memories, edits, deletion, expiration, linked
@@ -118,7 +123,8 @@ The current codebase is intended to provide these basic functions:
   - Uses blank operator templates under
     `docs/templates/operations-briefing-evidence/` for local evidence-folder
     seeding.
-- Windows NSIS debug installer build path for local validation.
+- Windows NSIS installer build path for local validation and RC distribution,
+  including an embedded Microsoft WebView2 bootstrapper.
 
 Current limits are intentional: real mailbox connectors, real cloud-drive
 connectors, automatic local bridge-service management, hosted sync, broad
@@ -129,12 +135,14 @@ plugin execution, and polished signed installers are not complete in `0.1.0`.
 当前代码库的基础功能目标如下：
 
 - 基于 Tauri、React、TypeScript 和 Rust 的 Windows 桌面应用外壳。
-- 本地优先的工作目录设置，包括工作区、证据目录和导出目录。
+- 本地优先的工作目录设置：首次只选择一个工作目录，证据、导出、报告、运行记录和工作包等子目录由 DS Agent 自动维护。
 - 通过本地 `DEEPSEEK_API_KEY` 环境变量检测 DeepSeek 可用性，但不保存、不展示密钥
   明文。
 - 可选的本地 DeepSeek 联调脚本，用于 Chat Completions 和经营简报合成验证。
 - 面向文件、网络、浏览器、终端、本地文件夹读取/导出、邮件读取/草稿/发送审批记录和
   Computer Use 的权限化工具入口。
+- 从聊天中执行经过审计的 Windows 本地文件系统变更，包括明确提出的文件/目录创建、
+  修改、删除和重命名。
 - 本地追加式审计记录，用于记录授权请求、审批、工具调用、工作流运行、记忆记录和工
   作包。
 - Memory Studio，用于记忆候选、编辑、删除、过期、关联记忆标题/正文搜索、关联记忆搜索命中来源、
@@ -147,7 +155,8 @@ plugin execution, and polished signed installers are not complete in `0.1.0`.
   - 导入工作包时预览新增/跳过的工作流模板、待审核记忆候选和归档简报运行。
   - 导入归档运行保持只读回放详情，同时保留已清理的源机器证据句柄作为安全边界。
   - 使用 `docs/templates/operations-briefing-evidence/` 下的空白运营模板进行本地证据目录初始化。
-- Windows NSIS debug installer 构建路径，便于本地验证安装和运行。
+- Windows NSIS 安装包构建路径，便于本地验证和 RC 分发，并内置 Microsoft WebView2
+  bootstrapper。
 
 当前限制也要说清楚：`0.1.0` 还没有完成真实邮箱连接器、真实云盘连接器、自动安装或管理本地桥接服务、
 云同步、广泛插件执行和正式签名安装包。这一版先把 Windows 本地可运行和 DeepSeek 基础支持打牢。
@@ -172,9 +181,17 @@ Desktop source commands:
 ```powershell
 npx pnpm@9.15.9 install
 npx pnpm@9.15.9 test
+npx pnpm@9.15.9 tauri:dev
 npx pnpm@9.15.9 --filter @deepseek-agent-os/desktop tauri build --debug
 npx pnpm@9.15.9 dev
 ```
+
+Use `tauri:dev` for the real DS Agent desktop window. The root `dev` command
+starts only the Vite web preview and is useful for frontend layout work, but it
+does not provide the Tauri command bridge that the chat workflow uses. On
+Windows, `tauri:dev` automatically keeps Rust build output under the system
+temporary directory when `CARGO_TARGET_DIR` is not set, avoiding MinGW path
+parsing failures when the source checkout path contains spaces.
 
 `pnpm test` runs the repository secret scan, desktop frontend build, and Rust
 tests. The scan covers tracked files plus unignored new files. On Windows, the
@@ -189,7 +206,7 @@ To run only the repository secret scan before committing or pushing:
 npx pnpm@9.15.9 test:secrets
 ```
 
-Before any publication decision for a new source-only prerelease, run the local
+Before any publication decision for a new prerelease, run the local
 release-candidate gate:
 
 ```powershell
@@ -199,10 +216,11 @@ npx pnpm@9.15.9 test:release-local
 This runs the full project test, working-tree and staged diff whitespace checks
 (`git diff --check` and `git diff --cached --check`), and the source-only
 release guard. The source-only guard checks version/name consistency, required
-release docs, generated WebView2 loader ignore coverage, and currently tracked
-or unignored files for accidental installer/binary release artifacts, local
-runtime artifacts, generated workflow exports, unexpected binary files,
-oversized source files, and stale smoke-test release labels.
+release docs, generated WebView2 loader ignore coverage, Windows WebView2
+bootstrapper packaging config, and currently tracked or unignored files for
+accidental installer/binary release artifacts, local runtime artifacts,
+generated workflow exports, unexpected binary files, oversized source files,
+and stale smoke-test release labels.
 The local gate also runs deterministic helper checks for the Windows local
 Operations Briefing smoke helper, the installed UI helper, and the release-local
 helper itself; the Windows local helper self-test does not call DeepSeek or read
@@ -275,8 +293,10 @@ npx pnpm@9.15.9 test:windows-installed-ui -- --workflow
 ```
 
 Windows builds automatically merge `apps/desktop/src-tauri/tauri.windows.conf.json`
-and produce an NSIS installer under the configured Cargo target directory,
-for example `debug/bundle/nsis/DS Agent_0.1.0_x64-setup.exe`.
+and produce an NSIS installer under the configured Cargo target directory, for
+example `release/bundle/nsis/DS Agent_0.1.0_x64-setup.exe`. The Windows config
+embeds the Microsoft WebView2 bootstrapper and runs it silently during install
+when the target machine needs the WebView2 runtime.
 
 macOS builds have a separate platform config at
 `apps/desktop/src-tauri/tauri.macos.conf.json` for `.app` and `.dmg` packaging.
@@ -290,8 +310,9 @@ not used as the workspace or data directory.
 - Program files live in the installer-selected application location.
 - App state, SQLite events, logs, and local settings live under the OS-provided
   app data directory.
-- First run asks for a default workspace, evidence folder, and export folder,
-  with native folder picker buttons for each path.
+- First run asks for one workspace. Evidence, exports, reports, runs, work
+  packages, and related artifact folders are managed automatically under that
+  workspace.
 - File, folder, Drive-local, evidence, and export-package paths remain runtime
   user inputs on the user's own machine.
 - Local directory settings are stored as `local-directories.json` under the app
@@ -311,12 +332,29 @@ get faster feedback while deeper workflows can still verify their evidence. The
 first public preview brings the desktop shell, local event history, policy
 model, and DeepSeek route model into one buildable Windows app.
 
+The model boundary is explicit: DeepSeek handles open-ended reasoning,
+understanding, planning, and generation, while DS Agent handles deterministic
+local preflight, protocol context, permission checks, workspace structure, tool
+execution, audit records, and artifacts. Model-returned actions are proposals
+until DS Agent validates them against local policy. See
+[`docs/AGENT_MODEL_BOUNDARY.md`](docs/AGENT_MODEL_BOUNDARY.md).
+
 Context receipts show loop mode, workflow policy, selected evidence, memory,
 model route, token/cache state, validation results, and intentional omissions.
 Markdown and HTML report exports carry the same context receipt summary.
 Bounded repair loops rerun only the failed step with the smallest useful
 context, so DS Agent can keep ordinary tasks responsive while still leaving a
 reviewable trail for longer workflow runs.
+
+Central chat tasks now carry a goal loop contract through the run: DS Agent
+packages the user's real goal, constraints, done-when criteria, completion
+verifier, stop conditions, and near-miss guardrails before asking DeepSeek for
+reasoning. Local, browser, file, Office, and tool outcomes are treated as
+complete only when DS Agent can observe evidence that matches the user's goal.
+If the user adds supplementary guidance during a running task, DS Agent folds it
+into the same task at the next small node and keeps the right-side run status in
+sync. Completed or partially completed results can include one short,
+task-grounded next-better suggestion.
 
 The current 0.1.0 preview includes the permission loop for built-in local
 tools. Built-in local tools cover file, network, browser, email approval
@@ -355,10 +393,11 @@ accounts, while screen inspection and computer control use the configured bridge
 or local Windows/macOS route. No API key or account credential is stored by this
 settings slice.
 
-Setup directory clarity v1 keeps program files, app data, workspace, evidence,
-and export folders separate. It stores setup choices in the current user's app
-data directory and uses native folder pickers for workspace, evidence, and
-export locations.
+Setup directory clarity v2 keeps program files and app data separate from the
+user-selected workspace. DS Agent stores that single setup choice in the current
+user's app data directory, uses a native folder picker for the workspace, and
+automatically manages evidence, exports, reports, runs, sources, work packages,
+memory, and logs under that workspace.
 
 Windows packaging clarity v1 builds the local Windows preview as an NSIS
 installer. It keeps macOS packaging configured but pending verification on a
@@ -420,8 +459,8 @@ with readable audit references. It keeps pending and failed attempts in the
 approval trail so users can see why screen inspection did not run.
 
 Screen inspection consent v1 treats screen capture as a sensitive desktop read.
-It asks for approval before capture in the default risk-aware mode, and allows
-medium-risk reads only after policy evaluation in limited automation mode.
+It runs screen capture without an extra prompt in the default full-access mode,
+while medium-risk reads remain policy-evaluated in limited automation mode.
 
 Local screenshot storage clarity v1 saves approved PNG screenshots under
 `computer-screenshots/`. It uses the selected evidence folder, or app data before

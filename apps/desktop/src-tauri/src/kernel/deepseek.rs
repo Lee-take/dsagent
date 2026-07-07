@@ -14,7 +14,9 @@ pub const DEEPSEEK_FLASH_MODEL: &str = "deepseek-v4-flash";
 pub const DEEPSEEK_PRO_MODEL: &str = "deepseek-v4-pro";
 pub const DEEPSEEK_API_BASE_URL: &str = "https://api.deepseek.com";
 pub const DEEPSEEK_CHAT_COMPLETIONS_PATH: &str = "/chat/completions";
+pub const DEEPSEEK_USER_BALANCE_PATH: &str = "/user/balance";
 pub const DEEPSEEK_API_KEY_ENV: &str = "DEEPSEEK_API_KEY";
+pub const DEEPSEEK_CHAT_HTTP_TIMEOUT_SECS: u64 = 90;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DeepSeekCredentialStatus {
@@ -26,6 +28,21 @@ pub struct DeepSeekCredentialStatus {
     pub flash_model: String,
     pub pro_model: String,
     pub readiness_note: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DeepSeekUserBalanceInfo {
+    pub currency: String,
+    pub total_balance: String,
+    pub granted_balance: String,
+    pub topped_up_balance: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DeepSeekUserBalanceResponse {
+    pub is_available: bool,
+    #[serde(default)]
+    pub balance_infos: Vec<DeepSeekUserBalanceInfo>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -216,7 +233,9 @@ impl HttpDeepSeekChatCompletionTransport {
     pub fn new() -> Result<Self, String> {
         let client = reqwest::blocking::Client::builder()
             .user_agent("DeepSeek-Agent-OS/0.1.0 deepseek-chat")
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(std::time::Duration::from_secs(
+                DEEPSEEK_CHAT_HTTP_TIMEOUT_SECS,
+            ))
             .build()
             .map_err(|error| format!("deepseek chat client setup failed: {error}"))?;
 
@@ -253,6 +272,36 @@ impl DeepSeekChatCompletionTransport for HttpDeepSeekChatCompletionTransport {
 
         serde_json::from_str::<DeepSeekChatCompletionResponse>(&body)
             .map_err(|error| format!("deepseek chat response could not be parsed: {error}"))
+    }
+}
+
+impl HttpDeepSeekChatCompletionTransport {
+    pub fn get_user_balance(
+        &self,
+        endpoint: &str,
+        api_key: &str,
+    ) -> Result<DeepSeekUserBalanceResponse, String> {
+        let response = self
+            .client
+            .get(endpoint)
+            .bearer_auth(api_key)
+            .send()
+            .map_err(|error| format!("deepseek balance request failed: {error}"))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .map_err(|error| format!("deepseek balance response could not be read: {error}"))?;
+
+        if !status.is_success() {
+            return Err(format!(
+                "deepseek balance request returned HTTP {}: {}",
+                status.as_u16(),
+                truncate_for_error(&body, 240)
+            ));
+        }
+
+        serde_json::from_str::<DeepSeekUserBalanceResponse>(&body)
+            .map_err(|error| format!("deepseek balance response could not be parsed: {error}"))
     }
 }
 
@@ -475,6 +524,21 @@ pub fn execute_deepseek_chat_completion(
         .map_err(|error| redact_secret(&error, &api_key))
 }
 
+pub fn execute_deepseek_user_balance(
+    transport: &HttpDeepSeekChatCompletionTransport,
+    api_key: &str,
+) -> Result<DeepSeekUserBalanceResponse, String> {
+    let api_key = api_key.trim().to_string();
+    if api_key.is_empty() {
+        return Err(format!("{DEEPSEEK_API_KEY_ENV} is required"));
+    }
+
+    let endpoint = format!("{DEEPSEEK_API_BASE_URL}{DEEPSEEK_USER_BALANCE_PATH}");
+    transport
+        .get_user_balance(&endpoint, &api_key)
+        .map_err(|error| redact_secret(&error, &api_key))
+}
+
 pub fn execute_deepseek_chat_completion_with_cache(
     transport: &impl DeepSeekChatCompletionTransport,
     cache: &(impl DeepSeekChatCompletionCache + ?Sized),
@@ -614,10 +678,15 @@ mod tests {
         DeepSeekChatCompletionCache, DeepSeekChatCompletionResponse,
         DeepSeekChatCompletionTransport, DeepSeekChatCompletionUsage,
         DeepSeekMemoryChatCompletionCache, DeepSeekOperationsBriefingSynthesizer,
-        DeepSeekThinkingMode, HttpDeepSeekChatCompletionTransport, DEEPSEEK_API_BASE_URL,
-        DEEPSEEK_API_KEY_ENV, DEEPSEEK_CHAT_COMPLETIONS_PATH, DEEPSEEK_FLASH_MODEL,
-        DEEPSEEK_PRO_MODEL,
+        DeepSeekThinkingMode, DeepSeekUserBalanceResponse, HttpDeepSeekChatCompletionTransport,
+        DEEPSEEK_API_BASE_URL, DEEPSEEK_API_KEY_ENV, DEEPSEEK_CHAT_COMPLETIONS_PATH,
+        DEEPSEEK_CHAT_HTTP_TIMEOUT_SECS, DEEPSEEK_FLASH_MODEL, DEEPSEEK_PRO_MODEL,
     };
+
+    #[test]
+    fn deepseek_chat_http_timeout_allows_long_agent_followups() {
+        assert!(DEEPSEEK_CHAT_HTTP_TIMEOUT_SECS >= 90);
+    }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     struct FakeDeepSeekCall {
@@ -945,6 +1014,29 @@ mod tests {
 
         assert!(error.contains("[REDACTED]"));
         assert!(!error.contains("test-secret-token"));
+    }
+
+    #[test]
+    fn user_balance_response_parses_official_schema() {
+        let response = serde_json::from_str::<DeepSeekUserBalanceResponse>(
+            r#"{
+              "is_available": true,
+              "balance_infos": [
+                {
+                  "currency": "CNY",
+                  "total_balance": "110.00",
+                  "granted_balance": "10.00",
+                  "topped_up_balance": "100.00"
+                }
+              ]
+            }"#,
+        )
+        .expect("official balance response parses");
+
+        assert!(response.is_available);
+        assert_eq!(response.balance_infos.len(), 1);
+        assert_eq!(response.balance_infos[0].currency, "CNY");
+        assert_eq!(response.balance_infos[0].total_balance, "110.00");
     }
 
     #[test]

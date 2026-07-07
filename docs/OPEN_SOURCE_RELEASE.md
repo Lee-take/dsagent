@@ -14,7 +14,7 @@ Ship a buildable local-first desktop Agent OS preview that demonstrates:
 - Memory Studio with explicit review and conflict actions;
 - an Operations Briefing workflow pack using local evidence and DeepSeek
   synthesis when configured;
-- Windows debug installer packaging, source build instructions, and a locally
+- Windows installer packaging, source build instructions, and a locally
   verified Windows build/install/launch/run path through the local release gate
   and installed UI workflow smoke.
 - A platform roadmap that keeps the Windows checkpoint first, then validates
@@ -37,10 +37,11 @@ Ship a buildable local-first desktop Agent OS preview that demonstrates:
 - Confirm repository visibility and project owner name.
 - Keep the already-published `v0.0.1` source snapshot, tag, and release
   unchanged.
-- If publication resumes, publish the current hardening snapshot only as a new
-  source-only prerelease.
-- Attach no unsigned installer artifacts unless the maintainer later approves
-  binary distribution explicitly for that specific prerelease.
+- For the `v0.1.0` RC line, publish a new prerelease with the Windows installer
+  attached after final verification passes.
+- The Windows installer should embed the Microsoft WebView2 bootstrapper so
+  ordinary users do not need a developer toolchain or a separate WebView2 setup
+  step.
 - Run final local release-candidate verification on the release branch before
   any publication decision.
 - Prepare release notes that call out preview limits plainly.
@@ -51,18 +52,17 @@ Ship a buildable local-first desktop Agent OS preview that demonstrates:
   reproducible for users who downloaded the generated source archive. The older
   `v0.1-alpha` tag is historical and should not be treated as the current
   project version.
-- If post-release hardening commits should become a released source snapshot,
-  create a new source-only prerelease tag instead of rewriting an old tag.
-- Maintainer decision on 2026-07-01: keep the already-published `v0.0.1`
-  tag/release unchanged and use a new source-only prerelease tag for the
-  current hardening snapshot.
+- If post-release hardening commits should become a released snapshot, create a
+  new prerelease tag instead of rewriting an old tag.
+- The older source-only publication decision is superseded by the
+  `v0.1.0` Windows installer prerelease plan.
 - Keep patch prereleases focused on release hygiene, security checks,
   documentation corrections, Windows run reliability, or DeepSeek compatibility
   verification. Do not use patch releases to add broad new product capabilities
   outside the existing DeepSeek-first workflows, permissions, memory, Windows
   setup behavior, and Operations Briefing scope.
-- Do not attach unsigned installer binaries unless the maintainer explicitly
-  approves binary distribution for that release.
+- If an unsigned installer is attached, disclose the unsigned status in the
+  release notes and provide a SHA-256 checksum.
 
 ## Release Hygiene Artifacts
 

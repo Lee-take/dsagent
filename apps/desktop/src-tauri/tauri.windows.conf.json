@@ -7,8 +7,18 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installerHooks": "nsis/shortcut-icons.nsh"
+      }
+    },
     "resources": {
-      "generated/windows/WebView2Loader.dll": "WebView2Loader.dll"
+      "generated/windows/WebView2Loader.dll": "WebView2Loader.dll",
+      "icons/icon.ico": "ds-agent-icon.ico"
     }
   }
 }

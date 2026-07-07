@@ -1,12 +1,70 @@
 # DeepSeek Agent OS v0.1.0 Candidate Notes
 
-Status: Windows-first source-tree test candidate. The code is ready to upload
-for maintainer testing, but no new GitHub tag or release should be created
-until the maintainer finishes manual testing and explicitly resumes publication.
+Status: Windows-first release candidate. The `v0.1.0-rc.6` prerelease is
+intended for colleague testing through a GitHub release asset after the final
+local gates pass.
 
-Packaging: source-first release candidate. No public installer binaries are
-attached for this preview unless the maintainer later explicitly approves
-unsigned binary distribution for a specific release.
+Packaging: Windows installer prerelease. The GitHub prerelease should attach
+the NSIS setup executable and its SHA-256 checksum. The installer is unsigned,
+so Windows may show an unknown-publisher warning, but it embeds the Microsoft
+WebView2 bootstrapper and runs it silently when the target machine needs the
+WebView2 runtime. Ordinary users do not need Node.js, pnpm, Rust, or a source
+checkout to run the installed app.
+
+## v0.1.0-rc.6 Update
+
+- Adds task-scoped file and image attachments to the DS Agent chat composer.
+- Lets users drag local files onto the input box, keeps the dropped file order,
+  removes duplicate paths, and shows compact attachment cards above the input.
+- Adds small image thumbnails or file icons for attachments, plus an `x` control
+  to remove mistaken files before sending.
+- Sends bounded attachment context with the current instruction, including text
+  snippets when safe and metadata-only image/file evidence when content is not
+  included in DeepSeek context.
+- Surfaces attachment evidence in the right-side run status so users can see
+  ready, metadata-only, and blocked attachments.
+
+## v0.1.0-rc.5 Update
+
+- Fixes the Windows desktop shortcut and taskbar icon refresh path so installed
+  builds use the DS Agent app icon after upgrades instead of keeping a stale
+  cached shortcut icon.
+- Sets both the normal app icon and the Windows large/small window icons at
+  startup, improving taskbar and Alt-Tab icon consistency.
+
+## v0.1.0-rc.4 Update
+
+- Upgrades the central chat run loop so DS Agent sends DeepSeek a goal contract
+  context with the user's real goal, constraints, done-when criteria,
+  completion verifier, stop conditions, and near-miss guardrails.
+- Strengthens completion semantics: local, browser, file, Office, and tool work
+  is treated as complete only after DS Agent has observable evidence that
+  matches the user's goal, rather than a merely similar model answer.
+- Adds bounded loop behavior for ordinary tasks: verification success stops the
+  loop quickly, repeated failures switch strategy or report a blocker, and
+  missing prerequisites pause the run instead of guessing.
+- Supports in-run supplementary guidance as part of the same task. When the user
+  adds more detail during a running task, DS Agent queues it for the next small
+  node and keeps the right-side run status in sync.
+- Adds completion advice: after a completed or partially completed result, DS
+  Agent can add one short, task-grounded suggestion for a better next step
+  without implying extra work was already performed.
+- Updates the right-side run status for chat tasks to show a lightweight goal
+  loop: understand the task, call DeepSeek or run local actions, apply any
+  supplementary guidance, and validate the result.
+
+## v0.1.0-rc.3 Update
+
+- Adds audited Windows local file actions from chat: create file, update file,
+  delete file, and rename file with absolute local paths.
+- Adds audited Windows local directory actions from chat: create directory,
+  rename directory, and delete directory with absolute local paths.
+- Routes these file and directory mutations through the `FileWrite` capability
+  boundary so access policy, permission audit records, and capability
+  invocations stay visible.
+- Fixes the local directory listing path that could leave the UI waiting for a
+  second terminal-output step after DeepSeek had already planned a bounded
+  directory read.
 
 Maintainer handoff notes, decision logs, and internal planning files are kept as
 local-only continuation material and are intentionally excluded from public
@@ -61,11 +119,13 @@ Windows preview continues to pass local release gates.
 - Permissioned tool surfaces for file, network, browser, terminal,
   local-folder read/export, email read/draft/send approval records, and
   Computer Use operations.
+- Audited Windows local filesystem mutations from chat for explicit create,
+  update, delete, and rename requests on files and directories.
 - Append-only local audit records for access requests, approvals, tool
   attempts, workflow runs, memory records, and work packages.
-- Computer Use remains experimental and high-risk: screenshot/control paths are
-  approval-gated, computer control also needs a one-shot approval plus a local
-  unlock code, and desktop automation is still subject to
+- Computer Use remains experimental and high-risk: screen capture follows the
+  selected access-mode policy, computer control also needs a one-shot approval
+  plus a local unlock code, and desktop automation is still subject to
   foreground desktop, secure desktop, Screen Recording, and Accessibility
   limitations.
 - Memory Studio for reviewable memories, edits, deletion, expiration, linked
@@ -94,7 +154,8 @@ Windows preview continues to pass local release gates.
     tests.
 - Local report and package export paths for Markdown, HTML, lightweight PDF,
   and work-package JSON.
-- Windows NSIS debug installer build path for local validation.
+- Windows NSIS installer build path for local validation and RC distribution,
+  including an embedded Microsoft WebView2 bootstrapper.
 
 ## Current Limits
 
@@ -105,8 +166,8 @@ Windows preview continues to pass local release gates.
 - DS Agent does not install or manage local bridge services in this preview.
 - Hosted sync, account systems, marketplaces, and arbitrary third-party
   executable plugins are not included.
-- Public binary distribution is conservative until signing, packaging, and
-  provenance are ready.
+- The Windows installer is unsigned in this RC, so users may see an
+  unknown-publisher warning until signing is added.
 - PDF export is lightweight and ASCII-safe. Use Markdown or HTML for Chinese or
   other Unicode report content.
 

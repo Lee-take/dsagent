@@ -332,12 +332,11 @@ pub fn capability_risk(capability: CapabilityKind) -> RiskLevel {
     match capability {
         CapabilityKind::FileRead
         | CapabilityKind::NetworkSearch
+        | CapabilityKind::BrowserBrowse
         | CapabilityKind::EmailDraft
         | CapabilityKind::DriveRead
         | CapabilityKind::TerminalRead => RiskLevel::Low,
-        CapabilityKind::BrowserBrowse
-        | CapabilityKind::EmailRead
-        | CapabilityKind::ComputerScreenshot => RiskLevel::Medium,
+        CapabilityKind::EmailRead | CapabilityKind::ComputerScreenshot => RiskLevel::Medium,
         CapabilityKind::FileWrite
         | CapabilityKind::BrowserSubmit
         | CapabilityKind::DriveWrite
@@ -497,7 +496,7 @@ mod tests {
             request_capability_access(AccessMode::AskOnRisk, CapabilityKind::BrowserBrowse)
                 .expect("browser browse is declared")
                 .decision,
-            PolicyDecision::Ask
+            PolicyDecision::Allow
         );
         assert_eq!(
             request_capability_access(AccessMode::AskOnRisk, CapabilityKind::FileWrite)

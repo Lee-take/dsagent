@@ -110,6 +110,16 @@ pub enum MemoryCandidateStatus {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum MemoryCandidateSuggestedAction {
+    New,
+    Merge,
+    Replace,
+    Link,
+    RejectHint,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MemoryType {
     Preference,
     ProjectContext,
@@ -258,6 +268,10 @@ fn default_memory_lifecycle() -> MemoryLifecycle {
     MemoryLifecycle::Active
 }
 
+fn default_memory_candidate_suggested_action() -> MemoryCandidateSuggestedAction {
+    MemoryCandidateSuggestedAction::New
+}
+
 fn default_memory_relation_kind() -> MemoryRelationKind {
     MemoryRelationKind::Related
 }
@@ -286,6 +300,12 @@ pub struct MemoryCandidate {
     pub source: MemoryCandidateSource,
     pub source_id: Option<Uuid>,
     pub rationale: String,
+    #[serde(default)]
+    pub evidence_excerpt: String,
+    #[serde(default)]
+    pub privacy_review: String,
+    #[serde(default = "default_memory_candidate_suggested_action")]
+    pub suggested_action: MemoryCandidateSuggestedAction,
     pub expires_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -373,6 +393,9 @@ impl MemoryCandidate {
             source,
             source_id,
             rationale: rationale.trim().to_string(),
+            evidence_excerpt: String::new(),
+            privacy_review: String::new(),
+            suggested_action: default_memory_candidate_suggested_action(),
             expires_at: expires_at.filter(|_| lifecycle == MemoryLifecycle::Expires),
             created_at: now,
             updated_at: now,
@@ -793,7 +816,7 @@ impl Default for FoundationState {
             large_model_provider: default_large_model_provider(),
             model_route: ModelRoute::Auto,
             thinking_level: ThinkingLevel::Auto,
-            access_mode: AccessMode::AskOnRisk,
+            access_mode: AccessMode::FullAccess,
             workspace_scope: WorkspaceScope::Workspace,
             network_search_source_model: None,
             tool_backends: ToolBackendSettings::default(),
@@ -841,7 +864,7 @@ mod tests {
         assert_eq!(state.large_model_provider, LargeModelProvider::DeepSeek);
         assert_eq!(state.model_route, ModelRoute::Auto);
         assert_eq!(state.thinking_level, ThinkingLevel::Auto);
-        assert_eq!(state.access_mode, AccessMode::AskOnRisk);
+        assert_eq!(state.access_mode, AccessMode::FullAccess);
         assert_eq!(state.workspace_scope, WorkspaceScope::Workspace);
         assert_eq!(state.network_search_source_model, None);
     }

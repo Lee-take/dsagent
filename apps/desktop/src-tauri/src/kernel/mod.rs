@@ -1,3 +1,5 @@
+pub mod agent_context;
+pub mod attachments;
 pub mod capability;
 pub mod codex_bridge_contract;
 pub mod codex_bridge_http;
@@ -8,6 +10,7 @@ pub mod event_store;
 pub mod local_directory;
 pub mod models;
 pub mod network_search;
+pub mod office;
 pub mod policy;
 pub mod tool_strategy;
 pub mod work_package;

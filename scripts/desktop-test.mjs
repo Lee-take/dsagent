@@ -26,6 +26,13 @@ run([
   "@deepseek-agent-os/desktop",
   "build",
 ]);
+run(["node", "scripts/conversation-title.test.mjs"]);
+run(["node", "scripts/agent-chat-run-state.test.mjs"]);
+run(["node", "scripts/agent-attachments.test.mjs"]);
+run(["node", "scripts/agent-chat-pending.test.mjs"]);
+run(["node", "scripts/agent-context-receipt.test.mjs"]);
+run(["node", "scripts/settings-panel.test.mjs"]);
+run(["node", "scripts/memory-candidate-gate.test.mjs"]);
 run(["cargo", "test", "--manifest-path", "apps/desktop/src-tauri/Cargo.toml"]);
 
 function run(parts) {
