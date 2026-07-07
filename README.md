@@ -109,7 +109,10 @@ The current codebase is intended to provide these basic functions:
   attempts, workflow runs, memory records, and work packages.
 - Memory Studio for reviewable memories, edits, deletion, expiration, linked
   memory title/body search, linked memory search match source, linked memory
-  relation notes, manual existing-memory links, and explicit conflict handling.
+  relation notes, manual existing-memory links, explicit conflict handling, and
+  feedback-informed retrieval scoring. Selected-memory feedback remains
+  append-only and reviewable, while stale/conflicting/should_update feedback
+  surfaces compact review hints for update, archive, and conflict review.
 - Operations Briefing workflow:
   - Reads local evidence and drafts a management brief.
   - Can use DeepSeek synthesis when configured.
@@ -146,7 +149,8 @@ plugin execution, and polished signed installers are not complete in `0.1.0`.
 - 本地追加式审计记录，用于记录授权请求、审批、工具调用、工作流运行、记忆记录和工
   作包。
 - Memory Studio，用于记忆候选、编辑、删除、过期、关联记忆标题/正文搜索、关联记忆搜索命中来源、
-  关联说明、手动关联已有长期记忆和冲突处理。
+  关联说明、手动关联已有长期记忆、冲突处理和反馈驱动检索。Context Receipt 里的已选记忆反馈会参与后续检索评分，
+  同时把 stale/conflicting/should_update 反馈压缩成更新、归档和冲突复核提示。
 - Operations Briefing 经营简报工作流：
   - 读取本地证据并生成管理简报。
   - 配置 DeepSeek 后可调用模型合成。
@@ -485,6 +489,11 @@ templates without overwriting existing local evidence files.
 
 Memory review clarity v1 keeps memory writes explicit and reviewable. It lets
 users propose, accept, reject, edit, expire, and delete long-term memories.
+Selected-memory feedback now supports feedback-informed retrieval scoring:
+useful feedback can lift later recall, irrelevant, stale, conflicting, or
+should_update feedback can lower recall, and stale/conflicting/should_update
+feedback surfaces compact review hints without dumping full memory bodies into
+receipts.
 
 Memory conflict clarity v1 surfaces likely overlaps before acceptance and
 supports link, merge, and replace decisions with inspectable relation notes.

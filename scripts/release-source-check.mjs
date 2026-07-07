@@ -2613,6 +2613,7 @@ function checkMemoryStudioDocs() {
   const app = readText("apps/desktop/src/App.tsx");
   const i18n = readText("apps/desktop/src/i18n.ts");
   const types = readText("apps/desktop/src/types.ts");
+  const memoryCommands = readText("apps/desktop/src-tauri/src/commands.rs");
 
   checkTextIncludesCollapsed(
     "README.md",
@@ -2679,6 +2680,66 @@ function checkMemoryStudioDocs() {
     releaseNotes,
     "manual existing-memory links",
     "release notes manual existing-memory links",
+  );
+  checkTextIncludesCollapsed(
+    "README.md",
+    readme,
+    "feedback-informed retrieval scoring",
+    "README.md feedback-informed memory retrieval scoring",
+  );
+  checkTextIncludesCollapsed(
+    "README.md",
+    readme,
+    "stale/conflicting/should_update feedback surfaces compact review hints",
+    "README.md selected-memory feedback review hints",
+  );
+  checkTextIncludesCollapsed(
+    "README.md",
+    readme,
+    "反馈会参与后续检索评分",
+    "README.md feedback-informed memory retrieval scoring zh",
+  );
+  checkTextIncludesCollapsed(
+    "docs/RELEASE_NOTES_v0.1.0.md",
+    releaseNotes,
+    "feedback-informed retrieval scoring",
+    "release notes feedback-informed memory retrieval scoring",
+  );
+  checkTextIncludesCollapsed(
+    "docs/RELEASE_NOTES_v0.1.0.md",
+    releaseNotes,
+    "stale/conflicting/should_update feedback surfaces compact review hints",
+    "release notes selected-memory feedback review hints",
+  );
+  checkTextIncludesCollapsed(
+    "apps/desktop/src-tauri/src/commands.rs",
+    memoryCommands,
+    ".list_selected_memory_feedback()",
+    "runtime context loads selected-memory feedback",
+  );
+  checkTextIncludesCollapsed(
+    "apps/desktop/src-tauri/src/commands.rs",
+    memoryCommands,
+    "feedback:useful+4",
+    "runtime context exposes useful feedback score breakdown",
+  );
+  checkTextIncludesCollapsed(
+    "apps/desktop/src-tauri/src/commands.rs",
+    memoryCommands,
+    "memories marked stale by feedback need update or archive review",
+    "runtime context emits stale feedback review hints",
+  );
+  checkTextIncludesCollapsed(
+    "apps/desktop/src-tauri/src/commands.rs",
+    memoryCommands,
+    "memories flagged conflicting by feedback need conflict review",
+    "runtime context emits conflicting feedback review hints",
+  );
+  checkTextIncludesCollapsed(
+    "apps/desktop/src-tauri/src/commands.rs",
+    memoryCommands,
+    "memories marked should_update by feedback need update candidate review",
+    "runtime context emits should_update feedback review hints",
   );
   checkTextIncludesCollapsed(
     "README.md",

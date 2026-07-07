@@ -34,6 +34,13 @@ checkout to run the installed app.
 - Keeps feedback append-only and reviewable: selected-memory feedback records do
   not mutate memory records, and conflict/update candidates do not silently
   write long-term memory.
+- Uses selected-memory feedback for feedback-informed retrieval scoring:
+  useful feedback can lift later recall, while irrelevant, stale, conflicting,
+  or should_update feedback can lower recall with an inspectable score
+  breakdown.
+- When stale/conflicting/should_update feedback surfaces compact review hints,
+  the runtime context points local testing toward update, archive, and conflict
+  review without dumping full memory bodies into receipts.
 - Keeps memory runtime context bounded while surfacing compact feedback targets
   and update/archive candidate hints for local testing.
 
@@ -156,7 +163,8 @@ Windows preview continues to pass local release gates.
   limitations.
 - Memory Studio for reviewable memories, edits, deletion, expiration, linked
   memory title/body search, linked memory search match source, linked memory
-  relation notes, manual existing-memory links, and explicit conflict handling.
+  relation notes, manual existing-memory links, explicit conflict handling, and
+  feedback-informed retrieval scoring.
 - Operations Briefing workflow:
   - Reads local evidence and drafts a management brief.
   - Can use DeepSeek synthesis when configured.
