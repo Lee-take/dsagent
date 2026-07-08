@@ -27,6 +27,12 @@ reports, workflow runs, work packages, memory, logs, and future artifact types
 as needed. Ordinary users should not need to choose separate internal folders
 before starting their first chat task.
 
+The required first-run setup is intentionally small: configure
+`DEEPSEEK_API_KEY` and choose that one local workspace root. Live network search
+is optional. If a task needs current web information, configure one additional
+source-linked search route, such as a search-capable model/provider key or an
+available free web-search option.
+
 The app stores this local directory choice in `local-directories.json` under
 the OS app data directory. The setup panel shows the exact app data and
 settings-file paths for the current machine.
