@@ -126,10 +126,16 @@ endorsement. The DeepSeek name is used only to describe compatibility and
 support for DeepSeek models.
 
 The project is shared publicly under the Apache-2.0 license. Friends,
-colleagues, and anyone who finds it useful are welcome to use it, study it,
-fork it, and adapt it within the license terms. When convenient, please open an
-issue, discussion, or pull request with suggestions, corrections, criticism, or
-other feedback. All advice is welcome.
+colleagues, and anyone who finds it useful are welcome to use it for learning,
+research, evaluation, internal pilots, and adaptation within the license terms.
+The published source is not presented as a turnkey codebase to repackage
+directly as a commercial product or hosted service. If you are evaluating any
+commercial use, please respect the Apache-2.0 license, preserve required
+notices, avoid implying DS Agent or DeepSeek endorsement, and complete your own
+security review, compliance review, testing, signing, and user-support
+responsibilities. When convenient, please open an issue, discussion, or pull
+request with suggestions, corrections, criticism, or other feedback. All advice
+is welcome.
 
 This project also benefits from the broader GitHub open-source ecosystem.
 Public open-source work has provided valuable reference points for DS Agent in
@@ -160,9 +166,13 @@ key/服务，或在可用时选择免费的来源型搜索选项。
 权、授权或官方背书。这里使用 DeepSeek 名称，只是为了说明项目面向 DeepSeek 模型做
 兼容和支持。
 
-本项目按照 Apache-2.0 许可证对外开源。有需要的同事、朋友和开发者，都可以在许可证
-范围内自由使用、学习、fork 和改造。大家方便或有空的时候，也欢迎通过 issue、讨论或
-pull request 提出意见建议；批评指正都非常欢迎。
+本项目按照 Apache-2.0 许可证对外开源。我们欢迎有需要的同事、朋友和开发者在许可证
+范围内用于学习、研究、评估、内部试用和合规二次开发参考。但当前公开源代码不是作为
+可以直接包装成商业产品或托管服务的成品代码库来发布；我们也不希望下载用户未经独立
+评审、合规处理和工程加固，就直接拿当前源代码做商业化交付。如果评估任何商业场景，
+请遵守 Apache-2.0 许可证，保留必要声明，不暗示 DS Agent 或 DeepSeek 官方背书，并自
+行完成安全审查、合规审查、测试、签名和用户支持责任。大家方便或有空的时候，也欢迎
+通过 issue、讨论或 pull request 提出意见建议；批评指正都非常欢迎。
 
 这个项目也受益于 GitHub 上广泛的开源生态。公开开源项目在桌面应用、Agent harness、
 工作流系统、权限设计、审计记录、本地优先软件和发布工程等方面，为 DS Agent 提供了

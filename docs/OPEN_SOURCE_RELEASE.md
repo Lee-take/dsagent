@@ -123,6 +123,15 @@ into this repository.
 The project uses Apache-2.0. This was chosen for infrastructure-style open
 source and its explicit patent grant.
 
+Public copy should not describe Apache-2.0 as a hard ban on commercial use.
+Instead, it should state the intended boundary: DS Agent is published for
+learning, research, evaluation, internal pilots, and adaptation within the
+license terms, while the current source is not presented as a turnkey codebase
+to repackage directly as a commercial product or hosted service. Any commercial
+evaluation should preserve notices, avoid implying DS Agent or DeepSeek
+endorsement, and require independent security review, compliance review,
+testing, signing, and user support.
+
 ## Preview Honesty Rules
 
 - Do not imply official DeepSeek affiliation.
