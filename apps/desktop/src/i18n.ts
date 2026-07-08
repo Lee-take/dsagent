@@ -13,6 +13,8 @@ import type {
   LargeModelProvider,
   Language,
   MemoryLifecycle,
+  MemoryMaintenanceActionKind,
+  MemoryMaintenanceReviewKind,
   MemoryRelationKind,
   MemorySearchMatchSource,
   MemorySelectedFeedbackKind,
@@ -562,9 +564,36 @@ type TranslationSet = {
     feedbackReview: string;
     feedbackReviewEmpty: string;
     feedbackReviewCount: (count: number) => string;
+    feedbackFilter: string;
+    feedbackSort: string;
+    feedbackFilterOptions: Record<string, string>;
+    feedbackSortOptions: Record<string, string>;
     latestFeedback: string;
     needsFeedbackReview: string;
     feedbackMemoryMissing: string;
+    maintenanceReview: string;
+    maintenanceReviewEmpty: string;
+    maintenanceReviewCount: (count: number) => string;
+    maintenanceFilter: string;
+    maintenanceSort: string;
+    maintenanceFilterOptions: Record<string, string>;
+    maintenanceSortOptions: Record<string, string>;
+    maintenanceReviewKindOptions: Record<MemoryMaintenanceReviewKind, string>;
+    maintenanceActionOptions: Record<MemoryMaintenanceActionKind, string>;
+    maintenanceAutomatic: string;
+    maintenanceNoUserAction: string;
+    maintenanceSnoozeUntil: string;
+    maintenanceLastAction: string;
+    maintenanceCreateUpdateCandidate: string;
+    maintenanceCandidateCreated: string;
+    maintenanceRetrievalReviewed: string;
+    maintenanceMarkReviewed: string;
+    maintenanceSnooze: string;
+    maintenanceActionRecorded: string;
+    maintenanceActionFailed: string;
+    maintenanceArchive: string;
+    maintenanceArchiveDone: string;
+    maintenanceArchiveFailed: string;
   };
   memoryFeedback: {
     title: string;
@@ -574,6 +603,13 @@ type TranslationSet = {
     conflicting: string;
     shouldUpdate: string;
     recorded: string;
+    recordedWithMaintenance: (
+      updateCandidates: number,
+      retrievalReviews: number,
+      autoUpdates: number,
+      autoArchives: number,
+      candidateDecisions: number,
+    ) => string;
     recordFailed: string;
     options: Record<MemorySelectedFeedbackKind, string>;
   };
@@ -1402,8 +1438,8 @@ export const translations: Record<Language, TranslationSet> = {
       proposing: "提议中",
       candidates: "候选记忆",
       noCandidates: "暂无候选记忆",
-      accept: "接受",
-      reject: "拒绝",
+      accept: "后台接受",
+      reject: "后台拒绝",
       edit: "编辑",
       editTitle: "记忆标题",
       editBody: "记忆内容",
@@ -1414,7 +1450,7 @@ export const translations: Record<Language, TranslationSet> = {
       deleting: "删除中",
       resolving: "处理中",
       proposed: "候选记忆已提交，等待确认。",
-      accepted: "候选记忆已接受并写入长期记忆。",
+      accepted: "候选记忆已由后台写入长期记忆。",
       rejected: "候选记忆已拒绝。",
       updated: "长期记忆已更新。",
       deleted: "长期记忆已删除。",
@@ -1432,7 +1468,7 @@ export const translations: Record<Language, TranslationSet> = {
       mergePreviewTitle: "合并草稿",
       mergePreviewDraft: "草稿内容",
       mergePreviewFailed: "合并草稿生成失败。",
-      mergeAndAccept: "合并并接受",
+      mergeAndAccept: "后台合并",
       merged: "候选记忆已合并，旧记忆已归档。",
       mergeFailed: "候选记忆合并失败。",
       previewReplace: "预览替换",
@@ -1441,7 +1477,7 @@ export const translations: Record<Language, TranslationSet> = {
       replacePreviewDraft: "替换草稿",
       replacePreviewTargets: "将被替换",
       replacePreviewFailed: "替换预览生成失败。",
-      replaceAndAccept: "替换并接受",
+      replaceAndAccept: "后台替换",
       replaced: "候选记忆已接受，被替换记忆已归档。",
       replaceFailed: "候选记忆替换失败。",
       updateAndAccept: "更新已有记忆",
@@ -1450,7 +1486,7 @@ export const translations: Record<Language, TranslationSet> = {
       archiveStaleTarget: "归档过时目标",
       archivedFromCandidate: "候选记忆已接受，过时记忆已归档。",
       archiveCandidateFailed: "候选记忆归档失败。",
-      linkAndAccept: "关联并接受",
+      linkAndAccept: "后台关联",
       linkRelation: "关联关系",
       linkExisting: "关联已有记忆",
       linkingExisting: "关联中",
@@ -1478,8 +1514,10 @@ export const translations: Record<Language, TranslationSet> = {
       candidateEvidenceExcerpt: "证据摘录",
       candidateSuggestedActionOptions: {
         new: "新增",
+        update: "更新",
         merge: "合并",
         replace: "替换",
+        archive: "归档",
         link: "关联",
         reject_hint: "建议拒绝",
       },
@@ -1519,9 +1557,69 @@ export const translations: Record<Language, TranslationSet> = {
       feedbackReview: "反馈复核",
       feedbackReviewEmpty: "暂无已记录的记忆反馈",
       feedbackReviewCount: (count) => `${count} 条反馈`,
+      feedbackFilter: "反馈筛选",
+      feedbackSort: "反馈排序",
+      feedbackFilterOptions: {
+        all: "全部反馈",
+        needs_review: "需要复核",
+        useful: "有用",
+        irrelevant: "无关",
+        stale: "过时",
+        conflicting: "冲突",
+        should_update: "应更新",
+      },
+      feedbackSortOptions: {
+        priority: "优先级",
+        latest: "最新反馈",
+        feedback_count: "反馈数量",
+      },
       latestFeedback: "最新反馈",
       needsFeedbackReview: "需要复核",
       feedbackMemoryMissing: "这条记忆当前不可见",
+      maintenanceReview: "后台维护审计",
+      maintenanceReviewEmpty: "暂无需要展示的后台维护记录",
+      maintenanceReviewCount: (count) => `${count} 条维护线索`,
+      maintenanceFilter: "维护筛选",
+      maintenanceSort: "维护排序",
+      maintenanceFilterOptions: {
+        all: "全部维护记录",
+        needs_review: "需要确认",
+        retrieval: "检索调优",
+        update_archive: "更新/归档",
+        conflict: "冲突",
+        snoozed: "稍后处理",
+      },
+      maintenanceSortOptions: {
+        priority: "优先级",
+        latest: "最新反馈",
+        feedback_count: "反馈数量",
+      },
+      maintenanceReviewKindOptions: {
+        retrieval: "检索调优",
+        update_archive: "更新/归档候选",
+        conflict: "冲突复核",
+      },
+      maintenanceActionOptions: {
+        mark_reviewed: "已复核",
+        snooze: "稍后处理",
+        retrieval_reviewed: "检索调优已记录",
+        update_candidate_created: "更新候选已生成",
+        archived: "已归档",
+      },
+      maintenanceAutomatic: "后台自动维护",
+      maintenanceNoUserAction: "无需操作；DS Agent 会在后台处理更新、归档和候选决策，这里只保留审计与纠错线索。",
+      maintenanceSnoozeUntil: "稍后至",
+      maintenanceLastAction: "最近维护",
+      maintenanceCreateUpdateCandidate: "生成更新候选",
+      maintenanceCandidateCreated: "DS Agent 已根据反馈生成更新候选，并交由后台维护处理。",
+      maintenanceRetrievalReviewed: "检索已调优",
+      maintenanceMarkReviewed: "标记已复核",
+      maintenanceSnooze: "稍后",
+      maintenanceActionRecorded: "维护审计已记录。",
+      maintenanceActionFailed: "维护审计记录失败。",
+      maintenanceArchive: "确认归档",
+      maintenanceArchiveDone: "记忆已归档。",
+      maintenanceArchiveFailed: "记忆归档失败。",
     },
     memoryFeedback: {
       title: "选中记忆反馈",
@@ -1531,6 +1629,22 @@ export const translations: Record<Language, TranslationSet> = {
       conflicting: "冲突",
       shouldUpdate: "应更新",
       recorded: "记忆反馈已记录。",
+      recordedWithMaintenance: (
+        updateCandidates,
+        retrievalReviews,
+        autoUpdates,
+        autoArchives,
+        candidateDecisions,
+      ) => {
+        const updates = updateCandidates > 0 ? `，已生成 ${updateCandidates} 条更新候选` : "";
+        const decisions =
+          candidateDecisions > 0 ? `，已自动处理 ${candidateDecisions} 个候选决策` : "";
+        const applied = autoUpdates > 0 ? `，已自动更新 ${autoUpdates} 条记忆` : "";
+        const archived = autoArchives > 0 ? `，已自动归档 ${autoArchives} 条过时记忆` : "";
+        const retrieval =
+          retrievalReviews > 0 ? `，已记录 ${retrievalReviews} 条检索调优` : "";
+        return `记忆反馈已记录，后台维护已自动运行${updates}${decisions}${applied}${archived}${retrieval}。`;
+      },
       recordFailed: "记忆反馈记录失败。",
       options: {
         useful: "有用",
@@ -2379,8 +2493,8 @@ export const translations: Record<Language, TranslationSet> = {
       proposing: "Proposing",
       candidates: "Memory Candidates",
       noCandidates: "No memory candidates",
-      accept: "Accept",
-      reject: "Reject",
+      accept: "Background accept",
+      reject: "Background reject",
       edit: "Edit",
       editTitle: "Memory title",
       editBody: "Memory body",
@@ -2391,7 +2505,7 @@ export const translations: Record<Language, TranslationSet> = {
       deleting: "Deleting",
       resolving: "Resolving",
       proposed: "Memory candidate submitted for review.",
-      accepted: "Memory candidate accepted and saved to long-term memory.",
+      accepted: "Memory candidate saved to long-term memory by background maintenance.",
       rejected: "Memory candidate rejected.",
       updated: "Long-term memory updated.",
       deleted: "Long-term memory deleted.",
@@ -2410,7 +2524,7 @@ export const translations: Record<Language, TranslationSet> = {
       mergePreviewTitle: "Merge draft",
       mergePreviewDraft: "Draft body",
       mergePreviewFailed: "Memory merge preview failed.",
-      mergeAndAccept: "Merge and accept",
+      mergeAndAccept: "Background merge",
       merged: "Memory candidate merged and older memories archived.",
       mergeFailed: "Memory candidate merge failed.",
       previewReplace: "Preview replace",
@@ -2419,16 +2533,16 @@ export const translations: Record<Language, TranslationSet> = {
       replacePreviewDraft: "Replacement draft",
       replacePreviewTargets: "Would replace",
       replacePreviewFailed: "Memory replace preview failed.",
-      replaceAndAccept: "Replace and accept",
-      replaced: "Memory candidate accepted and replaced memories archived.",
+      replaceAndAccept: "Background replace",
+      replaced: "Background maintenance saved the replacement and archived older memories.",
       replaceFailed: "Memory candidate replace failed.",
       updateAndAccept: "Update existing",
-      updatedFromCandidate: "Memory candidate accepted and existing memory updated.",
+      updatedFromCandidate: "Background maintenance updated the existing memory.",
       updateCandidateFailed: "Memory candidate update failed.",
       archiveStaleTarget: "Archive stale target",
-      archivedFromCandidate: "Memory candidate accepted and stale memory archived.",
+      archivedFromCandidate: "Background maintenance archived the stale memory.",
       archiveCandidateFailed: "Memory candidate archive failed.",
-      linkAndAccept: "Link and accept",
+      linkAndAccept: "Background link",
       linkRelation: "Link relation",
       linkExisting: "Link existing memories",
       linkingExisting: "Linking",
@@ -2438,7 +2552,7 @@ export const translations: Record<Language, TranslationSet> = {
       emptyExistingLink: "Choose two different long-term memories.",
       existingLinked: "Long-term memories linked.",
       existingLinkFailed: "Long-term memory link failed.",
-      linked: "Memory candidate accepted and linked to overlapping memories.",
+      linked: "Background maintenance linked the candidate to overlapping memories.",
       linkFailed: "Memory candidate link failed.",
       linkedMemories: (count) => `Linked to ${count} ${count === 1 ? "memory" : "memories"}`,
       linkNote: "Link note",
@@ -2456,8 +2570,10 @@ export const translations: Record<Language, TranslationSet> = {
       candidateEvidenceExcerpt: "Evidence excerpt",
       candidateSuggestedActionOptions: {
         new: "New",
+        update: "Update",
         merge: "Merge",
         replace: "Replace",
+        archive: "Archive",
         link: "Link",
         reject_hint: "Reject hint",
       },
@@ -2497,9 +2613,72 @@ export const translations: Record<Language, TranslationSet> = {
       feedbackReview: "Feedback review",
       feedbackReviewEmpty: "No recorded memory feedback yet",
       feedbackReviewCount: (count) => `${count} feedback ${count === 1 ? "entry" : "entries"}`,
+      feedbackFilter: "Feedback filter",
+      feedbackSort: "Feedback sort",
+      feedbackFilterOptions: {
+        all: "All feedback",
+        needs_review: "Needs review",
+        useful: "Useful",
+        irrelevant: "Irrelevant",
+        stale: "Stale",
+        conflicting: "Conflicting",
+        should_update: "Should update",
+      },
+      feedbackSortOptions: {
+        priority: "Priority",
+        latest: "Latest feedback",
+        feedback_count: "Feedback count",
+      },
       latestFeedback: "Latest feedback",
       needsFeedbackReview: "Needs review",
       feedbackMemoryMissing: "This memory is not currently visible",
+      maintenanceReview: "Background maintenance audit",
+      maintenanceReviewEmpty: "No background maintenance records to show",
+      maintenanceReviewCount: (count) =>
+        `${count} maintenance ${count === 1 ? "signal" : "signals"}`,
+      maintenanceFilter: "Maintenance filter",
+      maintenanceSort: "Maintenance sort",
+      maintenanceFilterOptions: {
+        all: "All maintenance",
+        needs_review: "Needs confirmation",
+        retrieval: "Retrieval tuning",
+        update_archive: "Update/archive",
+        conflict: "Conflict",
+        snoozed: "Snoozed",
+      },
+      maintenanceSortOptions: {
+        priority: "Priority",
+        latest: "Latest feedback",
+        feedback_count: "Feedback count",
+      },
+      maintenanceReviewKindOptions: {
+        retrieval: "Retrieval tuning",
+        update_archive: "Update/archive candidate",
+        conflict: "Conflict review",
+      },
+      maintenanceActionOptions: {
+        mark_reviewed: "Reviewed",
+        snooze: "Snoozed",
+        retrieval_reviewed: "Retrieval tuning recorded",
+        update_candidate_created: "Update candidate created",
+        archived: "Archived",
+      },
+      maintenanceAutomatic: "Background maintenance",
+      maintenanceNoUserAction:
+        "No action needed; DS Agent handles updates, archives, and candidate decisions in the background while this view keeps the audit and correction trail.",
+      maintenanceSnoozeUntil: "Snoozed until",
+      maintenanceLastAction: "Latest maintenance",
+      maintenanceCreateUpdateCandidate: "Create update candidate",
+      maintenanceCandidateCreated:
+        "DS Agent created an update candidate from feedback and handed it to background maintenance.",
+      maintenanceRetrievalReviewed: "Retrieval tuned",
+      maintenanceMarkReviewed: "Mark reviewed",
+      maintenanceSnooze: "Snooze",
+      maintenanceActionRecorded: "Maintenance audit recorded.",
+      maintenanceActionFailed: "Maintenance audit failed to record.",
+      maintenanceArchive: "Confirm archive",
+      maintenanceArchiveDone: "Memory archived.",
+      maintenanceArchiveFailed: "Memory archive failed.",
     },
     memoryFeedback: {
       title: "Selected memory feedback",
@@ -2509,6 +2688,27 @@ export const translations: Record<Language, TranslationSet> = {
       conflicting: "Conflicting",
       shouldUpdate: "Should update",
       recorded: "Memory feedback recorded.",
+      recordedWithMaintenance: (
+        updateCandidates,
+        retrievalReviews,
+        autoUpdates,
+        autoArchives,
+        candidateDecisions,
+      ) => {
+        const updates =
+          updateCandidates > 0 ? `, created ${updateCandidates} update candidate(s)` : "";
+        const decisions =
+          candidateDecisions > 0
+            ? `, resolved ${candidateDecisions} candidate decision(s)`
+            : "";
+        const applied =
+          autoUpdates > 0 ? `, automatically updated ${autoUpdates} memory record(s)` : "";
+        const archived =
+          autoArchives > 0 ? `, automatically archived ${autoArchives} stale record(s)` : "";
+        const retrieval =
+          retrievalReviews > 0 ? `, recorded ${retrievalReviews} retrieval tuning item(s)` : "";
+        return `Memory feedback recorded and background maintenance ran${updates}${decisions}${applied}${archived}${retrieval}.`;
+      },
       recordFailed: "Memory feedback failed to record.",
       options: {
         useful: "Useful",

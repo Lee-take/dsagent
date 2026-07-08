@@ -822,23 +822,12 @@ function checkRequiredDocs() {
     "Operations Briefing workflow v1 turns approved local evidence into a management brief",
     "It uses an approved local evidence-folder read to draft a summary, anomaly leads, and action items",
     "falls back to a local draft with a visible warning when model synthesis is unavailable",
-    "keeps pending memory candidates reviewable while resolved memory candidates stay out of exported work packages",
     "In that same export boundary, exported work packages redact source-machine evidence handles",
     "PDF v1 stays lightweight and ASCII-safe for this preview",
     "The approved local evidence-template seeding flow uses blank operator templates",
-    "Memory Studio now has candidate review plus metadata v1",
-    "Candidate conflict surfacing v1",
-    "Conflict actions are explicit",
-    "`Link and accept` saves the candidate as a separate long-term memory and records append-only links",
-    "`Merge and accept` writes the previewed merged draft as a new memory and tombstones selected source memories",
-    "`Replace and accept` writes the candidate as the replacement memory and tombstones selected target memories",
-    "while keeping the append-only graph intact",
     "Long-term memory edit v1 appends `memory_record.updated` events",
     "Long-term memory delete v1 appends a `memory_record.deleted` tombstone",
     "Older task-record auto memory and legacy event payloads remain readable through default metadata",
-    "Memory Studio review v1",
-    "It lets users propose, accept, reject, edit, expire, and delete long-term memories; surfaces likely overlaps before acceptance; and supports link, merge, and replace decisions with inspectable relation notes",
-    "The work-package import preview keeps imported memory candidates in local review without writing long-term memory until accepted",
     "append-only event records",
     "oversized prompt payloads",
     "The first implementation slice",
@@ -965,17 +954,18 @@ function checkRequiredDocs() {
     "Briefing handoff safety v1",
     "keeps imported briefing runs read-only and reviewable",
     "keeps source-machine evidence handles redacted in exported work packages",
-    "keeps pending memory candidates reviewable",
+    "keeps memory candidate history local and auditable",
     "keeps resolved memory candidates out of exported packages",
     "uses blank operator templates without overwriting existing local evidence files",
     "Memory review clarity v1",
-    "keeps memory writes explicit and reviewable",
-    "lets users propose, accept, reject, edit, expire, and delete long-term memories",
+    "keeps memory writes explicit and auditable",
+    "moving routine candidate decisions into DS Agent background maintenance",
+    "can still propose corrections, edit, expire, and delete long-term memories",
     "Memory conflict clarity v1",
-    "surfaces likely overlaps before acceptance",
-    "supports link, merge, and replace decisions with inspectable relation notes",
+    "surfaces likely overlaps in the audit view",
+    "apply link, merge, replace, update, archive, or reject decisions in the background",
     "Memory import safety v1",
-    "keeps imported memory candidates in local review without writing long-term memory until accepted",
+    "keeps imported memory candidates local and auditable before DS Agent background maintenance resolves them",
   ]) {
     checkTextIncludesCollapsed(
       "README.md",
@@ -1682,14 +1672,14 @@ function checkPublicReleaseCopyPositioning() {
   checkTextIncludesCollapsed(
     "docs/RELEASE_NOTES_v0.1.0.md",
     releaseNotes,
-    "v0.1.0-rc.9 Update",
-    "release notes rc.9 update heading",
+    "v0.1.0-rc.10 Update",
+    "release notes rc.10 update heading",
   );
   checkTextIncludes(
     "apps/desktop/src-tauri/src/commands.rs",
     readText("apps/desktop/src-tauri/src/commands.rs"),
-    'APP_UPDATE_CURRENT_RELEASE_TAG: &str = "v0.1.0-rc.9"',
-    "app updater current release tag rc.9",
+    'APP_UPDATE_CURRENT_RELEASE_TAG: &str = "v0.1.0-rc.10"',
+    "app updater current release tag rc.10",
   );
   checkTextIncludes(
     "apps/desktop/src-tauri/src/commands.rs",
@@ -2696,13 +2686,13 @@ function checkMemoryStudioDocs() {
   checkTextIncludesCollapsed(
     "README.md",
     readme,
-    "Memory maintenance strategy v1 treats repeated irrelevant/stale feedback as review pressure only",
+    "Automatic Memory maintenance v1 keeps routine memory care out of the user's workflow",
     "README.md memory maintenance strategy v1",
   );
   checkTextIncludesCollapsed(
     "README.md",
     readme,
-    "重复 irrelevant/stale 反馈只会触发维护复核压力",
+    "DS Agent 会自动记录检索调优、应用审计更新",
     "README.md memory maintenance strategy v1 zh",
   );
   checkTextIncludesCollapsed(
@@ -2726,7 +2716,7 @@ function checkMemoryStudioDocs() {
   checkTextIncludesCollapsed(
     "docs/RELEASE_NOTES_v0.1.0.md",
     releaseNotes,
-    "Memory maintenance strategy v1",
+    "automatic Memory maintenance v1",
     "release notes memory maintenance strategy v1",
   );
   checkTextIncludesCollapsed(
@@ -2744,31 +2734,31 @@ function checkMemoryStudioDocs() {
   checkTextIncludesCollapsed(
     "apps/desktop/src-tauri/src/commands.rs",
     memoryCommands,
-    "memories marked stale by feedback need update or archive review",
+    "memories marked stale by feedback enter background update/archive maintenance",
     "runtime context emits stale feedback review hints",
   );
   checkTextIncludesCollapsed(
     "apps/desktop/src-tauri/src/commands.rs",
     memoryCommands,
-    "memories flagged conflicting by feedback need conflict review",
+    "memories flagged conflicting by feedback enter background conflict maintenance",
     "runtime context emits conflicting feedback review hints",
   );
   checkTextIncludesCollapsed(
     "apps/desktop/src-tauri/src/commands.rs",
     memoryCommands,
-    "memories marked should_update by feedback need update candidate review",
+    "memories marked should_update by feedback enter background update maintenance",
     "runtime context emits should_update feedback review hints",
   );
   checkTextIncludesCollapsed(
     "apps/desktop/src-tauri/src/commands.rs",
     memoryCommands,
-    "memories repeatedly marked irrelevant by feedback need retrieval review",
+    "memories repeatedly marked irrelevant by feedback enter background retrieval tuning",
     "runtime context emits repeated irrelevant maintenance review hints",
   );
   checkTextIncludesCollapsed(
     "apps/desktop/src-tauri/src/commands.rs",
     memoryCommands,
-    "memories repeatedly marked stale by feedback need update or archive review",
+    "memories repeatedly marked stale by feedback enter background archive maintenance",
     "runtime context emits repeated stale maintenance review hints",
   );
   checkTextIncludesCollapsed(
@@ -3072,8 +3062,14 @@ function checkMemoryStudioDocs() {
   checkTextIncludesCollapsed(
     "apps/desktop/src/App.tsx",
     app,
-    "record.candidate.rationale || copy.memory.linkAndAccept",
-    "Memory Studio link notes use candidate rationale when available",
+    "copy.memory.candidateSuggestedActionOptions[ record.candidate.suggested_action ]",
+    "Memory Studio candidate audit shows suggested action labels",
+  );
+  checkTextIncludesCollapsed(
+    "apps/desktop/src/App.tsx",
+    app,
+    "copy.memory.maintenanceNoUserAction",
+    "Memory Studio candidate audit explains background maintenance",
   );
   checkTextIncludesCollapsed(
     "apps/desktop/src/i18n.ts",

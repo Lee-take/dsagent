@@ -110,9 +110,9 @@ The current codebase is intended to provide these basic functions:
 - Memory Studio for reviewable memories, edits, deletion, expiration, linked
   memory title/body search, linked memory search match source, linked memory
   relation notes, manual existing-memory links, explicit conflict handling, and
-  feedback-informed retrieval scoring. Selected-memory feedback remains
-  append-only and reviewable, while stale/conflicting/should_update feedback
-  surfaces compact review hints for update, archive, and conflict review.
+  feedback-informed retrieval scoring. Selected-memory feedback stays
+  append-only, while DS Agent automatically records retrieval tuning, applies
+  audited updates, and archives repeated stale memories in the background.
 - Operations Briefing workflow:
   - Reads local evidence and drafts a management brief.
   - Can use DeepSeek synthesis when configured.
@@ -148,10 +148,10 @@ plugin execution, and polished signed installers are not complete in `0.1.0`.
   修改、删除和重命名。
 - 本地追加式审计记录，用于记录授权请求、审批、工具调用、工作流运行、记忆记录和工
   作包。
-- Memory Studio，用于记忆候选、编辑、删除、过期、关联记忆标题/正文搜索、关联记忆搜索命中来源、
-  关联说明、手动关联已有长期记忆、冲突处理和反馈驱动检索。Context Receipt 里的已选记忆反馈会参与后续检索评分，
-  同时把 stale/conflicting/should_update 反馈压缩成更新、归档和冲突复核提示。
-  重复 irrelevant/stale 反馈只会触发维护复核压力，不会静默删除或改写长期记忆。
+- Memory Studio，用于记忆审计、编辑、删除、过期、关联记忆标题/正文搜索、关联记忆搜索命中来源、
+  关联说明、手动关联已有长期记忆、冲突审计和反馈驱动检索。Context Receipt 里的已选记忆反馈会参与后续检索评分，
+  stale/conflicting/should_update 反馈会压缩成后台维护线索；DS Agent 会自动记录检索调优、应用审计更新，
+  并在重复 stale 反馈下自动归档过时记忆。
 - Operations Briefing 经营简报工作流：
   - 读取本地证据并生成管理简报。
   - 配置 DeepSeek 后可调用模型合成。
@@ -482,33 +482,37 @@ preserve full Unicode, while the preview PDF stays lightweight and ASCII-safe.
 
 Briefing handoff safety v1 keeps imported briefing runs read-only and
 reviewable, keeps source-machine evidence handles redacted in exported work
-packages, keeps pending memory candidates reviewable, and keeps resolved memory
-candidates out of exported packages. For handoff safety, exported work packages
+packages, keeps memory candidate history local and auditable, and keeps resolved
+memory candidates out of exported packages. For handoff safety, exported work packages
 redact source-machine evidence handles, and resolved memory candidates stay out
 of exported work packages. Evidence-template seeding uses blank operator
 templates without overwriting existing local evidence files.
 
-Memory review clarity v1 keeps memory writes explicit and reviewable. It lets
-users propose, accept, reject, edit, expire, and delete long-term memories.
+Memory review clarity v1 keeps memory writes explicit and auditable while
+moving routine candidate decisions into DS Agent background maintenance. Users
+can still propose corrections, edit, expire, and delete long-term memories when
+they need to fix the audit trail.
 Selected-memory feedback now supports feedback-informed retrieval scoring:
 useful feedback can lift later recall, irrelevant, stale, conflicting, or
 should_update feedback can lower recall, and stale/conflicting/should_update
 feedback surfaces compact review hints without dumping full memory bodies into
 receipts.
-Memory maintenance strategy v1 treats repeated irrelevant/stale feedback as
-review pressure only: repeated irrelevant feedback flags retrieval review,
-repeated stale feedback flags update/archive review, and DS Agent still does
-not silently delete or rewrite long-term memories.
+Automatic Memory maintenance v1 keeps routine memory care out of the user's
+workflow. Repeated irrelevant feedback records retrieval tuning, should_update
+feedback can create and apply an audited update, and repeated stale feedback can
+archive stale memories in the background while leaving an inspectable audit
+trail.
 
-Memory conflict clarity v1 surfaces likely overlaps before acceptance and
-supports link, merge, and replace decisions with inspectable relation notes.
+Memory conflict clarity v1 surfaces likely overlaps in the audit view and lets
+DS Agent apply link, merge, replace, update, archive, or reject decisions in the
+background with inspectable relation notes.
 Linked memory title/body search, linked memory search match source, and linked
 memory relation notes stay visible so related records are understandable during
 review. Manual existing-memory links let users connect already accepted
 long-term memories without waiting for a new candidate conflict.
 
-Memory import safety v1 keeps imported memory candidates in local review without
-writing long-term memory until accepted. It ensures imported memory candidates
-drop source-machine source links, and package-internal duplicate ids are counted
-as skipped. Older task-derived memories remain readable without exposing local
-source links.
+Memory import safety v1 keeps imported memory candidates local and auditable
+before DS Agent background maintenance resolves them. It ensures imported
+memory candidates drop source-machine source links, and package-internal
+duplicate ids are counted as skipped. Older task-derived memories remain
+readable without exposing local source links.

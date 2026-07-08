@@ -19,6 +19,13 @@ export type AgentContextReceiptSummary = {
 export type AgentContextReceiptMemoryFeedbackTarget = {
   memoryId: string;
   title: string;
+  rank: string;
+  score: string;
+  memoryType: string;
+  scope: string;
+  matchReason: string;
+  scoreBreakdown: string;
+  inclusionMode: string;
 };
 
 const MAX_LIST_ITEMS = 2;
@@ -106,7 +113,17 @@ function memoryFeedbackTargetSummary(memoryLines: string[]): AgentContextReceipt
       if (!memoryId || !title) {
         return null;
       }
-      return { memoryId, title };
+      return {
+        memoryId,
+        title,
+        rank: fieldValue(fields, "rank"),
+        score: fieldValue(fields, "score"),
+        memoryType: fieldValue(fields, "type"),
+        scope: fieldValue(fields, "scope"),
+        matchReason: fieldValue(fields, "match_reason"),
+        scoreBreakdown: fieldValue(fields, "score_breakdown"),
+        inclusionMode: fieldValue(fields, "inclusion_mode"),
+      };
     })
     .filter((target): target is AgentContextReceiptMemoryFeedbackTarget => target !== null)
     .slice(0, MAX_LIST_ITEMS);

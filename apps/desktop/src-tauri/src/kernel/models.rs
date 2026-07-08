@@ -122,8 +122,10 @@ pub enum MemorySelectedFeedbackKind {
 #[serde(rename_all = "snake_case")]
 pub enum MemoryCandidateSuggestedAction {
     New,
+    Update,
     Merge,
     Replace,
+    Archive,
     Link,
     RejectHint,
 }
@@ -831,6 +833,78 @@ impl MemorySelectedFeedback {
             created_at: Utc::now(),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryMaintenanceReviewKind {
+    Retrieval,
+    UpdateArchive,
+    Conflict,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryMaintenanceActionKind {
+    MarkReviewed,
+    Snooze,
+    RetrievalReviewed,
+    UpdateCandidateCreated,
+    Archived,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MemoryMaintenanceFeedbackCounts {
+    pub useful: usize,
+    pub irrelevant: usize,
+    pub stale: usize,
+    pub conflicting: usize,
+    pub should_update: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MemoryMaintenanceReviewAction {
+    pub id: Uuid,
+    pub memory_id: Uuid,
+    pub action: MemoryMaintenanceActionKind,
+    pub note: String,
+    pub snoozed_until: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl MemoryMaintenanceReviewAction {
+    pub fn new(
+        memory_id: Uuid,
+        action: MemoryMaintenanceActionKind,
+        snoozed_until: Option<DateTime<Utc>>,
+        note: String,
+    ) -> Result<Self, String> {
+        if action != MemoryMaintenanceActionKind::Snooze && snoozed_until.is_some() {
+            return Err("only snooze maintenance actions can set snoozed_until".to_string());
+        }
+
+        Ok(Self {
+            id: Uuid::new_v4(),
+            memory_id,
+            action,
+            note: compact_feedback_note(note),
+            snoozed_until,
+            created_at: Utc::now(),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MemoryMaintenanceReviewItem {
+    pub memory: MemoryRecord,
+    pub feedback_counts: MemoryMaintenanceFeedbackCounts,
+    pub feedback_count: usize,
+    pub latest_feedback: Option<MemorySelectedFeedback>,
+    pub review_kinds: Vec<MemoryMaintenanceReviewKind>,
+    pub recommended_actions: Vec<MemoryMaintenanceActionKind>,
+    pub review_needed: bool,
+    pub snoozed_until: Option<DateTime<Utc>>,
+    pub last_action: Option<MemoryMaintenanceReviewAction>,
 }
 
 fn compact_feedback_note(note: String) -> String {

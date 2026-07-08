@@ -13,10 +13,10 @@ use crate::kernel::deepseek::DeepSeekChatTelemetry;
 use crate::kernel::models::{
     KernelEvent, MemoryCandidate, MemoryCandidateMergePreview, MemoryCandidateRecord,
     MemoryCandidateReplacePreview, MemoryCandidateResolution, MemoryCandidateSource,
-    MemoryCandidateStatus, MemoryConflictSummary, MemoryRecord, MemoryRecordDeletion,
-    MemoryRecordLink, MemoryRecordLinkSummary, MemoryRecordUpdate, MemoryRelationKind,
-    MemorySearchMatch, MemorySearchMatchSource, MemorySelectedFeedback, MemorySelectedFeedbackKind,
-    TaskRecord,
+    MemoryCandidateStatus, MemoryConflictSummary, MemoryMaintenanceActionKind,
+    MemoryMaintenanceReviewAction, MemoryRecord, MemoryRecordDeletion, MemoryRecordLink,
+    MemoryRecordLinkSummary, MemoryRecordUpdate, MemoryRelationKind, MemorySearchMatch,
+    MemorySearchMatchSource, MemorySelectedFeedback, MemorySelectedFeedbackKind, TaskRecord,
 };
 use crate::kernel::policy::{
     capability_risk, CapabilityAccessRecord, CapabilityAccessRequest, CapabilityAccessStatus,
@@ -42,6 +42,8 @@ pub const MEMORY_RECORD_UPDATED_EVENT: &str = "memory_record.updated";
 pub const MEMORY_RECORD_DELETED_EVENT: &str = "memory_record.deleted";
 pub const MEMORY_RECORD_LINKED_EVENT: &str = "memory_record.linked";
 pub const MEMORY_SELECTED_FEEDBACK_RECORDED_EVENT: &str = "memory_selected_feedback.recorded";
+pub const MEMORY_MAINTENANCE_REVIEW_ACTION_RECORDED_EVENT: &str =
+    "memory_maintenance_review.action_recorded";
 pub const OPERATIONS_BRIEFING_RUN_RECORDED_EVENT: &str = "operations_briefing.run_recorded";
 pub const PERMISSION_AUDIT_RECORDED_EVENT: &str = "permission_audit.recorded";
 pub const PERMISSION_RESOLUTION_RECORDED_EVENT: &str = "permission_resolution.recorded";
@@ -610,6 +612,43 @@ impl EventStore {
             .into_iter()
             .map(|event| {
                 serde_json::from_str::<MemorySelectedFeedback>(&event.payload_json)
+                    .map_err(Into::into)
+            })
+            .collect()
+    }
+
+    pub fn record_memory_maintenance_review_action(
+        &self,
+        memory_id: Uuid,
+        action: MemoryMaintenanceActionKind,
+        snoozed_until: Option<DateTime<Utc>>,
+        note: String,
+    ) -> EventStoreResult<MemoryMaintenanceReviewAction> {
+        let exists = self
+            .list_memory_records()?
+            .into_iter()
+            .any(|memory| memory.id == memory_id);
+        if !exists {
+            return Err(EventStoreError::NotFound(format!(
+                "memory record {memory_id} was not found"
+            )));
+        }
+
+        let action = MemoryMaintenanceReviewAction::new(memory_id, action, snoozed_until, note)
+            .map_err(EventStoreError::InvalidState)?;
+        let event = KernelEvent::new(MEMORY_MAINTENANCE_REVIEW_ACTION_RECORDED_EVENT, &action)?;
+        self.append(&event)?;
+        Ok(action)
+    }
+
+    pub fn list_memory_maintenance_review_actions(
+        &self,
+    ) -> EventStoreResult<Vec<MemoryMaintenanceReviewAction>> {
+        let events = self.list_by_type(MEMORY_MAINTENANCE_REVIEW_ACTION_RECORDED_EVENT, 500)?;
+        events
+            .into_iter()
+            .map(|event| {
+                serde_json::from_str::<MemoryMaintenanceReviewAction>(&event.payload_json)
                     .map_err(Into::into)
             })
             .collect()

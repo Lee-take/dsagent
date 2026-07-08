@@ -70,9 +70,11 @@ use crate::kernel::models::{
 use crate::kernel::models::{
     MemoryCandidate, MemoryCandidateMergePreview, MemoryCandidateRecord,
     MemoryCandidateReplacePreview, MemoryCandidateResolution, MemoryCandidateSource,
-    MemoryCandidateStatus, MemoryCandidateSuggestedAction, MemoryLifecycle, MemoryRecord,
-    MemoryRecordDeletion, MemoryRecordLink, MemoryRecordUpdate, MemoryRelationKind, MemoryScope,
-    MemorySelectedFeedback, MemorySelectedFeedbackKind, MemorySensitivity, MemoryType,
+    MemoryCandidateStatus, MemoryCandidateSuggestedAction, MemoryLifecycle,
+    MemoryMaintenanceActionKind, MemoryMaintenanceFeedbackCounts, MemoryMaintenanceReviewAction,
+    MemoryMaintenanceReviewItem, MemoryMaintenanceReviewKind, MemoryRecord, MemoryRecordDeletion,
+    MemoryRecordLink, MemoryRecordUpdate, MemoryRelationKind, MemoryScope, MemorySelectedFeedback,
+    MemorySelectedFeedbackKind, MemorySensitivity, MemoryType,
 };
 use crate::kernel::network_search::{
     network_search_route_status_for_strategy, NetworkSearchRouteStatus,
@@ -134,7 +136,7 @@ const APP_UPDATE_RELEASES_API_URL: &str =
 const APP_UPDATE_RELEASE_DOWNLOAD_PREFIX: &str =
     "https://github.com/Lee-take/deepseek-agent-os/releases/download/";
 const APP_UPDATE_USER_AGENT: &str = "DS-Agent-Updater/0.1.0";
-const APP_UPDATE_CURRENT_RELEASE_TAG: &str = "v0.1.0-rc.9";
+const APP_UPDATE_CURRENT_RELEASE_TAG: &str = "v0.1.0-rc.10";
 const AGENT_SOUL_PROFILE_FILE_NAME: &str = "soul.md";
 const AGENT_SOUL_PROFILE_CONTEXT_MAX_BYTES: usize = 800;
 const AGENT_SOUL_PROFILE_MAX_BYTES: usize = 16 * 1024;
@@ -214,6 +216,15 @@ struct AgentMemoryRuntimeContext {
     filtered_sensitive: usize,
     filtered_archived: usize,
     omitted_by_budget: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MemoryBackgroundMaintenanceSummary {
+    pub retrieval_reviews_marked: usize,
+    pub update_candidates_created: usize,
+    pub auto_candidate_decisions_applied: usize,
+    pub auto_updates_applied: usize,
+    pub auto_archives_applied: usize,
 }
 
 impl Default for AgentMemoryRuntimeContext {
@@ -2604,6 +2615,519 @@ impl AgentMemoryFeedbackSummary {
             self.score_delta()
         )
     }
+
+    fn maintenance_counts(self) -> MemoryMaintenanceFeedbackCounts {
+        MemoryMaintenanceFeedbackCounts {
+            useful: self.useful,
+            irrelevant: self.irrelevant,
+            stale: self.stale,
+            conflicting: self.conflicting,
+            should_update: self.should_update,
+        }
+    }
+
+    fn maintenance_review_kinds(self) -> Vec<MemoryMaintenanceReviewKind> {
+        let mut kinds = Vec::new();
+        if self.needs_retrieval_review() {
+            kinds.push(MemoryMaintenanceReviewKind::Retrieval);
+        }
+        if self.needs_update_archive_review() || self.stale > 0 || self.should_update > 0 {
+            kinds.push(MemoryMaintenanceReviewKind::UpdateArchive);
+        }
+        if self.conflicting > 0 {
+            kinds.push(MemoryMaintenanceReviewKind::Conflict);
+        }
+        kinds
+    }
+
+    fn maintenance_recommended_actions(self) -> Vec<MemoryMaintenanceActionKind> {
+        let mut actions = Vec::new();
+        if self.needs_retrieval_review() {
+            actions.push(MemoryMaintenanceActionKind::RetrievalReviewed);
+        }
+        if self.needs_update_archive_review()
+            || self.stale > 0
+            || self.conflicting > 0
+            || self.should_update > 0
+        {
+            actions.push(MemoryMaintenanceActionKind::UpdateCandidateCreated);
+        }
+        if self.needs_update_archive_review() || self.stale > 0 {
+            actions.push(MemoryMaintenanceActionKind::Archived);
+        }
+        actions.push(MemoryMaintenanceActionKind::MarkReviewed);
+        actions.push(MemoryMaintenanceActionKind::Snooze);
+        actions
+    }
+}
+
+pub fn list_memory_maintenance_reviews_from_store(
+    store: &EventStore,
+) -> Result<Vec<MemoryMaintenanceReviewItem>, String> {
+    let memories = store.list_memory_records().map_err(event_store_error)?;
+    let feedback = store
+        .list_selected_memory_feedback()
+        .map_err(event_store_error)?;
+    let actions = store
+        .list_memory_maintenance_review_actions()
+        .map_err(event_store_error)?;
+    Ok(build_memory_maintenance_review_items(
+        &memories,
+        &feedback,
+        &actions,
+        Utc::now(),
+    ))
+}
+
+fn build_memory_maintenance_review_items(
+    memories: &[MemoryRecord],
+    feedback: &[MemorySelectedFeedback],
+    actions: &[MemoryMaintenanceReviewAction],
+    now: DateTime<Utc>,
+) -> Vec<MemoryMaintenanceReviewItem> {
+    let feedback_by_memory = agent_memory_feedback_by_memory(feedback);
+    let feedback_records_by_memory = feedback.iter().fold(
+        std::collections::HashMap::<Uuid, Vec<MemorySelectedFeedback>>::new(),
+        |mut groups, feedback| {
+            groups
+                .entry(feedback.memory_id)
+                .or_default()
+                .push(feedback.clone());
+            groups
+        },
+    );
+    let actions_by_memory = actions.iter().fold(
+        std::collections::HashMap::<Uuid, Vec<MemoryMaintenanceReviewAction>>::new(),
+        |mut groups, action| {
+            groups
+                .entry(action.memory_id)
+                .or_default()
+                .push(action.clone());
+            groups
+        },
+    );
+
+    let mut items = memories
+        .iter()
+        .filter_map(|memory| {
+            let summary = feedback_by_memory.get(&memory.id).copied()?;
+            let review_kinds = summary.maintenance_review_kinds();
+            if review_kinds.is_empty() {
+                return None;
+            }
+            let feedback_records = feedback_records_by_memory
+                .get(&memory.id)
+                .cloned()
+                .unwrap_or_default();
+            let latest_feedback = feedback_records
+                .iter()
+                .max_by_key(|feedback| feedback.created_at)
+                .cloned();
+            let latest_feedback_at = latest_feedback.as_ref().map(|feedback| feedback.created_at);
+            let last_action = actions_by_memory
+                .get(&memory.id)
+                .and_then(|actions| actions.iter().max_by_key(|action| action.created_at))
+                .cloned();
+            let snoozed_until = active_maintenance_snooze_until(last_action.as_ref(), now);
+            let review_needed = latest_feedback_at
+                .map(|feedback_at| {
+                    !maintenance_action_resolves_review(
+                        &review_kinds,
+                        last_action.as_ref(),
+                        feedback_at,
+                        now,
+                    )
+                })
+                .unwrap_or(false);
+
+            Some(MemoryMaintenanceReviewItem {
+                memory: memory.clone(),
+                feedback_counts: summary.maintenance_counts(),
+                feedback_count: feedback_records.len(),
+                latest_feedback,
+                review_kinds,
+                recommended_actions: summary.maintenance_recommended_actions(),
+                review_needed,
+                snoozed_until,
+                last_action,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    items.sort_by(|left, right| {
+        right
+            .review_needed
+            .cmp(&left.review_needed)
+            .then_with(|| right.review_kinds.len().cmp(&left.review_kinds.len()))
+            .then_with(|| {
+                right
+                    .latest_feedback
+                    .as_ref()
+                    .map(|feedback| feedback.created_at)
+                    .cmp(
+                        &left
+                            .latest_feedback
+                            .as_ref()
+                            .map(|feedback| feedback.created_at),
+                    )
+            })
+    });
+    items
+}
+
+fn active_maintenance_snooze_until(
+    action: Option<&MemoryMaintenanceReviewAction>,
+    now: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    action
+        .filter(|action| action.action == MemoryMaintenanceActionKind::Snooze)
+        .and_then(|action| action.snoozed_until)
+        .filter(|snoozed_until| *snoozed_until > now)
+}
+
+fn maintenance_action_resolves_review(
+    review_kinds: &[MemoryMaintenanceReviewKind],
+    action: Option<&MemoryMaintenanceReviewAction>,
+    latest_feedback_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> bool {
+    let Some(action) = action else {
+        return false;
+    };
+    if action.created_at < latest_feedback_at {
+        return false;
+    }
+    match action.action {
+        MemoryMaintenanceActionKind::MarkReviewed
+        | MemoryMaintenanceActionKind::UpdateCandidateCreated
+        | MemoryMaintenanceActionKind::Archived => true,
+        MemoryMaintenanceActionKind::RetrievalReviewed => review_kinds
+            .iter()
+            .all(|kind| *kind == MemoryMaintenanceReviewKind::Retrieval),
+        MemoryMaintenanceActionKind::Snooze => {
+            active_maintenance_snooze_until(Some(action), now).is_some()
+        }
+    }
+}
+
+pub fn record_memory_maintenance_review_action_in_store(
+    store: &EventStore,
+    memory_id: Uuid,
+    action: MemoryMaintenanceActionKind,
+    snoozed_until: Option<DateTime<Utc>>,
+    note: String,
+) -> Result<MemoryMaintenanceReviewAction, String> {
+    store
+        .record_memory_maintenance_review_action(memory_id, action, snoozed_until, note)
+        .map_err(event_store_error)
+}
+
+pub fn propose_memory_update_candidate_from_feedback_in_store(
+    store: &EventStore,
+    memory_id: Uuid,
+    note: String,
+) -> Result<MemoryCandidateRecord, String> {
+    let memory = store
+        .list_memory_records()
+        .map_err(event_store_error)?
+        .into_iter()
+        .find(|memory| memory.id == memory_id)
+        .ok_or_else(|| format!("memory record {memory_id} was not found"))?;
+    let latest_feedback = store
+        .list_selected_memory_feedback()
+        .map_err(event_store_error)?
+        .into_iter()
+        .filter(|feedback| feedback.memory_id == memory_id)
+        .max_by_key(|feedback| feedback.created_at);
+    let mut rationale_parts =
+        vec!["Maintenance review created an explicit update candidate.".to_string()];
+    if let Some(feedback) = latest_feedback.as_ref() {
+        rationale_parts.push(format!("Latest feedback: {:?}.", feedback.feedback));
+        if !feedback.note.trim().is_empty() {
+            rationale_parts.push(feedback.note.clone());
+        }
+    }
+    let note = note.trim();
+    if !note.is_empty() {
+        rationale_parts.push(note.to_string());
+    }
+    let candidate_body = latest_feedback
+        .as_ref()
+        .and_then(|feedback| {
+            let note = feedback.note.trim();
+            if note.is_empty() || memory.body.contains(note) {
+                None
+            } else {
+                Some(format!("{}\n\nMaintenance update: {}", memory.body, note))
+            }
+        })
+        .unwrap_or_else(|| memory.body.clone());
+    let mut candidate = MemoryCandidate::new_with_metadata_and_expiration(
+        memory.title.clone(),
+        candidate_body,
+        MemoryCandidateSource::Manual,
+        Some(memory.id),
+        rationale_parts.join(" "),
+        memory.memory_type,
+        memory.scope,
+        memory.sensitivity,
+        memory.lifecycle,
+        memory.expires_at,
+    )
+    .map_err(event_store_error)?;
+    candidate.suggested_action = MemoryCandidateSuggestedAction::Update;
+    store
+        .append_memory_candidate(&candidate)
+        .map_err(event_store_error)?;
+    store
+        .record_memory_maintenance_review_action(
+            memory_id,
+            MemoryMaintenanceActionKind::UpdateCandidateCreated,
+            None,
+            "Created update candidate from selected-memory feedback.".to_string(),
+        )
+        .map_err(event_store_error)?;
+    store
+        .list_memory_candidate_records()
+        .map_err(event_store_error)?
+        .into_iter()
+        .find(|record| record.candidate.id == candidate.id)
+        .ok_or_else(|| "memory update candidate was not found after append".to_string())
+}
+
+fn memory_candidate_background_note(action: MemoryCandidateSuggestedAction) -> String {
+    format!(
+        "Background maintenance automatically resolved memory candidate as {}.",
+        agent_memory_candidate_suggested_action_label(action)
+    )
+}
+
+fn preferred_memory_candidate_conflict_target(record: &MemoryCandidateRecord) -> Option<Uuid> {
+    record
+        .candidate
+        .source_id
+        .filter(|memory_id| record.conflicting_memory_ids.contains(memory_id))
+        .or_else(|| {
+            if record.conflicting_memory_ids.len() == 1 {
+                record.conflicting_memory_ids.first().copied()
+            } else {
+                None
+            }
+        })
+}
+
+fn apply_pending_memory_candidate_background_decision(
+    store: &EventStore,
+    record: &MemoryCandidateRecord,
+    summary: &mut MemoryBackgroundMaintenanceSummary,
+) -> Result<bool, String> {
+    if record.effective_status != MemoryCandidateStatus::Pending {
+        return Ok(false);
+    }
+
+    let action = record.candidate.suggested_action;
+    let note = memory_candidate_background_note(action);
+    match action {
+        MemoryCandidateSuggestedAction::New => {
+            if record.conflicting_memory_ids.is_empty() {
+                store
+                    .resolve_memory_candidate(record.candidate.id, true, note)
+                    .map_err(event_store_error)?;
+            } else {
+                store
+                    .merge_memory_candidate_with_conflicts(
+                        record.candidate.id,
+                        record.conflicting_memory_ids.clone(),
+                        note,
+                    )
+                    .map_err(event_store_error)?;
+                summary.auto_updates_applied += 1;
+            }
+        }
+        MemoryCandidateSuggestedAction::Update => {
+            let Some(target_memory_id) = preferred_memory_candidate_conflict_target(record) else {
+                return Ok(false);
+            };
+            store
+                .update_memory_candidate_conflict(record.candidate.id, target_memory_id, note)
+                .map_err(event_store_error)?;
+            summary.auto_updates_applied += 1;
+        }
+        MemoryCandidateSuggestedAction::Merge => {
+            if record.conflicting_memory_ids.is_empty() {
+                return Ok(false);
+            }
+            store
+                .merge_memory_candidate_with_conflicts(
+                    record.candidate.id,
+                    record.conflicting_memory_ids.clone(),
+                    note,
+                )
+                .map_err(event_store_error)?;
+            summary.auto_updates_applied += 1;
+        }
+        MemoryCandidateSuggestedAction::Replace => {
+            if record.conflicting_memory_ids.is_empty() {
+                return Ok(false);
+            }
+            store
+                .replace_memory_candidate_conflicts(
+                    record.candidate.id,
+                    record.conflicting_memory_ids.clone(),
+                    note,
+                )
+                .map_err(event_store_error)?;
+            summary.auto_updates_applied += 1;
+        }
+        MemoryCandidateSuggestedAction::Archive => {
+            if record.conflicting_memory_ids.is_empty() {
+                return Ok(false);
+            }
+            let archived_count = record.conflicting_memory_ids.len();
+            store
+                .archive_memory_candidate_conflicts(
+                    record.candidate.id,
+                    record.conflicting_memory_ids.clone(),
+                    note,
+                )
+                .map_err(event_store_error)?;
+            summary.auto_archives_applied += archived_count;
+        }
+        MemoryCandidateSuggestedAction::Link => {
+            if record.conflicting_memory_ids.is_empty() {
+                return Ok(false);
+            }
+            store
+                .link_memory_candidate_to_conflicts_with_relation(
+                    record.candidate.id,
+                    record.conflicting_memory_ids.clone(),
+                    MemoryRelationKind::Extends,
+                    note,
+                )
+                .map_err(event_store_error)?;
+            summary.auto_updates_applied += 1;
+        }
+        MemoryCandidateSuggestedAction::RejectHint => {
+            store
+                .resolve_memory_candidate(record.candidate.id, false, note)
+                .map_err(event_store_error)?;
+        }
+    }
+
+    summary.auto_candidate_decisions_applied += 1;
+    Ok(true)
+}
+
+fn apply_pending_memory_candidate_background_decisions(
+    store: &EventStore,
+    summary: &mut MemoryBackgroundMaintenanceSummary,
+) -> Result<(), String> {
+    let pending_candidates = store
+        .list_memory_candidate_records()
+        .map_err(event_store_error)?
+        .into_iter()
+        .filter(|record| record.effective_status == MemoryCandidateStatus::Pending)
+        .collect::<Vec<_>>();
+    for record in pending_candidates {
+        apply_pending_memory_candidate_background_decision(store, &record, summary)?;
+    }
+    Ok(())
+}
+
+pub fn run_memory_background_maintenance_in_store(
+    store: &EventStore,
+) -> Result<MemoryBackgroundMaintenanceSummary, String> {
+    let mut summary = MemoryBackgroundMaintenanceSummary {
+        retrieval_reviews_marked: 0,
+        update_candidates_created: 0,
+        auto_candidate_decisions_applied: 0,
+        auto_updates_applied: 0,
+        auto_archives_applied: 0,
+    };
+    apply_pending_memory_candidate_background_decisions(store, &mut summary)?;
+    let reviews = list_memory_maintenance_reviews_from_store(store)?;
+
+    for review in reviews.into_iter().filter(|review| review.review_needed) {
+        if review.review_kinds == [MemoryMaintenanceReviewKind::Retrieval] {
+            store
+                .record_memory_maintenance_review_action(
+                    review.memory.id,
+                    MemoryMaintenanceActionKind::RetrievalReviewed,
+                    None,
+                    "Background maintenance marked repeated irrelevant feedback for retrieval tuning."
+                        .to_string(),
+                )
+                .map_err(event_store_error)?;
+            summary.retrieval_reviews_marked += 1;
+            continue;
+        }
+
+        if review.feedback_counts.stale >= AGENT_MEMORY_FEEDBACK_MAINTENANCE_THRESHOLD {
+            store
+                .record_memory_maintenance_review_action(
+                    review.memory.id,
+                    MemoryMaintenanceActionKind::Archived,
+                    None,
+                    "Background maintenance archived memory after repeated stale feedback."
+                        .to_string(),
+                )
+                .map_err(event_store_error)?;
+            store
+                .delete_memory_record(
+                    review.memory.id,
+                    "Background maintenance archived repeated stale memory.".to_string(),
+                )
+                .map_err(event_store_error)?;
+            summary.auto_archives_applied += 1;
+            continue;
+        }
+
+        if review
+            .recommended_actions
+            .contains(&MemoryMaintenanceActionKind::UpdateCandidateCreated)
+        {
+            let existing_pending_candidate = store
+                .list_memory_candidate_records()
+                .map_err(event_store_error)?
+                .into_iter()
+                .find(|candidate| {
+                    candidate.effective_status == MemoryCandidateStatus::Pending
+                        && candidate.conflicting_memory_ids.contains(&review.memory.id)
+                });
+            if let Some(candidate) = existing_pending_candidate {
+                store
+                    .update_memory_candidate_conflict(
+                        candidate.candidate.id,
+                        review.memory.id,
+                        "Background maintenance automatically applied pending update candidate."
+                            .to_string(),
+                    )
+                    .map_err(event_store_error)?;
+                summary.auto_candidate_decisions_applied += 1;
+                summary.auto_updates_applied += 1;
+                continue;
+            }
+            let candidate = propose_memory_update_candidate_from_feedback_in_store(
+                store,
+                review.memory.id,
+                "Background maintenance created a pending update candidate from feedback."
+                    .to_string(),
+            )?;
+            summary.update_candidates_created += 1;
+            store
+                .update_memory_candidate_conflict(
+                    candidate.candidate.id,
+                    review.memory.id,
+                    "Background maintenance automatically applied update candidate from feedback."
+                        .to_string(),
+                )
+                .map_err(event_store_error)?;
+            summary.auto_candidate_decisions_applied += 1;
+            summary.auto_updates_applied += 1;
+        }
+    }
+
+    Ok(summary)
 }
 
 fn load_agent_memory_runtime_context(
@@ -2743,27 +3267,27 @@ fn select_agent_memory_runtime_context_with_feedback(
     }
     if feedback_stale > 0 {
         context.omissions.push(format!(
-            "{feedback_stale} memories marked stale by feedback need update or archive review"
+            "{feedback_stale} memories marked stale by feedback enter background update/archive maintenance"
         ));
     }
     if feedback_conflicting > 0 {
         context.omissions.push(format!(
-            "{feedback_conflicting} memories flagged conflicting by feedback need conflict review"
+            "{feedback_conflicting} memories flagged conflicting by feedback enter background conflict maintenance"
         ));
     }
     if feedback_should_update > 0 {
         context.omissions.push(format!(
-            "{feedback_should_update} memories marked should_update by feedback need update candidate review"
+            "{feedback_should_update} memories marked should_update by feedback enter background update maintenance"
         ));
     }
     if feedback_repeated_irrelevant > 0 {
         context.omissions.push(format!(
-            "{feedback_repeated_irrelevant} memories repeatedly marked irrelevant by feedback need retrieval review"
+            "{feedback_repeated_irrelevant} memories repeatedly marked irrelevant by feedback enter background retrieval tuning"
         ));
     }
     if feedback_repeated_stale > 0 {
         context.omissions.push(format!(
-            "{feedback_repeated_stale} memories repeatedly marked stale by feedback need update or archive review"
+            "{feedback_repeated_stale} memories repeatedly marked stale by feedback enter background archive maintenance"
         ));
     }
     context.omitted_by_budget = budget_omitted;
@@ -4033,8 +4557,10 @@ fn agent_memory_candidate_suggested_action_label(
 ) -> &'static str {
     match action {
         MemoryCandidateSuggestedAction::New => "new",
+        MemoryCandidateSuggestedAction::Update => "update",
         MemoryCandidateSuggestedAction::Merge => "merge",
         MemoryCandidateSuggestedAction::Replace => "replace",
+        MemoryCandidateSuggestedAction::Archive => "archive",
         MemoryCandidateSuggestedAction::Link => "link",
         MemoryCandidateSuggestedAction::RejectHint => "reject_hint",
     }
@@ -6862,6 +7388,22 @@ pub fn list_selected_memory_feedback(
 }
 
 #[tauri::command]
+pub fn list_memory_maintenance_reviews(
+    state: State<'_, AppState>,
+) -> Result<Vec<MemoryMaintenanceReviewItem>, String> {
+    let store = state.event_store.lock().map_err(|_| lock_error())?;
+    list_memory_maintenance_reviews_from_store(&store)
+}
+
+#[tauri::command]
+pub fn run_memory_background_maintenance(
+    state: State<'_, AppState>,
+) -> Result<MemoryBackgroundMaintenanceSummary, String> {
+    let store = state.event_store.lock().map_err(|_| lock_error())?;
+    run_memory_background_maintenance_in_store(&store)
+}
+
+#[tauri::command]
 pub fn search_memory_records(
     query: String,
     state: State<'_, AppState>,
@@ -7008,6 +7550,48 @@ pub fn record_selected_memory_feedback(
     let store = state.event_store.lock().map_err(|_| lock_error())?;
     store
         .record_selected_memory_feedback(memory_id, context_receipt_id, feedback, note)
+        .map_err(event_store_error)
+}
+
+#[tauri::command]
+pub fn record_memory_maintenance_review_action(
+    memory_id: Uuid,
+    action: MemoryMaintenanceActionKind,
+    snoozed_until: Option<DateTime<Utc>>,
+    note: String,
+    state: State<'_, AppState>,
+) -> Result<MemoryMaintenanceReviewAction, String> {
+    let store = state.event_store.lock().map_err(|_| lock_error())?;
+    record_memory_maintenance_review_action_in_store(&store, memory_id, action, snoozed_until, note)
+}
+
+#[tauri::command]
+pub fn propose_memory_update_candidate_from_feedback(
+    memory_id: Uuid,
+    note: String,
+    state: State<'_, AppState>,
+) -> Result<MemoryCandidateRecord, String> {
+    let store = state.event_store.lock().map_err(|_| lock_error())?;
+    propose_memory_update_candidate_from_feedback_in_store(&store, memory_id, note)
+}
+
+#[tauri::command]
+pub fn archive_memory_from_maintenance_review(
+    memory_id: Uuid,
+    note: String,
+    state: State<'_, AppState>,
+) -> Result<MemoryRecordDeletion, String> {
+    let store = state.event_store.lock().map_err(|_| lock_error())?;
+    store
+        .record_memory_maintenance_review_action(
+            memory_id,
+            MemoryMaintenanceActionKind::Archived,
+            None,
+            note.clone(),
+        )
+        .map_err(event_store_error)?;
+    store
+        .delete_memory_record(memory_id, note)
         .map_err(event_store_error)
 }
 
@@ -8301,14 +8885,17 @@ mod tests {
         dispatch_agent_browser_open_action_with_opener, dispatch_agent_computer_control_action,
         dispatch_agent_office_create_action, dispatch_agent_office_open_action,
         dispatch_agent_office_update_action, link_existing_memory_records,
+        list_memory_maintenance_reviews_from_store,
         operations_briefing_deepseek_api_key_for_provider, operations_briefing_model_route_context,
         operations_briefing_report_export_dir, operations_briefing_template_seed_dir,
-        operations_briefing_token_cache_context, record_agent_action_permission_requests,
+        operations_briefing_token_cache_context,
+        propose_memory_update_candidate_from_feedback_in_store,
+        record_agent_action_permission_requests, record_memory_maintenance_review_action_in_store,
         resume_agent_chat_action_with_clients, run_agent_chat_with_clients,
-        should_require_computer_control_unlock, thinking_level_context_label,
-        AgentChatActionProposal, AgentChatReadiness, AgentChatRequest, AgentChatRuntimeContext,
-        BrowserUrlOpenOutcome, BrowserUrlOpener, ComputerControlUnlockState,
-        COMPUTER_CONTROL_UNLOCK_TTL_MINUTES,
+        run_memory_background_maintenance_in_store, should_require_computer_control_unlock,
+        thinking_level_context_label, AgentChatActionProposal, AgentChatReadiness,
+        AgentChatRequest, AgentChatRuntimeContext, BrowserUrlOpenOutcome, BrowserUrlOpener,
+        ComputerControlUnlockState, COMPUTER_CONTROL_UNLOCK_TTL_MINUTES,
     };
     use crate::kernel::capability::{
         BrowserPage, BrowserPageClient, CapabilityInvocationStatus, ComputerControlAction,
@@ -8329,7 +8916,8 @@ mod tests {
     use crate::kernel::models::{
         AccessMode, ComputerControlBackend, ComputerScreenshotBackend, LargeModelProvider,
         MemoryCandidate, MemoryCandidateRecord, MemoryCandidateResolution, MemoryCandidateSource,
-        MemoryCandidateStatus, MemoryLifecycle, MemoryRecord, MemoryRecordSource,
+        MemoryCandidateStatus, MemoryCandidateSuggestedAction, MemoryLifecycle,
+        MemoryMaintenanceActionKind, MemoryMaintenanceReviewKind, MemoryRecord, MemoryRecordSource,
         MemoryRelationKind, MemoryScope, MemorySearchMatch, MemorySelectedFeedbackKind,
         MemorySensitivity, MemoryType, ModelRoute, NetworkSearchSourceModel, TaskRecord,
         ThinkingLevel,
@@ -10116,14 +10704,14 @@ mod tests {
             super::load_agent_memory_runtime_context(&store, "请按默认语气回复").expect("context");
 
         assert_eq!(context.considered_records, memories.len());
-        assert!(context.omissions.iter().any(
-            |line| line == "1 memories marked stale by feedback need update or archive review"
-        ));
+        assert!(context.omissions.iter().any(|line| line
+            == "1 memories marked stale by feedback enter background update/archive maintenance"));
         assert!(context.omissions.iter().any(|line| {
-            line == "1 memories flagged conflicting by feedback need conflict review"
+            line == "1 memories flagged conflicting by feedback enter background conflict maintenance"
         }));
         assert!(context.omissions.iter().any(|line| {
-            line == "1 memories marked should_update by feedback need update candidate review"
+            line
+                == "1 memories marked should_update by feedback enter background update maintenance"
         }));
     }
 
@@ -10186,11 +10774,425 @@ mod tests {
 
         assert_eq!(store.list_memory_records().expect("records").len(), 2);
         assert!(context.omissions.iter().any(|line| {
-            line == "1 memories repeatedly marked irrelevant by feedback need retrieval review"
+            line
+                == "1 memories repeatedly marked irrelevant by feedback enter background retrieval tuning"
         }));
         assert!(context.omissions.iter().any(|line| {
-            line == "1 memories repeatedly marked stale by feedback need update or archive review"
+            line
+                == "1 memories repeatedly marked stale by feedback enter background archive maintenance"
         }));
+    }
+
+    #[test]
+    fn memory_maintenance_reviews_surface_actions_and_respect_review_actions() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let now = Utc::now();
+        let memory = MemoryRecord {
+            id: Uuid::new_v4(),
+            title: "Memory maintenance review target".to_string(),
+            body: "Use the older memory workflow until the new review loop exists.".to_string(),
+            memory_type: MemoryType::WorkflowRule,
+            scope: MemoryScope::Project,
+            sensitivity: MemorySensitivity::Normal,
+            lifecycle: MemoryLifecycle::Active,
+            source: MemoryRecordSource::MemoryCandidate,
+            source_id: None,
+            pinned: false,
+            expires_at: None,
+            linked_memory_ids: Vec::new(),
+            linked_memories: Vec::new(),
+            search_match: MemorySearchMatch::direct(),
+            created_at: now,
+            updated_at: now,
+        };
+        store.append_memory_record(&memory).expect("memory appends");
+        for feedback_kind in [
+            MemorySelectedFeedbackKind::Irrelevant,
+            MemorySelectedFeedbackKind::Irrelevant,
+            MemorySelectedFeedbackKind::Stale,
+            MemorySelectedFeedbackKind::Stale,
+        ] {
+            store
+                .record_selected_memory_feedback(
+                    memory.id,
+                    None,
+                    feedback_kind,
+                    "Selected memory needs maintenance review.".to_string(),
+                )
+                .expect("feedback appends");
+        }
+
+        let reviews =
+            list_memory_maintenance_reviews_from_store(&store).expect("maintenance reviews load");
+
+        assert_eq!(reviews.len(), 1);
+        assert_eq!(reviews[0].memory.id, memory.id);
+        assert!(reviews[0].review_needed);
+        assert!(reviews[0]
+            .review_kinds
+            .contains(&MemoryMaintenanceReviewKind::Retrieval));
+        assert!(reviews[0]
+            .review_kinds
+            .contains(&MemoryMaintenanceReviewKind::UpdateArchive));
+        assert!(reviews[0]
+            .recommended_actions
+            .contains(&MemoryMaintenanceActionKind::RetrievalReviewed));
+        assert!(reviews[0]
+            .recommended_actions
+            .contains(&MemoryMaintenanceActionKind::UpdateCandidateCreated));
+        assert!(reviews[0]
+            .recommended_actions
+            .contains(&MemoryMaintenanceActionKind::Archived));
+
+        let snoozed_until = now + Duration::hours(4);
+        record_memory_maintenance_review_action_in_store(
+            &store,
+            memory.id,
+            MemoryMaintenanceActionKind::Snooze,
+            Some(snoozed_until),
+            "Review after the current release test.".to_string(),
+        )
+        .expect("maintenance review action records");
+        let snoozed_reviews =
+            list_memory_maintenance_reviews_from_store(&store).expect("maintenance reviews reload");
+
+        assert_eq!(snoozed_reviews.len(), 1);
+        assert!(!snoozed_reviews[0].review_needed);
+        assert_eq!(snoozed_reviews[0].snoozed_until, Some(snoozed_until));
+        assert_eq!(
+            snoozed_reviews[0]
+                .last_action
+                .as_ref()
+                .map(|action| action.action),
+            Some(MemoryMaintenanceActionKind::Snooze)
+        );
+    }
+
+    #[test]
+    fn selected_memory_feedback_can_create_pending_update_candidate_without_mutating_memory() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let now = Utc::now();
+        let memory = MemoryRecord {
+            id: Uuid::new_v4(),
+            title: "Preferred memory review wording".to_string(),
+            body: "Use the old review wording in the memory receipt.".to_string(),
+            memory_type: MemoryType::Preference,
+            scope: MemoryScope::Project,
+            sensitivity: MemorySensitivity::Normal,
+            lifecycle: MemoryLifecycle::Active,
+            source: MemoryRecordSource::MemoryCandidate,
+            source_id: None,
+            pinned: false,
+            expires_at: None,
+            linked_memory_ids: Vec::new(),
+            linked_memories: Vec::new(),
+            search_match: MemorySearchMatch::direct(),
+            created_at: now,
+            updated_at: now,
+        };
+        store.append_memory_record(&memory).expect("memory appends");
+        store
+            .record_selected_memory_feedback(
+                memory.id,
+                None,
+                MemorySelectedFeedbackKind::ShouldUpdate,
+                "Update this memory with the clearer receipt wording.".to_string(),
+            )
+            .expect("feedback appends");
+
+        let candidate = propose_memory_update_candidate_from_feedback_in_store(
+            &store,
+            memory.id,
+            "Create an explicit update candidate from feedback.".to_string(),
+        )
+        .expect("update candidate is proposed");
+        let memories_after = store.list_memory_records().expect("memories load");
+        let reviews_after =
+            list_memory_maintenance_reviews_from_store(&store).expect("maintenance reviews load");
+
+        assert_eq!(memories_after.len(), 1);
+        assert_eq!(memories_after[0].id, memory.id);
+        assert_eq!(memories_after[0].body, memory.body);
+        assert_eq!(candidate.effective_status, MemoryCandidateStatus::Pending);
+        assert_eq!(candidate.candidate.title, memory.title);
+        assert!(candidate.conflicting_memory_ids.contains(&memory.id));
+        assert!(candidate
+            .candidate
+            .rationale
+            .contains("Update this memory with the clearer receipt wording."));
+        assert!(!reviews_after[0].review_needed);
+        assert_eq!(
+            reviews_after[0]
+                .last_action
+                .as_ref()
+                .map(|action| action.action),
+            Some(MemoryMaintenanceActionKind::UpdateCandidateCreated)
+        );
+    }
+
+    #[test]
+    fn memory_background_maintenance_runs_without_user_clicks_and_is_idempotent() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let now = Utc::now();
+        let irrelevant_memory = MemoryRecord {
+            id: Uuid::new_v4(),
+            title: "Out of scope launch checklist".to_string(),
+            body: "Use this launch checklist for every memory query.".to_string(),
+            memory_type: MemoryType::WorkflowRule,
+            scope: MemoryScope::Project,
+            sensitivity: MemorySensitivity::Normal,
+            lifecycle: MemoryLifecycle::Active,
+            source: MemoryRecordSource::MemoryCandidate,
+            source_id: None,
+            pinned: false,
+            expires_at: None,
+            linked_memory_ids: Vec::new(),
+            linked_memories: Vec::new(),
+            search_match: MemorySearchMatch::direct(),
+            created_at: now,
+            updated_at: now,
+        };
+        let stale_memory = MemoryRecord {
+            id: Uuid::new_v4(),
+            title: "Old memory receipt wording".to_string(),
+            body: "Use the old receipt wording for memory feedback.".to_string(),
+            updated_at: now + Duration::seconds(30),
+            ..irrelevant_memory.clone()
+        };
+        store
+            .append_memory_record(&irrelevant_memory)
+            .expect("irrelevant memory appends");
+        store
+            .append_memory_record(&stale_memory)
+            .expect("stale memory appends");
+        for _ in 0..2 {
+            store
+                .record_selected_memory_feedback(
+                    irrelevant_memory.id,
+                    None,
+                    MemorySelectedFeedbackKind::Irrelevant,
+                    "This memory should not be retrieved for this area.".to_string(),
+                )
+                .expect("irrelevant feedback appends");
+        }
+        store
+            .record_selected_memory_feedback(
+                stale_memory.id,
+                None,
+                MemorySelectedFeedbackKind::ShouldUpdate,
+                "The receipt wording should mention automatic maintenance.".to_string(),
+            )
+            .expect("should_update feedback appends");
+
+        let first_summary =
+            run_memory_background_maintenance_in_store(&store).expect("maintenance runs");
+        let second_summary =
+            run_memory_background_maintenance_in_store(&store).expect("maintenance reruns");
+        let candidates = store
+            .list_memory_candidate_records()
+            .expect("candidate records load");
+        let memories = store.list_memory_records().expect("memories load");
+        let actions = store
+            .list_memory_maintenance_review_actions()
+            .expect("maintenance actions load");
+        let reviews = list_memory_maintenance_reviews_from_store(&store).expect("reviews load");
+
+        assert_eq!(first_summary.retrieval_reviews_marked, 1);
+        assert_eq!(first_summary.update_candidates_created, 1);
+        assert_eq!(first_summary.auto_updates_applied, 1);
+        assert_eq!(first_summary.auto_archives_applied, 0);
+        assert_eq!(second_summary.retrieval_reviews_marked, 0);
+        assert_eq!(second_summary.update_candidates_created, 0);
+        assert_eq!(second_summary.auto_updates_applied, 0);
+        assert_eq!(second_summary.auto_archives_applied, 0);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].effective_status,
+            MemoryCandidateStatus::Accepted
+        );
+        assert!(candidates[0]
+            .conflicting_memory_ids
+            .contains(&stale_memory.id));
+        assert_eq!(memories.len(), 2);
+        let updated_memory = memories
+            .iter()
+            .find(|memory| memory.id == stale_memory.id)
+            .expect("stale memory remains as updated memory");
+        assert!(updated_memory
+            .body
+            .contains("The receipt wording should mention automatic maintenance."));
+        assert_eq!(actions.len(), 2);
+        assert!(actions
+            .iter()
+            .any(|action| action.action == MemoryMaintenanceActionKind::RetrievalReviewed));
+        assert!(actions.iter().any(|action| {
+            action.action == MemoryMaintenanceActionKind::UpdateCandidateCreated
+        }));
+        assert!(reviews.iter().all(|review| !review.review_needed));
+    }
+
+    #[test]
+    fn memory_background_maintenance_archives_repeated_stale_memory_without_user_clicks() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let now = Utc::now();
+        let memory = MemoryRecord {
+            id: Uuid::new_v4(),
+            title: "Retired browser workflow".to_string(),
+            body: "Always require separate user confirmation before opening normal websites."
+                .to_string(),
+            memory_type: MemoryType::WorkflowRule,
+            scope: MemoryScope::Project,
+            sensitivity: MemorySensitivity::Normal,
+            lifecycle: MemoryLifecycle::Active,
+            source: MemoryRecordSource::MemoryCandidate,
+            source_id: None,
+            pinned: false,
+            expires_at: None,
+            linked_memory_ids: Vec::new(),
+            linked_memories: Vec::new(),
+            search_match: MemorySearchMatch::direct(),
+            created_at: now,
+            updated_at: now,
+        };
+        store.append_memory_record(&memory).expect("memory appends");
+        for _ in 0..2 {
+            store
+                .record_selected_memory_feedback(
+                    memory.id,
+                    None,
+                    MemorySelectedFeedbackKind::Stale,
+                    "This memory is stale and should not guide future runs.".to_string(),
+                )
+                .expect("stale feedback appends");
+        }
+
+        let first_summary =
+            run_memory_background_maintenance_in_store(&store).expect("maintenance runs");
+        let second_summary =
+            run_memory_background_maintenance_in_store(&store).expect("maintenance reruns");
+        let memories = store.list_memory_records().expect("memories load");
+        let deletions = store
+            .list_memory_record_deletions()
+            .expect("deletions load");
+        let actions = store
+            .list_memory_maintenance_review_actions()
+            .expect("maintenance actions load");
+
+        assert_eq!(first_summary.auto_archives_applied, 1);
+        assert_eq!(second_summary.auto_archives_applied, 0);
+        assert!(memories.is_empty());
+        assert_eq!(deletions.len(), 1);
+        assert_eq!(deletions[0].memory_id, memory.id);
+        assert!(actions
+            .iter()
+            .any(|action| action.action == MemoryMaintenanceActionKind::Archived));
+    }
+
+    #[test]
+    fn memory_background_maintenance_auto_resolves_pending_update_and_archive_candidates() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let now = Utc::now();
+        let update_target = MemoryRecord {
+            id: Uuid::new_v4(),
+            title: "Memory receipt wording".to_string(),
+            body: "Use the old memory receipt copy.".to_string(),
+            memory_type: MemoryType::WorkflowRule,
+            scope: MemoryScope::Project,
+            sensitivity: MemorySensitivity::Normal,
+            lifecycle: MemoryLifecycle::Active,
+            source: MemoryRecordSource::MemoryCandidate,
+            source_id: None,
+            pinned: false,
+            expires_at: None,
+            linked_memory_ids: Vec::new(),
+            linked_memories: Vec::new(),
+            search_match: MemorySearchMatch::direct(),
+            created_at: now,
+            updated_at: now,
+        };
+        let archive_target = MemoryRecord {
+            id: Uuid::new_v4(),
+            title: "Legacy website confirmation rule".to_string(),
+            body: "Always require a separate user confirmation before opening normal websites."
+                .to_string(),
+            updated_at: now + Duration::seconds(30),
+            ..update_target.clone()
+        };
+        store
+            .append_memory_record(&update_target)
+            .expect("update target appends");
+        store
+            .append_memory_record(&archive_target)
+            .expect("archive target appends");
+
+        let mut update_candidate = MemoryCandidate::new_with_metadata_and_expiration(
+            update_target.title.clone(),
+            "Use the new automatic memory maintenance receipt copy.".to_string(),
+            MemoryCandidateSource::WorkflowReflection,
+            Some(update_target.id),
+            "DS Agent detected that this memory should be updated.".to_string(),
+            update_target.memory_type,
+            update_target.scope,
+            update_target.sensitivity,
+            update_target.lifecycle,
+            update_target.expires_at,
+        )
+        .expect("update candidate builds");
+        update_candidate.suggested_action = MemoryCandidateSuggestedAction::Update;
+        let mut archive_candidate = MemoryCandidate::new_with_metadata_and_expiration(
+            archive_target.title.clone(),
+            archive_target.body.clone(),
+            MemoryCandidateSource::WorkflowReflection,
+            Some(archive_target.id),
+            "DS Agent detected that this memory is stale enough to archive.".to_string(),
+            archive_target.memory_type,
+            archive_target.scope,
+            archive_target.sensitivity,
+            archive_target.lifecycle,
+            archive_target.expires_at,
+        )
+        .expect("archive candidate builds");
+        archive_candidate.suggested_action = MemoryCandidateSuggestedAction::Archive;
+        store
+            .append_memory_candidate(&update_candidate)
+            .expect("update candidate appends");
+        store
+            .append_memory_candidate(&archive_candidate)
+            .expect("archive candidate appends");
+
+        let first_summary =
+            run_memory_background_maintenance_in_store(&store).expect("maintenance runs");
+        let second_summary =
+            run_memory_background_maintenance_in_store(&store).expect("maintenance reruns");
+        let candidates = store
+            .list_memory_candidate_records()
+            .expect("candidate records load");
+        let memories = store.list_memory_records().expect("memories load");
+        let deletions = store
+            .list_memory_record_deletions()
+            .expect("deletions load");
+
+        assert_eq!(first_summary.auto_candidate_decisions_applied, 2);
+        assert_eq!(first_summary.auto_updates_applied, 1);
+        assert_eq!(first_summary.auto_archives_applied, 1);
+        assert_eq!(second_summary.auto_candidate_decisions_applied, 0);
+        assert_eq!(second_summary.auto_updates_applied, 0);
+        assert_eq!(second_summary.auto_archives_applied, 0);
+        assert!(candidates
+            .iter()
+            .all(|record| record.effective_status == MemoryCandidateStatus::Accepted));
+        let updated_memory = memories
+            .iter()
+            .find(|memory| memory.id == update_target.id)
+            .expect("update target remains after automatic update");
+        assert_eq!(
+            updated_memory.body,
+            "Use the new automatic memory maintenance receipt copy."
+        );
+        assert!(memories.iter().all(|memory| memory.id != archive_target.id));
+        assert!(deletions
+            .iter()
+            .any(|deletion| deletion.memory_id == archive_target.id));
     }
 
     #[test]
@@ -12934,17 +13936,17 @@ schema_version: 1
     }
 
     #[test]
-    fn agent_chat_records_model_memory_candidates_for_review_only() {
+    fn agent_chat_records_model_memory_candidates_for_background_maintenance() {
         let store = Mutex::new(EventStore::open_memory().expect("memory store opens"));
         let model_envelope = serde_json::json!({
             "protocol_version": "ds-agent-envelope/v1",
-            "reply_to_user": "我记录了一个候选记忆，等待你复核。",
+            "reply_to_user": "我记录了一个候选记忆，后台会自动维护。",
             "agent_actions": [],
             "missing_prerequisites": [],
             "memory_candidates": [
                 {
                     "title": "DS Agent boundary",
-                    "body": "DS Agent should treat DeepSeek memory suggestions as reviewable candidates.",
+                    "body": "DS Agent should treat DeepSeek memory suggestions as background-maintained candidates.",
                     "rationale": "The user explicitly defined the model-agent boundary.",
                     "memory_type": "project_context",
                     "scope": "workspace",
@@ -13006,11 +14008,11 @@ schema_version: 1
     }
 
     #[test]
-    fn agent_chat_gates_model_memory_candidates_to_three_review_items() {
+    fn agent_chat_gates_model_memory_candidates_to_three_background_items() {
         let store = Mutex::new(EventStore::open_memory().expect("memory store opens"));
         let model_envelope = serde_json::json!({
             "protocol_version": "ds-agent-envelope/v1",
-            "reply_to_user": "我会提出候选记忆，等待你复核。",
+            "reply_to_user": "我会提出候选记忆，后台会自动维护。",
             "agent_actions": [],
             "missing_prerequisites": [],
             "memory_candidates": [

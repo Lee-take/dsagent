@@ -90,11 +90,12 @@ import type {
   LargeModelProvider,
   Language,
   LocalDirectoryState,
+  MemoryBackgroundMaintenanceSummary,
   MemoryCandidate,
-  MemoryCandidateMergePreview,
-  MemoryCandidateReplacePreview,
   MemoryCandidateRecord,
   MemoryLifecycle,
+  MemoryMaintenanceReviewItem,
+  MemoryMaintenanceReviewKind,
   MemoryRecord,
   MemoryRecordDeletion,
   MemorySearchMatch,
@@ -302,6 +303,52 @@ const memoryScopeValues: MemoryScope[] = ["workspace", "project", "organization"
 const memorySensitivityValues: MemorySensitivity[] = ["normal", "sensitive"];
 
 const memoryLifecycleValues: MemoryLifecycle[] = ["active", "archived", "expires"];
+
+type MemoryFeedbackReviewFilter =
+  | "all"
+  | "needs_review"
+  | MemorySelectedFeedbackKind;
+
+type MemoryFeedbackReviewSort = "priority" | "latest" | "feedback_count";
+
+type MemoryMaintenanceFilter =
+  | "all"
+  | "needs_review"
+  | "snoozed"
+  | MemoryMaintenanceReviewKind;
+
+type MemoryMaintenanceSort = "priority" | "latest" | "feedback_count";
+
+const memoryFeedbackReviewFilterValues: MemoryFeedbackReviewFilter[] = [
+  "all",
+  "needs_review",
+  "useful",
+  "irrelevant",
+  "stale",
+  "conflicting",
+  "should_update",
+];
+
+const memoryReviewSortValues: MemoryFeedbackReviewSort[] = [
+  "priority",
+  "latest",
+  "feedback_count",
+];
+
+const memoryMaintenanceFilterValues: MemoryMaintenanceFilter[] = [
+  "all",
+  "needs_review",
+  "retrieval",
+  "update_archive",
+  "conflict",
+  "snoozed",
+];
+
+const memoryMaintenanceSortValues: MemoryMaintenanceSort[] = [
+  "priority",
+  "latest",
+  "feedback_count",
+];
 
 type MemoryEditDraft = {
   id: string;
@@ -761,6 +808,9 @@ export function App() {
   const [selectedMemoryFeedbackRecords, setSelectedMemoryFeedbackRecords] = useState<
     MemorySelectedFeedback[]
   >([]);
+  const [memoryMaintenanceReviews, setMemoryMaintenanceReviews] = useState<
+    MemoryMaintenanceReviewItem[]
+  >([]);
   const [permissionAudits, setPermissionAudits] = useState<PermissionAuditEntry[]>([]);
   const [capabilityCatalog, setCapabilityCatalog] = useState<CapabilityDescriptor[]>([]);
   const [capabilityRecords, setCapabilityRecords] = useState<CapabilityAccessRecord[]>([]);
@@ -768,6 +818,14 @@ export function App() {
   const [agentContextReceipts, setAgentContextReceipts] = useState<AgentContextReceipt[]>([]);
   const [operationsBriefingRuns, setOperationsBriefingRuns] = useState<OperationsBriefingRun[]>([]);
   const [memoryQuery, setMemoryQuery] = useState("");
+  const [memoryFeedbackFilter, setMemoryFeedbackFilter] =
+    useState<MemoryFeedbackReviewFilter>("needs_review");
+  const [memoryFeedbackSort, setMemoryFeedbackSort] =
+    useState<MemoryFeedbackReviewSort>("priority");
+  const [memoryMaintenanceFilter, setMemoryMaintenanceFilter] =
+    useState<MemoryMaintenanceFilter>("needs_review");
+  const [memoryMaintenanceSort, setMemoryMaintenanceSort] =
+    useState<MemoryMaintenanceSort>("priority");
   const [candidateTitle, setCandidateTitle] = useState("");
   const [candidateBody, setCandidateBody] = useState("");
   const [candidateMemoryType, setCandidateMemoryType] = useState<MemoryType>("preference");
@@ -783,10 +841,6 @@ export function App() {
   const [memoryExistingLinkNote, setMemoryExistingLinkNote] = useState("");
   const [memoryExistingLinkPending, setMemoryExistingLinkPending] = useState(false);
   const [memoryEditDraft, setMemoryEditDraft] = useState<MemoryEditDraft | null>(null);
-  const [memoryMergePreview, setMemoryMergePreview] =
-    useState<MemoryCandidateMergePreview | null>(null);
-  const [memoryReplacePreview, setMemoryReplacePreview] =
-    useState<MemoryCandidateReplacePreview | null>(null);
   const [browserUrl, setBrowserUrl] = useState("");
   const [browserSubmitUrl, setBrowserSubmitUrl] = useState("");
   const [browserSubmitSummary, setBrowserSubmitSummary] = useState("");
@@ -927,13 +981,6 @@ export function App() {
   const [packagePending, setPackagePending] = useState(false);
   const [memoryPending, setMemoryPending] = useState(false);
   const [memoryCandidatePending, setMemoryCandidatePending] = useState(false);
-  const [memoryCandidateResolutionPending, setMemoryCandidateResolutionPending] =
-    useState<string | null>(null);
-  const [memoryMergePreviewPending, setMemoryMergePreviewPending] =
-    useState<string | null>(null);
-  const [memoryReplacePreviewPending, setMemoryReplacePreviewPending] =
-    useState<string | null>(null);
-  const [memoryLinkRelation, setMemoryLinkRelation] = useState<MemoryRelationKind>("extends");
   const [memoryFeedbackPending, setMemoryFeedbackPending] = useState<string | null>(null);
   const [memoryUpdatePending, setMemoryUpdatePending] = useState<string | null>(null);
   const [memoryDeletionPending, setMemoryDeletionPending] = useState<string | null>(null);
@@ -1019,6 +1066,68 @@ export function App() {
         );
       });
   }, [memoryRecords, selectedMemoryFeedbackRecords]);
+  const filteredFeedbackReviewItems = useMemo(() => {
+    const matchesFilter = (item: (typeof feedbackReviewItems)[number]) => {
+      if (memoryFeedbackFilter === "all") {
+        return true;
+      }
+      if (memoryFeedbackFilter === "needs_review") {
+        return item.needsFeedbackReview;
+      }
+      return (item.counts[memoryFeedbackFilter] ?? 0) > 0;
+    };
+    return feedbackReviewItems
+      .filter(matchesFilter)
+      .sort((left, right) => {
+        if (memoryFeedbackSort === "priority") {
+          if (left.needsFeedbackReview !== right.needsFeedbackReview) {
+            return left.needsFeedbackReview ? -1 : 1;
+          }
+        }
+        if (memoryFeedbackSort === "feedback_count") {
+          if (left.records.length !== right.records.length) {
+            return right.records.length - left.records.length;
+          }
+        }
+        return String(right.latestFeedback?.created_at ?? "").localeCompare(
+          String(left.latestFeedback?.created_at ?? ""),
+        );
+      });
+  }, [feedbackReviewItems, memoryFeedbackFilter, memoryFeedbackSort]);
+  const filteredMemoryMaintenanceReviews = useMemo(() => {
+    const matchesFilter = (item: MemoryMaintenanceReviewItem) => {
+      if (memoryMaintenanceFilter === "all") {
+        return true;
+      }
+      if (memoryMaintenanceFilter === "needs_review") {
+        return item.review_needed;
+      }
+      if (memoryMaintenanceFilter === "snoozed") {
+        return Boolean(item.snoozed_until);
+      }
+      return item.review_kinds.includes(memoryMaintenanceFilter);
+    };
+    return memoryMaintenanceReviews
+      .filter(matchesFilter)
+      .sort((left, right) => {
+        if (memoryMaintenanceSort === "priority") {
+          if (left.review_needed !== right.review_needed) {
+            return left.review_needed ? -1 : 1;
+          }
+          if (left.review_kinds.length !== right.review_kinds.length) {
+            return right.review_kinds.length - left.review_kinds.length;
+          }
+        }
+        if (memoryMaintenanceSort === "feedback_count") {
+          if (left.feedback_count !== right.feedback_count) {
+            return right.feedback_count - left.feedback_count;
+          }
+        }
+        return String(right.latest_feedback?.created_at ?? "").localeCompare(
+          String(left.latest_feedback?.created_at ?? ""),
+        );
+      });
+  }, [memoryMaintenanceFilter, memoryMaintenanceReviews, memoryMaintenanceSort]);
   const copy = translations[language];
   const exposePluginsSidebarEntry = shouldExposePluginsSidebarEntry();
   const settingsPanelItemCount = settingsPanelItems.length;
@@ -1759,6 +1868,7 @@ export function App() {
       setMemoryRecords([]);
       setMemoryCandidateRecords([]);
       setSelectedMemoryFeedbackRecords([]);
+      setMemoryMaintenanceReviews([]);
       setPermissionAudits([]);
       setCapabilityCatalog([]);
       setCapabilityRecords([]);
@@ -1773,6 +1883,7 @@ export function App() {
       invoke<MemoryRecord[]>("list_memory_records"),
       invoke<MemoryCandidateRecord[]>("list_memory_candidate_records"),
       invoke<MemorySelectedFeedback[]>("list_selected_memory_feedback"),
+      invoke<MemoryMaintenanceReviewItem[]>("list_memory_maintenance_reviews"),
       invoke<PermissionAuditEntry[]>("list_permission_audit_entries"),
       invoke<CapabilityDescriptor[]>("list_capability_catalog"),
       invoke<CapabilityAccessRecord[]>("list_capability_access_records"),
@@ -1785,6 +1896,7 @@ export function App() {
         memories,
         memoryCandidates,
         selectedMemoryFeedback,
+        maintenanceReviews,
         audits,
         catalog,
         capabilityAccessRecords,
@@ -1796,12 +1908,16 @@ export function App() {
         setMemoryRecords(memories);
         setMemoryCandidateRecords(memoryCandidates);
         setSelectedMemoryFeedbackRecords(selectedMemoryFeedback);
+        setMemoryMaintenanceReviews(maintenanceReviews);
         setPermissionAudits(audits);
         setCapabilityCatalog(catalog);
         setCapabilityRecords(capabilityAccessRecords);
         setCapabilityInvocations(invocations);
         setAgentContextReceipts(contextReceipts);
         setOperationsBriefingRuns(briefingRuns);
+        void runMemoryBackgroundMaintenance().catch(() => {
+          // Background memory maintenance is best-effort; explicit feedback still remains logged.
+        });
       })
       .catch(() => {
         setPackageError(copy.package.loadFailed);
@@ -2095,6 +2211,21 @@ export function App() {
   const refreshMemoryCandidateRecords = async () => {
     const candidates = await invoke<MemoryCandidateRecord[]>("list_memory_candidate_records");
     setMemoryCandidateRecords(candidates);
+    return candidates;
+  };
+
+  const refreshMemoryMaintenanceReviews = async () => {
+    const reviews = await invoke<MemoryMaintenanceReviewItem[]>("list_memory_maintenance_reviews");
+    setMemoryMaintenanceReviews(reviews);
+    return reviews;
+  };
+
+  const runMemoryBackgroundMaintenance = async () => {
+    const summary = await invoke<MemoryBackgroundMaintenanceSummary>(
+      "run_memory_background_maintenance",
+    );
+    await Promise.all([refreshMemoryCandidateRecords(), refreshMemoryMaintenanceReviews()]);
+    return summary;
   };
 
   const searchMemoryRecords = async (event: FormEvent<HTMLFormElement>) => {
@@ -2129,7 +2260,7 @@ export function App() {
     setMemoryCandidateNotice("");
 
     try {
-      const candidate = await invoke<MemoryCandidateRecord>("propose_memory_candidate", {
+      await invoke<MemoryCandidateRecord>("propose_memory_candidate", {
         title: candidateTitle,
         body: candidateBody,
         memoryType: candidateMemoryType,
@@ -2138,75 +2269,19 @@ export function App() {
         lifecycle: candidateLifecycle,
         expiresAt: dateInputValueToIso(candidateExpiresAt, candidateLifecycle),
       });
-      setMemoryCandidateRecords((currentCandidates) => [candidate, ...currentCandidates]);
+      await runMemoryBackgroundMaintenance();
+      const memories = await loadMemoryRecords(memoryQuery);
+      setMemoryRecords(memories);
       setCandidateTitle("");
       setCandidateBody("");
       setCandidateExpiresAt("");
-      setMemoryCandidateNotice(copy.memory.proposed);
-      setMemoryMergePreview(null);
-      setMemoryReplacePreview(null);
+      setMemoryCandidateNotice(
+        `${copy.memory.proposed} ${copy.memory.maintenanceAutomatic}: ${copy.memory.maintenanceNoUserAction}`,
+      );
     } catch (error) {
       setMemoryCandidateError(String(error) || copy.memory.proposeFailed);
     } finally {
       setMemoryCandidatePending(false);
-    }
-  };
-
-  const resolveMemoryCandidate = async (candidateId: string, accepted: boolean) => {
-    setMemoryCandidateResolutionPending(candidateId);
-    setMemoryCandidateError("");
-    setMemoryCandidateNotice("");
-
-    try {
-      await invoke("resolve_memory_candidate", {
-        candidateId,
-        accepted,
-        note: accepted ? copy.memory.accept : copy.memory.reject,
-      });
-      const [memories] = await Promise.all([
-        loadMemoryRecords(memoryQuery),
-        refreshMemoryCandidateRecords(),
-      ]);
-      setMemoryRecords(memories);
-      setMemoryCandidateNotice(accepted ? copy.memory.accepted : copy.memory.rejected);
-      setMemoryMergePreview(null);
-      setMemoryReplacePreview(null);
-    } catch (error) {
-      setMemoryCandidateError(String(error) || copy.memory.resolveFailed);
-    } finally {
-      setMemoryCandidateResolutionPending(null);
-    }
-  };
-
-  const linkMemoryCandidateToConflicts = async (
-    candidateId: string,
-    linkedMemoryIds: string[],
-    relation: MemoryRelationKind,
-    note: string,
-  ) => {
-    setMemoryCandidateResolutionPending(candidateId);
-    setMemoryCandidateError("");
-    setMemoryCandidateNotice("");
-
-    try {
-      await invoke("link_memory_candidate_to_conflicts", {
-        candidateId,
-        linkedMemoryIds,
-        relation,
-        note,
-      });
-      const [memories] = await Promise.all([
-        loadMemoryRecords(memoryQuery),
-        refreshMemoryCandidateRecords(),
-      ]);
-      setMemoryRecords(memories);
-      setMemoryCandidateNotice(copy.memory.linked);
-      setMemoryMergePreview(null);
-      setMemoryReplacePreview(null);
-    } catch (error) {
-      setMemoryCandidateError(String(error) || copy.memory.linkFailed);
-    } finally {
-      setMemoryCandidateResolutionPending(null);
     }
   };
 
@@ -2239,165 +2314,6 @@ export function App() {
     }
   };
 
-  const previewMemoryCandidateMerge = async (
-    candidateId: string,
-    sourceMemoryIds: string[],
-  ) => {
-    setMemoryMergePreviewPending(candidateId);
-    setMemoryCandidateError("");
-
-    try {
-      const preview = await invoke<MemoryCandidateMergePreview>(
-        "preview_memory_candidate_merge",
-        {
-          candidateId,
-          sourceMemoryIds,
-        },
-      );
-      setMemoryMergePreview(preview);
-    } catch (error) {
-      setMemoryCandidateError(String(error) || copy.memory.mergePreviewFailed);
-    } finally {
-      setMemoryMergePreviewPending(null);
-    }
-  };
-
-  const previewMemoryCandidateReplace = async (
-    candidateId: string,
-    targetMemoryIds: string[],
-  ) => {
-    setMemoryReplacePreviewPending(candidateId);
-    setMemoryCandidateError("");
-
-    try {
-      const preview = await invoke<MemoryCandidateReplacePreview>(
-        "preview_memory_candidate_replace",
-        {
-          candidateId,
-          targetMemoryIds,
-        },
-      );
-      setMemoryReplacePreview(preview);
-    } catch (error) {
-      setMemoryCandidateError(String(error) || copy.memory.replacePreviewFailed);
-    } finally {
-      setMemoryReplacePreviewPending(null);
-    }
-  };
-
-  const mergeMemoryCandidateWithConflicts = async (
-    candidateId: string,
-    sourceMemoryIds: string[],
-  ) => {
-    setMemoryCandidateResolutionPending(candidateId);
-    setMemoryCandidateError("");
-    setMemoryCandidateNotice("");
-
-    try {
-      await invoke("merge_memory_candidate_with_conflicts", {
-        candidateId,
-        sourceMemoryIds,
-        note: copy.memory.mergeAndAccept,
-      });
-      const [memories] = await Promise.all([
-        loadMemoryRecords(memoryQuery),
-        refreshMemoryCandidateRecords(),
-      ]);
-      setMemoryRecords(memories);
-      setMemoryCandidateNotice(copy.memory.merged);
-      setMemoryMergePreview(null);
-      setMemoryReplacePreview(null);
-    } catch (error) {
-      setMemoryCandidateError(String(error) || copy.memory.mergeFailed);
-    } finally {
-      setMemoryCandidateResolutionPending(null);
-    }
-  };
-
-  const replaceMemoryCandidateConflicts = async (
-    candidateId: string,
-    targetMemoryIds: string[],
-  ) => {
-    setMemoryCandidateResolutionPending(candidateId);
-    setMemoryCandidateError("");
-    setMemoryCandidateNotice("");
-
-    try {
-      await invoke("replace_memory_candidate_conflicts", {
-        candidateId,
-        targetMemoryIds,
-        note: copy.memory.replaceAndAccept,
-      });
-      const [memories] = await Promise.all([
-        loadMemoryRecords(memoryQuery),
-        refreshMemoryCandidateRecords(),
-      ]);
-      setMemoryRecords(memories);
-      setMemoryCandidateNotice(copy.memory.replaced);
-      setMemoryMergePreview(null);
-      setMemoryReplacePreview(null);
-    } catch (error) {
-      setMemoryCandidateError(String(error) || copy.memory.replaceFailed);
-    } finally {
-      setMemoryCandidateResolutionPending(null);
-    }
-  };
-
-  const updateMemoryCandidateConflict = async (candidateId: string, targetMemoryId: string) => {
-    setMemoryCandidateResolutionPending(candidateId);
-    setMemoryCandidateError("");
-    setMemoryCandidateNotice("");
-
-    try {
-      await invoke("update_memory_candidate_conflict", {
-        candidateId,
-        targetMemoryId,
-        note: copy.memory.updateAndAccept,
-      });
-      const [memories] = await Promise.all([
-        loadMemoryRecords(memoryQuery),
-        refreshMemoryCandidateRecords(),
-      ]);
-      setMemoryRecords(memories);
-      setMemoryCandidateNotice(copy.memory.updatedFromCandidate);
-      setMemoryMergePreview(null);
-      setMemoryReplacePreview(null);
-    } catch (error) {
-      setMemoryCandidateError(String(error) || copy.memory.updateCandidateFailed);
-    } finally {
-      setMemoryCandidateResolutionPending(null);
-    }
-  };
-
-  const archiveMemoryCandidateConflicts = async (
-    candidateId: string,
-    targetMemoryIds: string[],
-  ) => {
-    setMemoryCandidateResolutionPending(candidateId);
-    setMemoryCandidateError("");
-    setMemoryCandidateNotice("");
-
-    try {
-      await invoke("archive_memory_candidate_conflicts", {
-        candidateId,
-        targetMemoryIds,
-        note: copy.memory.archiveStaleTarget,
-      });
-      const [memories] = await Promise.all([
-        loadMemoryRecords(memoryQuery),
-        refreshMemoryCandidateRecords(),
-      ]);
-      setMemoryRecords(memories);
-      setMemoryCandidateNotice(copy.memory.archivedFromCandidate);
-      setMemoryMergePreview(null);
-      setMemoryReplacePreview(null);
-    } catch (error) {
-      setMemoryCandidateError(String(error) || copy.memory.archiveCandidateFailed);
-    } finally {
-      setMemoryCandidateResolutionPending(null);
-    }
-  };
-
   const recordSelectedMemoryFeedback = async (
     receiptId: string,
     memoryId: string,
@@ -2419,7 +2335,16 @@ export function App() {
         recordedFeedback,
         ...currentRecords,
       ]);
-      setMemoryFeedbackNotice(copy.memoryFeedback.recorded);
+      const maintenanceSummary = await runMemoryBackgroundMaintenance();
+      setMemoryFeedbackNotice(
+        copy.memoryFeedback.recordedWithMaintenance(
+          maintenanceSummary.update_candidates_created,
+          maintenanceSummary.retrieval_reviews_marked,
+          maintenanceSummary.auto_updates_applied,
+          maintenanceSummary.auto_archives_applied,
+          maintenanceSummary.auto_candidate_decisions_applied,
+        ),
+      );
     } catch (error) {
       setMemoryFeedbackError(String(error) || copy.memoryFeedback.recordFailed);
     } finally {
@@ -3445,7 +3370,9 @@ export function App() {
       ]);
       setDeepSeekTelemetry(telemetry);
       setDeepSeekChatCacheState(cacheState);
-      await Promise.all([refreshCapabilityState(), refreshMemoryCandidateRecords()]);
+      await Promise.all([refreshCapabilityState(), runMemoryBackgroundMaintenance()]);
+      const memories = await loadMemoryRecords(memoryQuery);
+      setMemoryRecords(memories);
       const needsWorkspaceSetup = prerequisitesNeedWorkspaceSetup(response.missing_prerequisites);
       if (needsWorkspaceSetup && !options.skipWorkspaceSetup) {
         setPendingAgentPrompt(prompt);
@@ -3739,6 +3666,7 @@ export function App() {
       const summary = await invoke<WorkPackageImportSummary>("import_work_package", {
         packageJson: importPackageJson,
       });
+      await runMemoryBackgroundMaintenance();
       const [records, memories, memoryCandidates, briefingRuns] = await Promise.all([
         invoke<TaskRecord[]>("list_task_records"),
         loadMemoryRecords(memoryQuery),
@@ -4677,26 +4605,10 @@ export function App() {
                           {copy.memory.candidateStatus[record.effective_status]}
                         </span>
                         {record.effective_status === "pending" ? (
-                          <div className="sidebar-row-actions">
-                            <button
-                              type="button"
-                              onClick={() => void resolveMemoryCandidate(record.candidate.id, true)}
-                              disabled={memoryCandidateResolutionPending !== null}
-                            >
-                              <Check size={14} aria-hidden="true" />
-                              {memoryCandidateResolutionPending === record.candidate.id
-                                ? copy.memory.resolving
-                                : copy.memory.accept}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => void resolveMemoryCandidate(record.candidate.id, false)}
-                              disabled={memoryCandidateResolutionPending !== null}
-                            >
-                              <X size={14} aria-hidden="true" />
-                              {copy.memory.reject}
-                            </button>
-                          </div>
+                          <p className="memory-feedback-note">
+                            {copy.memory.maintenanceAutomatic}:{" "}
+                            {copy.memory.maintenanceNoUserAction}
+                          </p>
                         ) : null}
                       </article>
                     ))}
@@ -5559,11 +5471,43 @@ export function App() {
                     <strong>{copy.memory.feedbackReview}</strong>
                     <span>{copy.memory.feedbackReviewCount(selectedMemoryFeedbackRecords.length)}</span>
                   </div>
-                  {feedbackReviewItems.length === 0 ? (
+                  <div className="memory-review-controls">
+                    <label>
+                      <span>{copy.memory.feedbackFilter}</span>
+                      <select
+                        value={memoryFeedbackFilter}
+                        onChange={(event) =>
+                          setMemoryFeedbackFilter(event.target.value as MemoryFeedbackReviewFilter)
+                        }
+                      >
+                        {memoryFeedbackReviewFilterValues.map((value) => (
+                          <option key={value} value={value}>
+                            {copy.memory.feedbackFilterOptions[value]}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      <span>{copy.memory.feedbackSort}</span>
+                      <select
+                        value={memoryFeedbackSort}
+                        onChange={(event) =>
+                          setMemoryFeedbackSort(event.target.value as MemoryFeedbackReviewSort)
+                        }
+                      >
+                        {memoryReviewSortValues.map((value) => (
+                          <option key={value} value={value}>
+                            {copy.memory.feedbackSortOptions[value]}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                  {filteredFeedbackReviewItems.length === 0 ? (
                     <p className="empty-state">{copy.memory.feedbackReviewEmpty}</p>
                   ) : (
                     <div className="memory-list compact">
-                      {feedbackReviewItems.slice(0, 5).map((item) => (
+                      {filteredFeedbackReviewItems.slice(0, 8).map((item) => (
                         <article className="memory-row" key={item.memoryId}>
                           <div className="memory-row-title">
                             <strong>
@@ -5589,6 +5533,102 @@ export function App() {
                               {item.latestFeedback.note ? ` · ${item.latestFeedback.note}` : ""}
                             </p>
                           ) : null}
+                        </article>
+                      ))}
+                    </div>
+                  )}
+                </section>
+                <section
+                  className="memory-feedback-review memory-maintenance-review"
+                  aria-label={copy.memory.maintenanceReview}
+                >
+                  <div className="memory-subsection-heading">
+                    <strong>{copy.memory.maintenanceReview}</strong>
+                    <span>{copy.memory.maintenanceReviewCount(memoryMaintenanceReviews.length)}</span>
+                  </div>
+                  <div className="memory-review-controls">
+                    <label>
+                      <span>{copy.memory.maintenanceFilter}</span>
+                      <select
+                        value={memoryMaintenanceFilter}
+                        onChange={(event) =>
+                          setMemoryMaintenanceFilter(event.target.value as MemoryMaintenanceFilter)
+                        }
+                      >
+                        {memoryMaintenanceFilterValues.map((value) => (
+                          <option key={value} value={value}>
+                            {copy.memory.maintenanceFilterOptions[value]}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      <span>{copy.memory.maintenanceSort}</span>
+                      <select
+                        value={memoryMaintenanceSort}
+                        onChange={(event) =>
+                          setMemoryMaintenanceSort(event.target.value as MemoryMaintenanceSort)
+                        }
+                      >
+                        {memoryMaintenanceSortValues.map((value) => (
+                          <option key={value} value={value}>
+                            {copy.memory.maintenanceSortOptions[value]}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                  {filteredMemoryMaintenanceReviews.length === 0 ? (
+                    <p className="empty-state">{copy.memory.maintenanceReviewEmpty}</p>
+                  ) : (
+                    <div className="memory-list compact">
+                      {filteredMemoryMaintenanceReviews.slice(0, 8).map((item) => (
+                        <article className="memory-row" key={item.memory.id}>
+                          <div className="memory-row-title">
+                            <strong>{item.memory.title}</strong>
+                            {item.review_needed ? (
+                              <span>{copy.memory.needsFeedbackReview}</span>
+                            ) : item.snoozed_until ? (
+                              <span>
+                                {copy.memory.maintenanceSnoozeUntil}:{" "}
+                                {formatTaskDate(item.snoozed_until, language)}
+                              </span>
+                            ) : null}
+                          </div>
+                          <p>{item.memory.body}</p>
+                          <div className="memory-meta">
+                            {item.review_kinds.map((kind) => (
+                              <span key={kind}>{copy.memory.maintenanceReviewKindOptions[kind]}</span>
+                            ))}
+                            {(Object.keys(copy.memoryFeedback.options) as MemorySelectedFeedbackKind[])
+                              .filter((feedback) => (item.feedback_counts[feedback] ?? 0) > 0)
+                              .map((feedback) => (
+                                <span key={feedback}>
+                                  {copy.memoryFeedback.options[feedback]}:{" "}
+                                  {item.feedback_counts[feedback]}
+                                </span>
+                              ))}
+                          </div>
+                          {item.latest_feedback ? (
+                            <p className="memory-feedback-note">
+                              {copy.memory.latestFeedback}:{" "}
+                              {copy.memoryFeedback.options[item.latest_feedback.feedback]}
+                              {item.latest_feedback.note ? ` · ${item.latest_feedback.note}` : ""}
+                            </p>
+                          ) : null}
+                          {item.last_action ? (
+                            <p className="memory-feedback-note">
+                              {copy.memory.maintenanceLastAction}:{" "}
+                              {copy.memory.maintenanceActionOptions[item.last_action.action]}
+                              {item.last_action.note ? ` · ${item.last_action.note}` : ""}
+                            </p>
+                          ) : null}
+                          <p className="memory-feedback-note">
+                            {copy.memory.maintenanceAutomatic}:{" "}
+                            {item.review_needed
+                              ? copy.memory.needsFeedbackReview
+                              : copy.memory.maintenanceNoUserAction}
+                          </p>
                         </article>
                       ))}
                     </div>
@@ -6011,220 +6051,11 @@ export function App() {
                               ))}
                             </div>
                           ) : null}
-                          {memoryMergePreview?.candidate_id === record.candidate.id ? (
-                            <div className="memory-merge-preview">
-                              <strong>{copy.memory.mergePreviewTitle}</strong>
-                              <div className="memory-meta">
-                                <span>{copy.memory.typeOptions[memoryMergePreview.memory_type]}</span>
-                                <span>{copy.memory.scopeOptions[memoryMergePreview.scope]}</span>
-                                <span>
-                                  {copy.memory.sensitivityOptions[memoryMergePreview.sensitivity]}
-                                </span>
-                                <span>
-                                  {copy.memory.lifecycleOptions[memoryMergePreview.lifecycle]}
-                                </span>
-                              </div>
-                              <span>{copy.memory.mergePreviewDraft}</span>
-                              <p>{memoryMergePreview.body}</p>
-                              <div className="candidate-actions">
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    void mergeMemoryCandidateWithConflicts(
-                                      record.candidate.id,
-                                      memoryMergePreview.source_memory_ids,
-                                    )
-                                  }
-                                  disabled={memoryCandidateResolutionPending !== null}
-                                >
-                                  <Check size={14} aria-hidden="true" />
-                                  {memoryCandidateResolutionPending === record.candidate.id
-                                    ? copy.memory.resolving
-                                    : copy.memory.mergeAndAccept}
-                                </button>
-                              </div>
-                            </div>
-                          ) : null}
-                          {memoryReplacePreview?.candidate_id === record.candidate.id ? (
-                            <div className="memory-replace-preview">
-                              <strong>{copy.memory.replacePreviewTitle}</strong>
-                              <div className="memory-meta">
-                                <span>
-                                  {copy.memory.typeOptions[memoryReplacePreview.memory_type]}
-                                </span>
-                                <span>{copy.memory.scopeOptions[memoryReplacePreview.scope]}</span>
-                                <span>
-                                  {copy.memory.sensitivityOptions[memoryReplacePreview.sensitivity]}
-                                </span>
-                                <span>
-                                  {copy.memory.lifecycleOptions[memoryReplacePreview.lifecycle]}
-                                </span>
-                              </div>
-                              <span>{copy.memory.replacePreviewDraft}</span>
-                              <p>{memoryReplacePreview.replacement_body}</p>
-                              <span>{copy.memory.replacePreviewTargets}</span>
-                              <div className="memory-linked-list">
-                                {memoryReplacePreview.target_memories.map((memory) => (
-                                  <span className="memory-link-pill" key={memory.id}>
-                                    <X size={12} aria-hidden="true" />
-                                    {memory.title}
-                                  </span>
-                                ))}
-                              </div>
-                              <div className="candidate-actions">
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    void replaceMemoryCandidateConflicts(
-                                      record.candidate.id,
-                                      memoryReplacePreview.target_memory_ids,
-                                    )
-                                  }
-                                  disabled={memoryCandidateResolutionPending !== null}
-                                >
-                                  <Check size={14} aria-hidden="true" />
-                                  {memoryCandidateResolutionPending === record.candidate.id
-                                    ? copy.memory.resolving
-                                    : copy.memory.replaceAndAccept}
-                                </button>
-                              </div>
-                            </div>
-                          ) : null}
                           {record.effective_status === "pending" ? (
-                            <div className="candidate-actions">
-                              {record.conflicting_memory_ids.length > 0 ? (
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    void previewMemoryCandidateMerge(
-                                      record.candidate.id,
-                                      record.conflicting_memory_ids,
-                                    )
-                                  }
-                                  disabled={
-                                    memoryCandidateResolutionPending !== null ||
-                                    memoryMergePreviewPending !== null ||
-                                    memoryReplacePreviewPending !== null
-                                  }
-                                >
-                                  <FileText size={14} aria-hidden="true" />
-                                  {memoryMergePreviewPending === record.candidate.id
-                                    ? copy.memory.previewingMerge
-                                    : copy.memory.previewMerge}
-                                </button>
-                              ) : null}
-                              {record.conflicting_memory_ids.length > 0 ? (
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    void previewMemoryCandidateReplace(
-                                      record.candidate.id,
-                                      record.conflicting_memory_ids,
-                                    )
-                                  }
-                                  disabled={
-                                    memoryCandidateResolutionPending !== null ||
-                                    memoryMergePreviewPending !== null ||
-                                    memoryReplacePreviewPending !== null
-                                  }
-                                >
-                                  <X size={14} aria-hidden="true" />
-                                  {memoryReplacePreviewPending === record.candidate.id
-                                    ? copy.memory.previewingReplace
-                                    : copy.memory.previewReplace}
-                                </button>
-                              ) : null}
-                              {record.conflicting_memory_ids.length > 0 ? (
-                                <>
-                                  <select
-                                    className="memory-relation-select"
-                                    value={memoryLinkRelation}
-                                    aria-label={copy.memory.linkRelation}
-                                    onChange={(event) =>
-                                      setMemoryLinkRelation(event.target.value as MemoryRelationKind)
-                                    }
-                                    disabled={memoryCandidateResolutionPending !== null}
-                                  >
-                                    {(Object.keys(copy.memory.relationOptions) as MemoryRelationKind[]).map(
-                                      (relation) => (
-                                        <option key={relation} value={relation}>
-                                          {copy.memory.relationOptions[relation]}
-                                        </option>
-                                      ),
-                                    )}
-                                  </select>
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      void linkMemoryCandidateToConflicts(
-                                        record.candidate.id,
-                                        record.conflicting_memory_ids,
-                                        memoryLinkRelation,
-                                        record.candidate.rationale || copy.memory.linkAndAccept,
-                                      )
-                                    }
-                                    disabled={memoryCandidateResolutionPending !== null}
-                                  >
-                                    <Link2 size={14} aria-hidden="true" />
-                                    {memoryCandidateResolutionPending === record.candidate.id
-                                      ? copy.memory.resolving
-                                      : copy.memory.linkAndAccept}
-                                  </button>
-                                </>
-                              ) : null}
-                              {record.conflicting_memory_ids.length > 0 ? (
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    void updateMemoryCandidateConflict(
-                                      record.candidate.id,
-                                      record.conflicting_memory_ids[0],
-                                    )
-                                  }
-                                  disabled={memoryCandidateResolutionPending !== null}
-                                >
-                                  <Pencil size={14} aria-hidden="true" />
-                                  {memoryCandidateResolutionPending === record.candidate.id
-                                    ? copy.memory.resolving
-                                    : copy.memory.updateAndAccept}
-                                </button>
-                              ) : null}
-                              {record.conflicting_memory_ids.length > 0 ? (
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    void archiveMemoryCandidateConflicts(
-                                      record.candidate.id,
-                                      record.conflicting_memory_ids,
-                                    )
-                                  }
-                                  disabled={memoryCandidateResolutionPending !== null}
-                                >
-                                  <Archive size={14} aria-hidden="true" />
-                                  {memoryCandidateResolutionPending === record.candidate.id
-                                    ? copy.memory.resolving
-                                    : copy.memory.archiveStaleTarget}
-                                </button>
-                              ) : null}
-                              <button
-                                type="button"
-                                onClick={() => void resolveMemoryCandidate(record.candidate.id, true)}
-                                disabled={memoryCandidateResolutionPending !== null}
-                              >
-                                <Check size={14} aria-hidden="true" />
-                                {memoryCandidateResolutionPending === record.candidate.id
-                                  ? copy.memory.resolving
-                                  : copy.memory.accept}
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => void resolveMemoryCandidate(record.candidate.id, false)}
-                                disabled={memoryCandidateResolutionPending !== null}
-                              >
-                                <X size={14} aria-hidden="true" />
-                                {copy.memory.reject}
-                              </button>
-                            </div>
+                            <p className="memory-feedback-note">
+                              {copy.memory.maintenanceAutomatic}:{" "}
+                              {copy.memory.maintenanceNoUserAction}
+                            </p>
                           ) : null}
                         </article>
                       ))}

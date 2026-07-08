@@ -308,10 +308,21 @@ export type MemorySelectedFeedbackKind =
   | "conflicting"
   | "should_update";
 
+export type MemoryMaintenanceReviewKind = "retrieval" | "update_archive" | "conflict";
+
+export type MemoryMaintenanceActionKind =
+  | "mark_reviewed"
+  | "snooze"
+  | "retrieval_reviewed"
+  | "update_candidate_created"
+  | "archived";
+
 export type MemoryCandidateSuggestedAction =
   | "new"
+  | "update"
   | "merge"
   | "replace"
+  | "archive"
   | "link"
   | "reject_hint";
 
@@ -456,6 +467,37 @@ export type MemorySelectedFeedback = {
   feedback: MemorySelectedFeedbackKind;
   note: string;
   created_at: string;
+};
+
+export type MemoryMaintenanceFeedbackCounts = Record<MemorySelectedFeedbackKind, number>;
+
+export type MemoryMaintenanceReviewAction = {
+  id: string;
+  memory_id: string;
+  action: MemoryMaintenanceActionKind;
+  note: string;
+  snoozed_until: string | null;
+  created_at: string;
+};
+
+export type MemoryMaintenanceReviewItem = {
+  memory: MemoryRecord;
+  feedback_counts: MemoryMaintenanceFeedbackCounts;
+  feedback_count: number;
+  latest_feedback: MemorySelectedFeedback | null;
+  review_kinds: MemoryMaintenanceReviewKind[];
+  recommended_actions: MemoryMaintenanceActionKind[];
+  review_needed: boolean;
+  snoozed_until: string | null;
+  last_action: MemoryMaintenanceReviewAction | null;
+};
+
+export type MemoryBackgroundMaintenanceSummary = {
+  retrieval_reviews_marked: number;
+  update_candidates_created: number;
+  auto_candidate_decisions_applied: number;
+  auto_updates_applied: number;
+  auto_archives_applied: number;
 };
 
 export type MemoryRecordUpdate = {

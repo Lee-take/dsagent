@@ -77,6 +77,30 @@ test("summarizes agent context receipts for compact inspector display", () => {
     "rank 1 score 18: 项目记忆运行规则 (workflow_rule/project; title_terms=记忆,系统; compact_snippet; title_terms:2*6 body_terms:2*3 linked_terms:0*1 pinned:0)",
     "rank 2 score 11: 用户默认语气偏好 (preference/user; body_terms=语气; compact_snippet; title_terms:1*6 body_terms:1*3 linked_terms:0*1 pinned:+2)",
   ]);
+  assert.deepEqual(summary.memoryFeedbackTargets, [
+    {
+      memoryId: "memory-1",
+      title: "项目记忆运行规则",
+      rank: "1",
+      score: "18",
+      memoryType: "workflow_rule",
+      scope: "project",
+      matchReason: "title_terms=记忆,系统",
+      scoreBreakdown: "title_terms:2*6 body_terms:2*3 linked_terms:0*1 pinned:0",
+      inclusionMode: "compact_snippet",
+    },
+    {
+      memoryId: "memory-2",
+      title: "用户默认语气偏好",
+      rank: "2",
+      score: "11",
+      memoryType: "preference",
+      scope: "user",
+      matchReason: "body_terms=语气",
+      scoreBreakdown: "title_terms:1*6 body_terms:1*3 linked_terms:0*1 pinned:+2",
+      inclusionMode: "compact_snippet",
+    },
+  ]);
   assert.deepEqual(summary.memoryConflictHints, [
     "1 sensitive memory omitted from prompt context",
     "1 archived or stale memory omitted from prompt context",
@@ -121,17 +145,6 @@ test("App wires the context receipt list into the capability inspector", () => {
   assert.match(appSource, /copy\.memoryFeedback\.shouldUpdate/);
 });
 
-test("App exposes update and archive candidate actions in Memory Studio", () => {
-  const appSource = readFileSync(appSourceUrl, "utf8");
-
-  assert.match(appSource, /updateMemoryCandidateConflict/);
-  assert.match(appSource, /"update_memory_candidate_conflict"/);
-  assert.match(appSource, /archiveMemoryCandidateConflicts/);
-  assert.match(appSource, /"archive_memory_candidate_conflicts"/);
-  assert.match(appSource, /copy\.memory\.updateAndAccept/);
-  assert.match(appSource, /copy\.memory\.archiveStaleTarget/);
-});
-
 test("Memory Studio exposes selected-memory feedback review", () => {
   const appSource = readFileSync(appSourceUrl, "utf8");
   const commandsSource = readFileSync(commandsSourceUrl, "utf8");
@@ -145,6 +158,43 @@ test("Memory Studio exposes selected-memory feedback review", () => {
   assert.match(appSource, /copy\.memory\.feedbackReview/);
   assert.match(appSource, /copy\.memory\.needsFeedbackReview/);
   assert.match(appSource, /copy\.memory\.feedbackReviewEmpty/);
+});
+
+test("Memory Studio exposes background maintenance audit with filtering and sorting", () => {
+  const appSource = readFileSync(appSourceUrl, "utf8");
+  const commandsSource = readFileSync(commandsSourceUrl, "utf8");
+  const mainSource = readFileSync(mainSourceUrl, "utf8");
+
+  assert.match(commandsSource, /pub fn list_memory_maintenance_reviews/);
+  assert.match(commandsSource, /pub fn run_memory_background_maintenance/);
+  assert.match(commandsSource, /auto_candidate_decisions_applied/);
+  assert.match(commandsSource, /MemoryCandidateSuggestedAction::Update/);
+  assert.match(commandsSource, /MemoryCandidateSuggestedAction::Archive/);
+  assert.match(mainSource, /list_memory_maintenance_reviews/);
+  assert.match(mainSource, /run_memory_background_maintenance/);
+  assert.match(appSource, /invoke<MemoryMaintenanceReviewItem\[\]>\("list_memory_maintenance_reviews"\)/);
+  assert.match(appSource, /invoke<MemoryBackgroundMaintenanceSummary>\(\s*"run_memory_background_maintenance"/);
+  assert.match(
+    appSource,
+    /await Promise\.all\(\[refreshCapabilityState\(\), runMemoryBackgroundMaintenance\(\)\]\)/,
+  );
+  assert.match(
+    appSource,
+    /await runMemoryBackgroundMaintenance\(\);\s*const \[records, memories, memoryCandidates, briefingRuns\]/s,
+  );
+  assert.doesNotMatch(appSource, /invoke\("resolve_memory_candidate"/);
+  assert.doesNotMatch(appSource, /invoke\("merge_memory_candidate_with_conflicts"/);
+  assert.doesNotMatch(appSource, /invoke\("replace_memory_candidate_conflicts"/);
+  assert.doesNotMatch(appSource, /invoke\("update_memory_candidate_conflict"/);
+  assert.doesNotMatch(appSource, /invoke\("archive_memory_candidate_conflicts"/);
+  assert.match(appSource, /memoryMaintenanceFilter/);
+  assert.match(appSource, /memoryMaintenanceSort/);
+  assert.match(appSource, /filteredMemoryMaintenanceReviews/);
+  assert.match(appSource, /copy\.memory\.maintenanceReview/);
+  assert.match(appSource, /copy\.memory\.maintenanceAutomatic/);
+  assert.match(appSource, /copy\.memory\.maintenanceNoUserAction/);
+  assert.match(appSource, /copy\.memory\.maintenanceFilterOptions/);
+  assert.match(appSource, /copy\.memory\.maintenanceSortOptions/);
 });
 
 test("Memory Studio escalates repeated selected-memory feedback for maintenance review", () => {

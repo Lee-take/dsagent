@@ -1,6 +1,6 @@
 # DeepSeek Agent OS v0.1.0 Candidate Notes
 
-Status: Windows-first release candidate. The `v0.1.0-rc.9` prerelease is
+Status: Windows-first release candidate. The `v0.1.0-rc.10` prerelease is
 intended for colleague testing through a GitHub release asset after the final
 local gates pass.
 
@@ -10,6 +10,24 @@ so Windows may show an unknown-publisher warning, but it embeds the Microsoft
 WebView2 bootstrapper and runs it silently when the target machine needs the
 WebView2 runtime. Ordinary users do not need Node.js, pnpm, Rust, or a source
 checkout to run the installed app.
+
+## v0.1.0-rc.10 Update
+
+- Moves Memory candidate update/archive decisions into DS Agent background
+  maintenance so ordinary users do not have to manage internal candidate
+  queues.
+- Runs background memory maintenance after chat, selected-memory feedback,
+  manual memory proposals, and work-package imports, then refreshes Memory
+  Studio state.
+- Adds audited maintenance review actions for retrieval tuning, automatic
+  update application, and stale-memory archiving while preserving append-only
+  memory events.
+- Adds automatic Memory maintenance v1 as a background service that resolves
+  routine memory care without turning candidates into user work.
+- Keeps Memory Studio focused on audit and correction: candidate status,
+  maintenance history, and suggested action labels remain visible without
+  asking office users to click through routine accept/reject/merge/archive
+  decisions.
 
 ## v0.1.0-rc.9 Update
 
@@ -181,10 +199,10 @@ Windows preview continues to pass local release gates.
   plus a local unlock code, and desktop automation is still subject to
   foreground desktop, secure desktop, Screen Recording, and Accessibility
   limitations.
-- Memory Studio for reviewable memories, edits, deletion, expiration, linked
+- Memory Studio for auditable memories, edits, deletion, expiration, linked
   memory title/body search, linked memory search match source, linked memory
-  relation notes, manual existing-memory links, explicit conflict handling, and
-  feedback-informed retrieval scoring.
+  relation notes, manual existing-memory links, automatic background conflict
+  handling, and feedback-informed retrieval scoring.
 - Operations Briefing workflow:
   - Reads local evidence and drafts a management brief.
   - Can use DeepSeek synthesis when configured.
