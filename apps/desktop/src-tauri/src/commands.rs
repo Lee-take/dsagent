@@ -132,9 +132,9 @@ const COMPUTER_CONTROL_UNLOCK_CHALLENGE_LENGTH: usize = 6;
 const AGENT_CHAT_SYSTEM_PROMPT: &str = "You are the DeepSeek reasoning layer for DS Agent. DS Agent is the local execution layer. Read the full user message and return one structured agent envelope as JSON. Separate reply_to_user from agent_actions, missing_prerequisites, required_confirmations, artifact_targets, and memory_candidates. Do not claim local tools ran; propose actions for DS Agent to validate and execute.";
 const AGENT_OFFICE_CREATE_EVIDENCE_TEXT_LIMIT: usize = 1200;
 const APP_UPDATE_RELEASES_API_URL: &str =
-    "https://api.github.com/repos/Lee-take/deepseek-agent-os/releases";
+    "https://api.github.com/repos/Lee-take/dsagent/releases";
 const APP_UPDATE_RELEASE_DOWNLOAD_PREFIX: &str =
-    "https://github.com/Lee-take/deepseek-agent-os/releases/download/";
+    "https://github.com/Lee-take/dsagent/releases/download/";
 const APP_UPDATE_USER_AGENT: &str = "DS-Agent-Updater/0.1.1";
 const APP_UPDATE_CURRENT_RELEASE_TAG: &str = "v0.1.1";
 const AGENT_SOUL_PROFILE_FILE_NAME: &str = "soul.md";
@@ -9742,23 +9742,23 @@ mod tests {
         let releases = vec![
             GithubRelease {
                 tag_name: "v0.1.0-rc.3".to_string(),
-                html_url: "https://github.com/Lee-take/deepseek-agent-os/releases/tag/v0.1.0-rc.3"
+                html_url: "https://github.com/Lee-take/dsagent/releases/tag/v0.1.0-rc.3"
                     .to_string(),
                 assets: vec![GithubReleaseAsset {
                     name: "DS Agent_0.1.0_x64-setup.exe".to_string(),
                     browser_download_url:
-                        "https://github.com/Lee-take/deepseek-agent-os/releases/download/v0.1.0-rc.3/DS.Agent_0.1.0_x64-setup.exe"
+                        "https://github.com/Lee-take/dsagent/releases/download/v0.1.0-rc.3/DS.Agent_0.1.0_x64-setup.exe"
                             .to_string(),
                 }],
             },
             GithubRelease {
                 tag_name: "v0.1.0-rc.1".to_string(),
-                html_url: "https://github.com/Lee-take/deepseek-agent-os/releases/tag/v0.1.0-rc.1"
+                html_url: "https://github.com/Lee-take/dsagent/releases/tag/v0.1.0-rc.1"
                     .to_string(),
                 assets: vec![GithubReleaseAsset {
                     name: "DS Agent_0.1.0_x64-setup.exe".to_string(),
                     browser_download_url:
-                        "https://github.com/Lee-take/deepseek-agent-os/releases/download/v0.1.0-rc.1/DS.Agent_0.1.0_x64-setup.exe"
+                        "https://github.com/Lee-take/dsagent/releases/download/v0.1.0-rc.1/DS.Agent_0.1.0_x64-setup.exe"
                             .to_string(),
                 }],
             },
@@ -9779,12 +9779,12 @@ mod tests {
     fn app_update_status_keeps_current_prerelease_quiet_from_release_list() {
         let releases = vec![GithubRelease {
             tag_name: "v0.1.0-rc.3".to_string(),
-            html_url: "https://github.com/Lee-take/deepseek-agent-os/releases/tag/v0.1.0-rc.3"
+            html_url: "https://github.com/Lee-take/dsagent/releases/tag/v0.1.0-rc.3"
                 .to_string(),
             assets: vec![GithubReleaseAsset {
                 name: "DS Agent_0.1.0_x64-setup.exe".to_string(),
                 browser_download_url:
-                    "https://github.com/Lee-take/deepseek-agent-os/releases/download/v0.1.0-rc.3/DS.Agent_0.1.0_x64-setup.exe"
+                    "https://github.com/Lee-take/dsagent/releases/download/v0.1.0-rc.3/DS.Agent_0.1.0_x64-setup.exe"
                         .to_string(),
             }],
         }];
@@ -9802,23 +9802,23 @@ mod tests {
         let releases = vec![
             GithubRelease {
                 tag_name: "v0.1.1".to_string(),
-                html_url: "https://github.com/Lee-take/deepseek-agent-os/releases/tag/v0.1.1"
+                html_url: "https://github.com/Lee-take/dsagent/releases/tag/v0.1.1"
                     .to_string(),
                 assets: vec![GithubReleaseAsset {
                     name: "DS Agent_0.1.1_x64-setup.exe".to_string(),
                     browser_download_url:
-                        "https://github.com/Lee-take/deepseek-agent-os/releases/download/v0.1.1/DS.Agent_0.1.1_x64-setup.exe"
+                        "https://github.com/Lee-take/dsagent/releases/download/v0.1.1/DS.Agent_0.1.1_x64-setup.exe"
                             .to_string(),
                 }],
             },
             GithubRelease {
                 tag_name: "v0.1.0".to_string(),
-                html_url: "https://github.com/Lee-take/deepseek-agent-os/releases/tag/v0.1.0"
+                html_url: "https://github.com/Lee-take/dsagent/releases/tag/v0.1.0"
                     .to_string(),
                 assets: vec![GithubReleaseAsset {
                     name: "DS Agent_0.1.0_x64-setup.exe".to_string(),
                     browser_download_url:
-                        "https://github.com/Lee-take/deepseek-agent-os/releases/download/v0.1.0/DS.Agent_0.1.0_x64-setup.exe"
+                        "https://github.com/Lee-take/dsagent/releases/download/v0.1.0/DS.Agent_0.1.0_x64-setup.exe"
                             .to_string(),
                 }],
             },
@@ -9845,12 +9845,12 @@ mod tests {
     fn app_update_status_hides_source_only_newer_release() {
         let release = GithubRelease {
             tag_name: "v9.9.9".to_string(),
-            html_url: "https://github.com/Lee-take/deepseek-agent-os/releases/tag/v9.9.9"
+            html_url: "https://github.com/Lee-take/dsagent/releases/tag/v9.9.9"
                 .to_string(),
             assets: vec![GithubReleaseAsset {
                 name: "source.zip".to_string(),
                 browser_download_url:
-                    "https://github.com/Lee-take/deepseek-agent-os/releases/download/v9.9.9/source.zip"
+                    "https://github.com/Lee-take/dsagent/releases/download/v9.9.9/source.zip"
                         .to_string(),
             }],
         };
@@ -9867,19 +9867,19 @@ mod tests {
     fn app_update_selects_trusted_windows_installer_asset() {
         let release = GithubRelease {
             tag_name: "v9.9.9".to_string(),
-            html_url: "https://github.com/Lee-take/deepseek-agent-os/releases/tag/v9.9.9"
+            html_url: "https://github.com/Lee-take/dsagent/releases/tag/v9.9.9"
                 .to_string(),
             assets: vec![
                 GithubReleaseAsset {
                     name: "source.zip".to_string(),
                     browser_download_url:
-                        "https://github.com/Lee-take/deepseek-agent-os/releases/download/v9.9.9/source.zip"
+                        "https://github.com/Lee-take/dsagent/releases/download/v9.9.9/source.zip"
                             .to_string(),
                 },
                 GithubReleaseAsset {
                     name: "DS Agent_9.9.9_x64-setup.exe".to_string(),
                     browser_download_url:
-                        "https://github.com/Lee-take/deepseek-agent-os/releases/download/v9.9.9/DS.Agent.exe"
+                        "https://github.com/Lee-take/dsagent/releases/download/v9.9.9/DS.Agent.exe"
                             .to_string(),
                 },
             ],

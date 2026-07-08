@@ -694,6 +694,14 @@ function checkRequiredDocs() {
   );
   for (const [phrase, label] of [
     [
+      "Search aliases: DS Agent, DSAgent, dsagent, DeepSeek Agent OS.",
+      "README.md searchable DSAgent aliases",
+    ],
+    [
+      "Latest release: [DS Agent v0.1.1]",
+      "README.md latest release link",
+    ],
+    [
       "turning local evidence into reviewable office outputs",
       "README.md English introduction names DS Agent office-output strength",
     ],
