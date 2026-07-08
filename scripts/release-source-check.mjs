@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
-const expectedVersion = "0.1.0";
+const expectedVersion = "0.1.1";
 const maxSourceFileBytes = 2 * 1024 * 1024;
 const binaryReleaseExtensions = new Set([
   ".appimage",
@@ -1721,8 +1721,8 @@ function checkPublicReleaseCopyPositioning() {
   checkTextIncludes(
     "apps/desktop/src-tauri/src/commands.rs",
     readText("apps/desktop/src-tauri/src/commands.rs"),
-    'APP_UPDATE_CURRENT_RELEASE_TAG: &str = "v0.1.0-rc.11"',
-    "app updater current release tag rc.11",
+    'APP_UPDATE_CURRENT_RELEASE_TAG: &str = "v0.1.1"',
+    "app updater current release tag v0.1.1",
   );
   checkTextIncludes(
     "apps/desktop/src-tauri/src/commands.rs",

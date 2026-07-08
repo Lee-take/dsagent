@@ -261,7 +261,7 @@ const fallbackAgentSoulProfileState: AgentSoulProfileState = {
 };
 
 const fallbackAppUpdateStatus: AppUpdateStatus = {
-  current_version: "0.1.0",
+  current_version: "0.1.1",
   latest_version: null,
   update_available: false,
   asset_name: null,

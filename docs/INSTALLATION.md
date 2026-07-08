@@ -9,10 +9,10 @@ project does not depend on the maintainer's local directories.
 The Windows build produces a normal NSIS setup executable:
 
 ```text
-DS Agent_0.1.0_x64-setup.exe
+DS Agent_0.1.1_x64-setup.exe
 ```
 
-The `v0.1.0` release attaches this Windows installer for colleague testing. It
+The latest `v0.1.x` release attaches this Windows installer for colleague testing. It
 is unsigned, so Windows may show an unknown-publisher warning. The installer
 embeds the Microsoft WebView2 bootstrapper and runs it silently when the target
 machine needs the WebView2 runtime; users do not need Node.js, pnpm, Rust, or a

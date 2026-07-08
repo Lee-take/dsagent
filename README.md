@@ -70,10 +70,10 @@ engineering inspiration, with respect for their licenses and maintainers.
 
 ## 0.1.0 Status / 0.1.0 状态
 
-Version `0.1.0` is the current Windows-first formal release line. The codebase
+Version `0.1.1` is the current Windows-first formal release. The codebase
 is still a practical preview rather than a finished agent product, but the
 Windows build/install/launch/run path is verified through the repeatable
-release gate and installed UI workflow smoke before publication. The `v0.1.0`
+release gate and installed UI workflow smoke before publication. The `v0.1.1`
 release includes a Windows NSIS installer for ordinary colleagues to download
 and test.
 
@@ -82,9 +82,9 @@ platform target is macOS. A macOS Tauri packaging config already exists in the
 repository, but macOS validation and release work will follow after the Windows
 preview continues to pass local release gates.
 
-`0.1.0` 是当前 Windows 优先正式发布版本线，仍然是实用预览版，还不是完整成熟的
+`0.1.1` 是当前 Windows 优先正式发布版本，仍然是实用预览版，还不是完整成熟的
 Agent 产品。正式发布前，当前 Windows 构建、安装、启动和运行路径都要通过本地
-release gate 与 installed UI workflow smoke 验证。`v0.1.0` release 附带 Windows
+release gate 与 installed UI workflow smoke 验证。`v0.1.1` release 附带 Windows
 NSIS 安装包，方便普通同事直接下载测试。
 
 Windows 预览版持续通过本地 release gates 后，下一步会推进 macOS 版本。仓库里已经保
@@ -359,7 +359,7 @@ npx pnpm@9.15.9 test:windows-installed-ui -- --workflow
 
 Windows builds automatically merge `apps/desktop/src-tauri/tauri.windows.conf.json`
 and produce an NSIS installer under the configured Cargo target directory, for
-example `release/bundle/nsis/DS Agent_0.1.0_x64-setup.exe`. The Windows config
+example `release/bundle/nsis/DS Agent_0.1.1_x64-setup.exe`. The Windows config
 embeds the Microsoft WebView2 bootstrapper and runs it silently during install
 when the target machine needs the WebView2 runtime.
 

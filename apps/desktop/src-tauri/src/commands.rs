@@ -135,8 +135,8 @@ const APP_UPDATE_RELEASES_API_URL: &str =
     "https://api.github.com/repos/Lee-take/deepseek-agent-os/releases";
 const APP_UPDATE_RELEASE_DOWNLOAD_PREFIX: &str =
     "https://github.com/Lee-take/deepseek-agent-os/releases/download/";
-const APP_UPDATE_USER_AGENT: &str = "DS-Agent-Updater/0.1.0";
-const APP_UPDATE_CURRENT_RELEASE_TAG: &str = "v0.1.0-rc.11";
+const APP_UPDATE_USER_AGENT: &str = "DS-Agent-Updater/0.1.1";
+const APP_UPDATE_CURRENT_RELEASE_TAG: &str = "v0.1.1";
 const AGENT_SOUL_PROFILE_FILE_NAME: &str = "soul.md";
 const AGENT_SOUL_PROFILE_CONTEXT_MAX_BYTES: usize = 800;
 const AGENT_SOUL_PROFILE_MAX_BYTES: usize = 16 * 1024;
@@ -9652,9 +9652,9 @@ pub fn preview_work_package_import(
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_terminal_read_command_from_target, is_newer_version, is_windows_installer_asset,
-        release_installable_asset, silent_update_install_command, update_status_from_release,
-        update_status_from_releases, GithubRelease, GithubReleaseAsset,
+        agent_terminal_read_command_from_target, app_update_current_version, is_newer_version,
+        is_windows_installer_asset, release_installable_asset, silent_update_install_command,
+        update_status_from_release, update_status_from_releases, GithubRelease, GithubReleaseAsset,
     };
     use crate::commands::{
         agent_chat_api_key_candidates_from_sources, agent_chat_api_key_from_sources,
@@ -9794,6 +9794,41 @@ mod tests {
         assert!(!status.update_available);
         assert_eq!(status.current_version, "v0.1.0-rc.3");
         assert_eq!(status.latest_version.as_deref(), Some("0.1.0-rc.3"));
+        assert!(status.asset_name.is_none());
+    }
+
+    #[test]
+    fn app_update_status_keeps_current_formal_release_quiet_from_release_list() {
+        let releases = vec![
+            GithubRelease {
+                tag_name: "v0.1.1".to_string(),
+                html_url: "https://github.com/Lee-take/deepseek-agent-os/releases/tag/v0.1.1"
+                    .to_string(),
+                assets: vec![GithubReleaseAsset {
+                    name: "DS Agent_0.1.1_x64-setup.exe".to_string(),
+                    browser_download_url:
+                        "https://github.com/Lee-take/deepseek-agent-os/releases/download/v0.1.1/DS.Agent_0.1.1_x64-setup.exe"
+                            .to_string(),
+                }],
+            },
+            GithubRelease {
+                tag_name: "v0.1.0".to_string(),
+                html_url: "https://github.com/Lee-take/deepseek-agent-os/releases/tag/v0.1.0"
+                    .to_string(),
+                assets: vec![GithubReleaseAsset {
+                    name: "DS Agent_0.1.0_x64-setup.exe".to_string(),
+                    browser_download_url:
+                        "https://github.com/Lee-take/deepseek-agent-os/releases/download/v0.1.0/DS.Agent_0.1.0_x64-setup.exe"
+                            .to_string(),
+                }],
+            },
+        ];
+
+        let status = update_status_from_releases(releases, app_update_current_version());
+
+        assert!(!status.update_available);
+        assert_eq!(status.current_version, "v0.1.1");
+        assert_eq!(status.latest_version.as_deref(), Some("0.1.1"));
         assert!(status.asset_name.is_none());
     }
 
