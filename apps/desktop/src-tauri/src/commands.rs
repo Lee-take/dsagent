@@ -42,11 +42,11 @@ use crate::kernel::computer_use::{
 };
 use crate::kernel::deepseek::{
     build_deepseek_chat_completion_request, current_deepseek_credential_status,
-    execute_deepseek_chat_completion_with_cache, execute_deepseek_user_balance,
-    DeepSeekChatCacheState, DeepSeekChatCacheStatus, DeepSeekChatCompletionTransport,
-    DeepSeekChatTelemetry, DeepSeekCredentialStatus, DeepSeekMemoryChatCompletionCache,
-    DeepSeekOperationsBriefingSynthesizer, DeepSeekUserBalanceResponse,
-    HttpDeepSeekChatCompletionTransport, DEEPSEEK_API_KEY_ENV,
+    execute_deepseek_chat_completion, execute_deepseek_chat_completion_with_cache,
+    execute_deepseek_user_balance, DeepSeekChatCacheState, DeepSeekChatCacheStatus,
+    DeepSeekChatCompletionTransport, DeepSeekChatTelemetry, DeepSeekCredentialStatus,
+    DeepSeekMemoryChatCompletionCache, DeepSeekOperationsBriefingSynthesizer,
+    DeepSeekUserBalanceResponse, HttpDeepSeekChatCompletionTransport, DEEPSEEK_API_KEY_ENV,
 };
 use crate::kernel::deepseek_pricing::{
     estimate_deepseek_chat_cost_micro_usd, load_deepseek_pricing_state,
@@ -136,7 +136,7 @@ const APP_UPDATE_RELEASES_API_URL: &str =
 const APP_UPDATE_RELEASE_DOWNLOAD_PREFIX: &str =
     "https://github.com/Lee-take/deepseek-agent-os/releases/download/";
 const APP_UPDATE_USER_AGENT: &str = "DS-Agent-Updater/0.1.0";
-const APP_UPDATE_CURRENT_RELEASE_TAG: &str = "v0.1.0-rc.10";
+const APP_UPDATE_CURRENT_RELEASE_TAG: &str = "v0.1.0-rc.11";
 const AGENT_SOUL_PROFILE_FILE_NAME: &str = "soul.md";
 const AGENT_SOUL_PROFILE_CONTEXT_MAX_BYTES: usize = 800;
 const AGENT_SOUL_PROFILE_MAX_BYTES: usize = 16 * 1024;
@@ -144,6 +144,11 @@ const AGENT_MEMORY_CONTEXT_MAX_RECORDS: usize = 3;
 const AGENT_MEMORY_CONTEXT_MAX_BYTES: usize = 1200;
 const AGENT_MEMORY_CONTEXT_SNIPPET_CHARS: usize = 220;
 const AGENT_MEMORY_FEEDBACK_MAINTENANCE_THRESHOLD: usize = 2;
+const AGENT_MEMORY_QUALITY_MAINTENANCE_THRESHOLD: i32 = 12;
+const AGENT_MEMORY_QUALITY_OLD_DAYS: i64 = 120;
+const AGENT_MEMORY_QUALITY_LONG_BODY_CHARS: usize = 800;
+const AGENT_MEMORY_MODEL_REWRITE_MAX_BODY_CHARS: usize = 1200;
+const AGENT_MEMORY_MERGE_BODY_CHARS: usize = 360;
 const AGENT_MEMORY_CANDIDATE_GATE_MAX_RECORDS: usize = 3;
 const AGENT_MEMORY_CANDIDATE_EVIDENCE_CHARS: usize = 180;
 const AGENT_MEMORY_CANDIDATE_REASON_CHARS: usize = 220;
@@ -219,12 +224,28 @@ struct AgentMemoryRuntimeContext {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MemoryBackgroundMaintenanceActionSummary {
+    pub memory_id: Option<Uuid>,
+    pub memory_title: String,
+    pub action: String,
+    pub outcome: String,
+    pub reason: String,
+    pub feedback: Option<MemorySelectedFeedbackKind>,
+    pub model_used: bool,
+    pub audit_note: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MemoryBackgroundMaintenanceSummary {
     pub retrieval_reviews_marked: usize,
     pub update_candidates_created: usize,
+    pub merge_candidates_created: usize,
     pub auto_candidate_decisions_applied: usize,
     pub auto_updates_applied: usize,
+    pub auto_merges_applied: usize,
     pub auto_archives_applied: usize,
+    pub model_update_rewrites_used: usize,
+    pub actions: Vec<MemoryBackgroundMaintenanceActionSummary>,
 }
 
 impl Default for AgentMemoryRuntimeContext {
@@ -2661,6 +2682,140 @@ impl AgentMemoryFeedbackSummary {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AgentMemoryQualityAssessment {
+    score: i32,
+    signals: Vec<String>,
+}
+
+impl AgentMemoryQualityAssessment {
+    fn triggers_retrieval_review(&self) -> bool {
+        self.score >= AGENT_MEMORY_QUALITY_MAINTENANCE_THRESHOLD
+    }
+}
+
+fn agent_memory_quality_assessment(
+    memory: &MemoryRecord,
+    summary: AgentMemoryFeedbackSummary,
+    feedback_count: usize,
+    duplicate_pressure: usize,
+    now: DateTime<Utc>,
+) -> AgentMemoryQualityAssessment {
+    let mut score = 0i32;
+    let mut signals = Vec::new();
+
+    if summary.irrelevant > 0 {
+        score += summary.irrelevant as i32 * 5;
+        if summary.irrelevant >= AGENT_MEMORY_FEEDBACK_MAINTENANCE_THRESHOLD {
+            signals.push("repeated_irrelevant_feedback".to_string());
+        } else {
+            signals.push("single_irrelevant_feedback".to_string());
+        }
+    }
+    if summary.stale > 0 {
+        score += summary.stale as i32 * 5;
+        if summary.stale >= AGENT_MEMORY_FEEDBACK_MAINTENANCE_THRESHOLD {
+            signals.push("repeated_stale_feedback".to_string());
+        } else {
+            signals.push("single_stale_feedback".to_string());
+        }
+    }
+    if summary.conflicting > 0 {
+        score += summary.conflicting as i32 * 6;
+        signals.push("conflict_frequency".to_string());
+    }
+    if summary.should_update > 0 {
+        score += summary.should_update as i32 * 4;
+        signals.push("update_requested".to_string());
+    }
+    if summary.useful > 0 {
+        score -= summary.useful as i32 * 4;
+        signals.push("useful_feedback".to_string());
+    }
+    if feedback_count > 0
+        && summary.useful == 0
+        && summary.irrelevant + summary.stale + summary.conflicting + summary.should_update > 0
+    {
+        score += 3;
+        signals.push("low_retrieval_value".to_string());
+    }
+
+    let age_days = now
+        .signed_duration_since(memory.updated_at)
+        .num_days()
+        .max(0);
+    if age_days >= AGENT_MEMORY_QUALITY_OLD_DAYS {
+        score += 4;
+        signals.push("old_memory".to_string());
+    }
+
+    if memory.body.chars().count() >= AGENT_MEMORY_QUALITY_LONG_BODY_CHARS {
+        score += 4;
+        signals.push("excessive_length".to_string());
+    }
+
+    if duplicate_pressure > 0 {
+        score += 4;
+        signals.push("duplicate_pressure".to_string());
+    }
+
+    if memory_has_overly_specific_wording(memory) {
+        score += 3;
+        signals.push("overly_specific_wording".to_string());
+    }
+
+    AgentMemoryQualityAssessment {
+        score: score.max(0),
+        signals,
+    }
+}
+
+fn agent_memory_duplicate_pressure_by_memory(
+    memories: &[MemoryRecord],
+) -> std::collections::HashMap<Uuid, usize> {
+    let mut duplicate_pressure = std::collections::HashMap::<Uuid, usize>::new();
+    for (left_index, left) in memories.iter().enumerate() {
+        for right in memories.iter().skip(left_index + 1) {
+            if memories_have_duplicate_pressure(left, right) {
+                *duplicate_pressure.entry(left.id).or_default() += 1;
+                *duplicate_pressure.entry(right.id).or_default() += 1;
+            }
+        }
+    }
+    duplicate_pressure
+}
+
+fn memories_have_duplicate_pressure(left: &MemoryRecord, right: &MemoryRecord) -> bool {
+    let left_title = normalized_memory_quality_text(&left.title);
+    let right_title = normalized_memory_quality_text(&right.title);
+    if left_title.len() >= 12 && left_title == right_title {
+        return true;
+    }
+
+    let left_body = normalized_memory_quality_text(&left.body);
+    let right_body = normalized_memory_quality_text(&right.body);
+    let long_enough = left_body.chars().count() >= 80 && right_body.chars().count() >= 80;
+    long_enough
+        && (left_body == right_body
+            || left_body.contains(&right_body)
+            || right_body.contains(&left_body))
+}
+
+fn normalized_memory_quality_text(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+fn memory_has_overly_specific_wording(memory: &MemoryRecord) -> bool {
+    let text = format!("{} {}", memory.title, memory.body).to_lowercase();
+    [":\\", ":/", "\\\\?\\", "file://", "http://", "https://"]
+        .iter()
+        .any(|marker| text.contains(marker))
+}
+
 pub fn list_memory_maintenance_reviews_from_store(
     store: &EventStore,
 ) -> Result<Vec<MemoryMaintenanceReviewItem>, String> {
@@ -2706,19 +2861,42 @@ fn build_memory_maintenance_review_items(
             groups
         },
     );
+    let duplicate_pressure_by_memory = agent_memory_duplicate_pressure_by_memory(memories);
 
     let mut items = memories
         .iter()
         .filter_map(|memory| {
             let summary = feedback_by_memory.get(&memory.id).copied()?;
-            let review_kinds = summary.maintenance_review_kinds();
-            if review_kinds.is_empty() {
-                return None;
-            }
             let feedback_records = feedback_records_by_memory
                 .get(&memory.id)
                 .cloned()
                 .unwrap_or_default();
+            let duplicate_pressure = duplicate_pressure_by_memory
+                .get(&memory.id)
+                .copied()
+                .unwrap_or_default();
+            let quality = agent_memory_quality_assessment(
+                memory,
+                summary,
+                feedback_records.len(),
+                duplicate_pressure,
+                now,
+            );
+            let mut review_kinds = summary.maintenance_review_kinds();
+            if quality.triggers_retrieval_review()
+                && !review_kinds.contains(&MemoryMaintenanceReviewKind::Retrieval)
+            {
+                review_kinds.push(MemoryMaintenanceReviewKind::Retrieval);
+            }
+            if review_kinds.is_empty() {
+                return None;
+            }
+            let mut recommended_actions = summary.maintenance_recommended_actions();
+            if review_kinds.contains(&MemoryMaintenanceReviewKind::Retrieval)
+                && !recommended_actions.contains(&MemoryMaintenanceActionKind::RetrievalReviewed)
+            {
+                recommended_actions.insert(0, MemoryMaintenanceActionKind::RetrievalReviewed);
+            }
             let latest_feedback = feedback_records
                 .iter()
                 .max_by_key(|feedback| feedback.created_at)
@@ -2744,9 +2922,11 @@ fn build_memory_maintenance_review_items(
                 memory: memory.clone(),
                 feedback_counts: summary.maintenance_counts(),
                 feedback_count: feedback_records.len(),
+                quality_score: quality.score,
+                quality_signals: quality.signals,
                 latest_feedback,
                 review_kinds,
-                recommended_actions: summary.maintenance_recommended_actions(),
+                recommended_actions,
                 review_needed,
                 snoozed_until,
                 last_action,
@@ -2759,6 +2939,7 @@ fn build_memory_maintenance_review_items(
             .review_needed
             .cmp(&left.review_needed)
             .then_with(|| right.review_kinds.len().cmp(&left.review_kinds.len()))
+            .then_with(|| right.quality_score.cmp(&left.quality_score))
             .then_with(|| {
                 right
                     .latest_feedback
@@ -2822,10 +3003,188 @@ pub fn record_memory_maintenance_review_action_in_store(
         .map_err(event_store_error)
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MemoryMaintenanceUpdateDraft {
+    title: String,
+    body: String,
+    rationale: String,
+    model_used: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct MemoryMaintenanceModelRewriteEnvelope {
+    title: Option<String>,
+    body: String,
+    rationale: Option<String>,
+}
+
+trait MemoryMaintenanceModelRewriter {
+    fn rewrite_memory_update(
+        &mut self,
+        store: &EventStore,
+        review: &MemoryMaintenanceReviewItem,
+    ) -> Result<Option<MemoryMaintenanceUpdateDraft>, String>;
+}
+
+struct DisabledMemoryMaintenanceModelRewriter;
+
+impl MemoryMaintenanceModelRewriter for DisabledMemoryMaintenanceModelRewriter {
+    fn rewrite_memory_update(
+        &mut self,
+        _store: &EventStore,
+        _review: &MemoryMaintenanceReviewItem,
+    ) -> Result<Option<MemoryMaintenanceUpdateDraft>, String> {
+        Ok(None)
+    }
+}
+
+struct DeepSeekMemoryMaintenanceModelRewriter<'a, T: DeepSeekChatCompletionTransport> {
+    transport: &'a T,
+    api_key: &'a str,
+}
+
+impl<T: DeepSeekChatCompletionTransport> MemoryMaintenanceModelRewriter
+    for DeepSeekMemoryMaintenanceModelRewriter<'_, T>
+{
+    fn rewrite_memory_update(
+        &mut self,
+        store: &EventStore,
+        review: &MemoryMaintenanceReviewItem,
+    ) -> Result<Option<MemoryMaintenanceUpdateDraft>, String> {
+        if self.api_key.trim().is_empty() {
+            return Ok(None);
+        }
+        let Some(feedback) = review.latest_feedback.as_ref() else {
+            return Ok(None);
+        };
+        if feedback.feedback != MemorySelectedFeedbackKind::ShouldUpdate
+            && feedback.feedback != MemorySelectedFeedbackKind::Conflicting
+        {
+            return Ok(None);
+        }
+
+        let recent_task_context = memory_maintenance_recent_task_context(store)?;
+        let system_prompt = "You rewrite DS Agent long-term memories during background maintenance. Return JSON only with title, body, and rationale. Keep the body concise, durable, and privacy-safe. Do not include secrets, API keys, local absolute paths, or transient implementation details.";
+        let user_prompt = format!(
+            "memory_title:\n{}\n\nmemory_body:\n{}\n\nselected_memory_feedback:\nkind={:?}\nnote={}\n\nquality_signals:\n{}\n\nrecent_task_context:\n{}",
+            agent_context_truncate_chars(&review.memory.title, 180),
+            agent_context_truncate_chars(&review.memory.body, 1600),
+            feedback.feedback,
+            agent_context_truncate_chars(&feedback.note, 480),
+            review.quality_signals.join(","),
+            recent_task_context,
+        );
+        let request = build_deepseek_chat_completion_request(
+            ModelRoute::Flash,
+            ThinkingLevel::Fast,
+            system_prompt,
+            &user_prompt,
+        )?;
+        let response =
+            match execute_deepseek_chat_completion(self.transport, self.api_key, &request) {
+                Ok(response) => response,
+                Err(_) => return Ok(None),
+            };
+        let Some(text) = response.first_text() else {
+            return Ok(None);
+        };
+
+        Ok(parse_memory_maintenance_model_rewrite(
+            text,
+            &review.memory.title,
+        ))
+    }
+}
+
+fn memory_maintenance_recent_task_context(store: &EventStore) -> Result<String, String> {
+    let mut tasks = store.list_task_records().map_err(event_store_error)?;
+    tasks.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    let lines = tasks
+        .into_iter()
+        .take(3)
+        .map(|task| {
+            format!(
+                "- {}: {}",
+                agent_context_truncate_chars(&task.title, 120),
+                agent_context_truncate_chars(&task.summary, 220)
+            )
+        })
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        Ok("none".to_string())
+    } else {
+        Ok(lines.join("\n"))
+    }
+}
+
+fn parse_memory_maintenance_model_rewrite(
+    text: &str,
+    fallback_title: &str,
+) -> Option<MemoryMaintenanceUpdateDraft> {
+    let json_text = extract_json_object_text(text)?;
+    let envelope = serde_json::from_str::<MemoryMaintenanceModelRewriteEnvelope>(json_text).ok()?;
+    let title = envelope
+        .title
+        .map(|title| title.trim().to_string())
+        .filter(|title| !title.is_empty())
+        .unwrap_or_else(|| fallback_title.trim().to_string());
+    let body = envelope.body.trim().to_string();
+    if body.is_empty() || body.chars().count() > AGENT_MEMORY_MODEL_REWRITE_MAX_BODY_CHARS {
+        return None;
+    }
+    if memory_maintenance_model_text_violates_privacy_boundary(&title)
+        || memory_maintenance_model_text_violates_privacy_boundary(&body)
+    {
+        return None;
+    }
+    let rationale = envelope
+        .rationale
+        .map(|rationale| agent_context_truncate_chars(rationale.trim(), 240))
+        .filter(|rationale| !rationale.is_empty())
+        .unwrap_or_else(|| "Model produced a schema-valid maintenance rewrite.".to_string());
+
+    Some(MemoryMaintenanceUpdateDraft {
+        title,
+        body,
+        rationale,
+        model_used: true,
+    })
+}
+
+fn extract_json_object_text(text: &str) -> Option<&str> {
+    let trimmed = text.trim();
+    let start = trimmed.find('{')?;
+    let end = trimmed.rfind('}')?;
+    if end <= start {
+        return None;
+    }
+    Some(&trimmed[start..=end])
+}
+
+fn memory_maintenance_model_text_violates_privacy_boundary(value: &str) -> bool {
+    let lower = value.to_lowercase();
+    lower.contains("deepseek_api_key")
+        || lower.contains("api key")
+        || lower.contains("sk-")
+        || lower.contains("file://")
+        || lower.contains("\\\\?\\")
+        || lower.contains(":\\")
+        || lower.contains(":/")
+}
+
 pub fn propose_memory_update_candidate_from_feedback_in_store(
     store: &EventStore,
     memory_id: Uuid,
     note: String,
+) -> Result<MemoryCandidateRecord, String> {
+    propose_memory_update_candidate_from_feedback_with_draft_in_store(store, memory_id, note, None)
+}
+
+fn propose_memory_update_candidate_from_feedback_with_draft_in_store(
+    store: &EventStore,
+    memory_id: Uuid,
+    note: String,
+    draft: Option<MemoryMaintenanceUpdateDraft>,
 ) -> Result<MemoryCandidateRecord, String> {
     let memory = store
         .list_memory_records()
@@ -2851,19 +3210,28 @@ pub fn propose_memory_update_candidate_from_feedback_in_store(
     if !note.is_empty() {
         rationale_parts.push(note.to_string());
     }
-    let candidate_body = latest_feedback
-        .as_ref()
-        .and_then(|feedback| {
-            let note = feedback.note.trim();
-            if note.is_empty() || memory.body.contains(note) {
-                None
-            } else {
-                Some(format!("{}\n\nMaintenance update: {}", memory.body, note))
-            }
-        })
-        .unwrap_or_else(|| memory.body.clone());
+    let (candidate_title, candidate_body) = if let Some(draft) = draft {
+        if draft.model_used {
+            rationale_parts.push("Model-assisted rewrite used.".to_string());
+        }
+        rationale_parts.push(draft.rationale);
+        (draft.title, draft.body)
+    } else {
+        let candidate_body = latest_feedback
+            .as_ref()
+            .and_then(|feedback| {
+                let note = feedback.note.trim();
+                if note.is_empty() || memory.body.contains(note) {
+                    None
+                } else {
+                    Some(format!("{}\n\nMaintenance update: {}", memory.body, note))
+                }
+            })
+            .unwrap_or_else(|| memory.body.clone());
+        (memory.title.clone(), candidate_body)
+    };
     let mut candidate = MemoryCandidate::new_with_metadata_and_expiration(
-        memory.title.clone(),
+        candidate_title,
         candidate_body,
         MemoryCandidateSource::Manual,
         Some(memory.id),
@@ -2884,7 +3252,15 @@ pub fn propose_memory_update_candidate_from_feedback_in_store(
             memory_id,
             MemoryMaintenanceActionKind::UpdateCandidateCreated,
             None,
-            "Created update candidate from selected-memory feedback.".to_string(),
+            if rationale_parts
+                .iter()
+                .any(|part| part == "Model-assisted rewrite used.")
+            {
+                "Created update candidate from selected-memory feedback with model-assisted rewrite."
+                    .to_string()
+            } else {
+                "Created update candidate from selected-memory feedback.".to_string()
+            },
         )
         .map_err(event_store_error)?;
     store
@@ -2893,6 +3269,124 @@ pub fn propose_memory_update_candidate_from_feedback_in_store(
         .into_iter()
         .find(|record| record.candidate.id == candidate.id)
         .ok_or_else(|| "memory update candidate was not found after append".to_string())
+}
+
+fn propose_memory_merge_candidate_from_duplicate_pressure_in_store(
+    store: &EventStore,
+    review: &MemoryMaintenanceReviewItem,
+) -> Result<Option<MemoryCandidateRecord>, String> {
+    if !review
+        .quality_signals
+        .iter()
+        .any(|signal| signal == "duplicate_pressure")
+    {
+        return Ok(None);
+    }
+    let memories = store.list_memory_records().map_err(event_store_error)?;
+    let duplicate_group = memories
+        .iter()
+        .filter(|memory| {
+            memory.id == review.memory.id
+                || memories_have_duplicate_pressure(&review.memory, memory)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if duplicate_group.len() < 2 {
+        return Ok(None);
+    }
+    let group_ids = duplicate_group
+        .iter()
+        .map(|memory| memory.id)
+        .collect::<Vec<_>>();
+    let existing_pending_merge = store
+        .list_memory_candidate_records()
+        .map_err(event_store_error)?
+        .into_iter()
+        .any(|candidate| {
+            candidate.effective_status == MemoryCandidateStatus::Pending
+                && candidate.candidate.suggested_action == MemoryCandidateSuggestedAction::Merge
+                && candidate
+                    .conflicting_memory_ids
+                    .iter()
+                    .any(|memory_id| group_ids.contains(memory_id))
+        });
+    if existing_pending_merge {
+        return Ok(None);
+    }
+
+    let mut candidate = MemoryCandidate::new_with_metadata_and_expiration(
+        review.memory.title.clone(),
+        compressed_memory_merge_body(&duplicate_group),
+        MemoryCandidateSource::WorkflowReflection,
+        Some(review.memory.id),
+        format!(
+            "Background maintenance created a merge/compression candidate from quality signals: {}.",
+            review.quality_signals.join(",")
+        ),
+        review.memory.memory_type,
+        review.memory.scope,
+        review.memory.sensitivity,
+        review.memory.lifecycle,
+        review.memory.expires_at,
+    )
+    .map_err(event_store_error)?;
+    candidate.suggested_action = MemoryCandidateSuggestedAction::Merge;
+    store
+        .append_memory_candidate(&candidate)
+        .map_err(event_store_error)?;
+    store
+        .list_memory_candidate_records()
+        .map_err(event_store_error)?
+        .into_iter()
+        .find(|record| record.candidate.id == candidate.id)
+        .map(Some)
+        .ok_or_else(|| "memory merge candidate was not found after append".to_string())
+}
+
+fn compressed_memory_merge_body(memories: &[MemoryRecord]) -> String {
+    let mut bodies = Vec::new();
+    for memory in memories {
+        let body = memory.body.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !body.is_empty() && !bodies.iter().any(|existing| existing == &body) {
+            bodies.push(body);
+        }
+    }
+    format!(
+        "Memory merge summary: {}",
+        agent_context_truncate_chars(&bodies.join(" "), AGENT_MEMORY_MERGE_BODY_CHARS)
+    )
+}
+
+fn compress_accepted_merge_memory_from_candidate(
+    store: &EventStore,
+    candidate: &MemoryCandidate,
+    note: String,
+) -> Result<(), String> {
+    let Some(merged_memory) = store
+        .list_memory_records()
+        .map_err(event_store_error)?
+        .into_iter()
+        .find(|memory| memory.source_id == Some(candidate.id))
+    else {
+        return Ok(());
+    };
+    if merged_memory.body == candidate.body || merged_memory.body.len() <= candidate.body.len() {
+        return Ok(());
+    }
+    store
+        .update_memory_record(
+            merged_memory.id,
+            merged_memory.title,
+            candidate.body.clone(),
+            merged_memory.memory_type,
+            merged_memory.scope,
+            merged_memory.sensitivity,
+            merged_memory.lifecycle,
+            merged_memory.expires_at,
+            note,
+        )
+        .map_err(event_store_error)?;
+    Ok(())
 }
 
 fn memory_candidate_background_note(action: MemoryCandidateSuggestedAction) -> String {
@@ -2916,6 +3410,66 @@ fn preferred_memory_candidate_conflict_target(record: &MemoryCandidateRecord) ->
         })
 }
 
+fn memory_background_maintenance_summary_default() -> MemoryBackgroundMaintenanceSummary {
+    MemoryBackgroundMaintenanceSummary {
+        retrieval_reviews_marked: 0,
+        update_candidates_created: 0,
+        merge_candidates_created: 0,
+        auto_candidate_decisions_applied: 0,
+        auto_updates_applied: 0,
+        auto_merges_applied: 0,
+        auto_archives_applied: 0,
+        model_update_rewrites_used: 0,
+        actions: Vec::new(),
+    }
+}
+
+fn push_memory_background_action(
+    summary: &mut MemoryBackgroundMaintenanceSummary,
+    memory_id: Option<Uuid>,
+    memory_title: impl Into<String>,
+    action: impl Into<String>,
+    outcome: impl Into<String>,
+    reason: impl Into<String>,
+    feedback: Option<MemorySelectedFeedbackKind>,
+    model_used: bool,
+    audit_note: impl Into<String>,
+) {
+    summary
+        .actions
+        .push(MemoryBackgroundMaintenanceActionSummary {
+            memory_id,
+            memory_title: memory_title.into(),
+            action: action.into(),
+            outcome: outcome.into(),
+            reason: reason.into(),
+            feedback,
+            model_used,
+            audit_note: audit_note.into(),
+        });
+}
+
+fn latest_review_feedback_kind(
+    review: &MemoryMaintenanceReviewItem,
+) -> Option<MemorySelectedFeedbackKind> {
+    review
+        .latest_feedback
+        .as_ref()
+        .map(|feedback| feedback.feedback)
+}
+
+fn memory_candidate_model_used(candidate: &MemoryCandidate) -> bool {
+    candidate.rationale.contains("Model-assisted rewrite used.")
+}
+
+fn memory_candidate_primary_conflict(record: &MemoryCandidateRecord) -> (Option<Uuid>, String) {
+    record
+        .conflicting_memories
+        .first()
+        .map(|memory| (Some(memory.id), memory.title.clone()))
+        .unwrap_or((None, record.candidate.title.clone()))
+}
+
 fn apply_pending_memory_candidate_background_decision(
     store: &EventStore,
     record: &MemoryCandidateRecord,
@@ -2927,21 +3481,40 @@ fn apply_pending_memory_candidate_background_decision(
 
     let action = record.candidate.suggested_action;
     let note = memory_candidate_background_note(action);
+    let (primary_memory_id, primary_memory_title) = memory_candidate_primary_conflict(record);
+    let model_used = memory_candidate_model_used(&record.candidate);
     match action {
         MemoryCandidateSuggestedAction::New => {
             if record.conflicting_memory_ids.is_empty() {
                 store
-                    .resolve_memory_candidate(record.candidate.id, true, note)
+                    .resolve_memory_candidate(record.candidate.id, true, note.clone())
                     .map_err(event_store_error)?;
             } else {
                 store
                     .merge_memory_candidate_with_conflicts(
                         record.candidate.id,
                         record.conflicting_memory_ids.clone(),
-                        note,
+                        note.clone(),
                     )
                     .map_err(event_store_error)?;
+                compress_accepted_merge_memory_from_candidate(
+                    store,
+                    &record.candidate,
+                    "Background maintenance compressed accepted merge memory.".to_string(),
+                )?;
                 summary.auto_updates_applied += 1;
+                summary.auto_merges_applied += 1;
+                push_memory_background_action(
+                    summary,
+                    primary_memory_id,
+                    primary_memory_title.clone(),
+                    "candidate_new",
+                    "auto_merged",
+                    record.candidate.rationale.clone(),
+                    None,
+                    model_used,
+                    note.clone(),
+                );
             }
         }
         MemoryCandidateSuggestedAction::Update => {
@@ -2949,9 +3522,24 @@ fn apply_pending_memory_candidate_background_decision(
                 return Ok(false);
             };
             store
-                .update_memory_candidate_conflict(record.candidate.id, target_memory_id, note)
+                .update_memory_candidate_conflict(
+                    record.candidate.id,
+                    target_memory_id,
+                    note.clone(),
+                )
                 .map_err(event_store_error)?;
             summary.auto_updates_applied += 1;
+            push_memory_background_action(
+                summary,
+                Some(target_memory_id),
+                primary_memory_title.clone(),
+                "candidate_update",
+                "auto_updated",
+                record.candidate.rationale.clone(),
+                None,
+                model_used,
+                note.clone(),
+            );
         }
         MemoryCandidateSuggestedAction::Merge => {
             if record.conflicting_memory_ids.is_empty() {
@@ -2961,10 +3549,27 @@ fn apply_pending_memory_candidate_background_decision(
                 .merge_memory_candidate_with_conflicts(
                     record.candidate.id,
                     record.conflicting_memory_ids.clone(),
-                    note,
+                    note.clone(),
                 )
                 .map_err(event_store_error)?;
+            compress_accepted_merge_memory_from_candidate(
+                store,
+                &record.candidate,
+                "Background maintenance compressed accepted merge memory.".to_string(),
+            )?;
             summary.auto_updates_applied += 1;
+            summary.auto_merges_applied += 1;
+            push_memory_background_action(
+                summary,
+                primary_memory_id,
+                primary_memory_title.clone(),
+                "candidate_merge",
+                "auto_merged",
+                record.candidate.rationale.clone(),
+                None,
+                model_used,
+                note.clone(),
+            );
         }
         MemoryCandidateSuggestedAction::Replace => {
             if record.conflicting_memory_ids.is_empty() {
@@ -2974,10 +3579,21 @@ fn apply_pending_memory_candidate_background_decision(
                 .replace_memory_candidate_conflicts(
                     record.candidate.id,
                     record.conflicting_memory_ids.clone(),
-                    note,
+                    note.clone(),
                 )
                 .map_err(event_store_error)?;
             summary.auto_updates_applied += 1;
+            push_memory_background_action(
+                summary,
+                primary_memory_id,
+                primary_memory_title.clone(),
+                "candidate_replace",
+                "auto_replaced",
+                record.candidate.rationale.clone(),
+                None,
+                model_used,
+                note.clone(),
+            );
         }
         MemoryCandidateSuggestedAction::Archive => {
             if record.conflicting_memory_ids.is_empty() {
@@ -2988,10 +3604,23 @@ fn apply_pending_memory_candidate_background_decision(
                 .archive_memory_candidate_conflicts(
                     record.candidate.id,
                     record.conflicting_memory_ids.clone(),
-                    note,
+                    note.clone(),
                 )
                 .map_err(event_store_error)?;
             summary.auto_archives_applied += archived_count;
+            for memory in &record.conflicting_memories {
+                push_memory_background_action(
+                    summary,
+                    Some(memory.id),
+                    memory.title.clone(),
+                    "candidate_archive",
+                    "auto_archived",
+                    record.candidate.rationale.clone(),
+                    None,
+                    model_used,
+                    note.clone(),
+                );
+            }
         }
         MemoryCandidateSuggestedAction::Link => {
             if record.conflicting_memory_ids.is_empty() {
@@ -3002,15 +3631,37 @@ fn apply_pending_memory_candidate_background_decision(
                     record.candidate.id,
                     record.conflicting_memory_ids.clone(),
                     MemoryRelationKind::Extends,
-                    note,
+                    note.clone(),
                 )
                 .map_err(event_store_error)?;
             summary.auto_updates_applied += 1;
+            push_memory_background_action(
+                summary,
+                primary_memory_id,
+                primary_memory_title.clone(),
+                "candidate_link",
+                "auto_linked",
+                record.candidate.rationale.clone(),
+                None,
+                model_used,
+                note.clone(),
+            );
         }
         MemoryCandidateSuggestedAction::RejectHint => {
             store
-                .resolve_memory_candidate(record.candidate.id, false, note)
+                .resolve_memory_candidate(record.candidate.id, false, note.clone())
                 .map_err(event_store_error)?;
+            push_memory_background_action(
+                summary,
+                primary_memory_id,
+                primary_memory_title,
+                "candidate_reject_hint",
+                "auto_rejected",
+                record.candidate.rationale.clone(),
+                None,
+                model_used,
+                note.clone(),
+            );
         }
     }
 
@@ -3037,39 +3688,109 @@ fn apply_pending_memory_candidate_background_decisions(
 pub fn run_memory_background_maintenance_in_store(
     store: &EventStore,
 ) -> Result<MemoryBackgroundMaintenanceSummary, String> {
-    let mut summary = MemoryBackgroundMaintenanceSummary {
-        retrieval_reviews_marked: 0,
-        update_candidates_created: 0,
-        auto_candidate_decisions_applied: 0,
-        auto_updates_applied: 0,
-        auto_archives_applied: 0,
-    };
+    let mut rewriter = DisabledMemoryMaintenanceModelRewriter;
+    run_memory_background_maintenance_core(store, &mut rewriter)
+}
+
+pub fn run_memory_background_maintenance_with_model_in_store(
+    store: &EventStore,
+    transport: &impl DeepSeekChatCompletionTransport,
+    api_key: &str,
+) -> Result<MemoryBackgroundMaintenanceSummary, String> {
+    let mut rewriter = DeepSeekMemoryMaintenanceModelRewriter { transport, api_key };
+    run_memory_background_maintenance_core(store, &mut rewriter)
+}
+
+fn run_memory_background_maintenance_core(
+    store: &EventStore,
+    rewriter: &mut impl MemoryMaintenanceModelRewriter,
+) -> Result<MemoryBackgroundMaintenanceSummary, String> {
+    let mut summary = memory_background_maintenance_summary_default();
     apply_pending_memory_candidate_background_decisions(store, &mut summary)?;
     let reviews = list_memory_maintenance_reviews_from_store(store)?;
 
     for review in reviews.into_iter().filter(|review| review.review_needed) {
+        if let Some(candidate) =
+            propose_memory_merge_candidate_from_duplicate_pressure_in_store(store, &review)?
+        {
+            let audit_note =
+                "Background maintenance created merge/compression candidate from duplicate pressure."
+                    .to_string();
+            store
+                .record_memory_maintenance_review_action(
+                    review.memory.id,
+                    MemoryMaintenanceActionKind::UpdateCandidateCreated,
+                    None,
+                    audit_note.clone(),
+                )
+                .map_err(event_store_error)?;
+            store
+                .merge_memory_candidate_with_conflicts(
+                    candidate.candidate.id,
+                    candidate.conflicting_memory_ids.clone(),
+                    "Background maintenance automatically merged duplicate memory candidates."
+                        .to_string(),
+                )
+                .map_err(event_store_error)?;
+            compress_accepted_merge_memory_from_candidate(
+                store,
+                &candidate.candidate,
+                "Background maintenance compressed accepted duplicate merge memory.".to_string(),
+            )?;
+            summary.merge_candidates_created += 1;
+            summary.auto_candidate_decisions_applied += 1;
+            summary.auto_updates_applied += 1;
+            summary.auto_merges_applied += 1;
+            push_memory_background_action(
+                &mut summary,
+                Some(review.memory.id),
+                review.memory.title.clone(),
+                "merge_candidate_created",
+                "auto_merged",
+                review.quality_signals.join(","),
+                latest_review_feedback_kind(&review),
+                false,
+                audit_note,
+            );
+            continue;
+        }
+
         if review.review_kinds == [MemoryMaintenanceReviewKind::Retrieval] {
+            let audit_note =
+                "Background maintenance marked repeated irrelevant feedback for retrieval tuning."
+                    .to_string();
             store
                 .record_memory_maintenance_review_action(
                     review.memory.id,
                     MemoryMaintenanceActionKind::RetrievalReviewed,
                     None,
-                    "Background maintenance marked repeated irrelevant feedback for retrieval tuning."
-                        .to_string(),
+                    audit_note.clone(),
                 )
                 .map_err(event_store_error)?;
             summary.retrieval_reviews_marked += 1;
+            push_memory_background_action(
+                &mut summary,
+                Some(review.memory.id),
+                review.memory.title.clone(),
+                "retrieval_reviewed",
+                "retrieval_reviewed",
+                review.quality_signals.join(","),
+                latest_review_feedback_kind(&review),
+                false,
+                audit_note,
+            );
             continue;
         }
 
         if review.feedback_counts.stale >= AGENT_MEMORY_FEEDBACK_MAINTENANCE_THRESHOLD {
+            let audit_note =
+                "Background maintenance archived memory after repeated stale feedback.".to_string();
             store
                 .record_memory_maintenance_review_action(
                     review.memory.id,
                     MemoryMaintenanceActionKind::Archived,
                     None,
-                    "Background maintenance archived memory after repeated stale feedback."
-                        .to_string(),
+                    audit_note.clone(),
                 )
                 .map_err(event_store_error)?;
             store
@@ -3079,6 +3800,17 @@ pub fn run_memory_background_maintenance_in_store(
                 )
                 .map_err(event_store_error)?;
             summary.auto_archives_applied += 1;
+            push_memory_background_action(
+                &mut summary,
+                Some(review.memory.id),
+                review.memory.title.clone(),
+                "archived",
+                "auto_archived",
+                review.quality_signals.join(","),
+                latest_review_feedback_kind(&review),
+                false,
+                audit_note,
+            );
             continue;
         }
 
@@ -3095,35 +3827,70 @@ pub fn run_memory_background_maintenance_in_store(
                         && candidate.conflicting_memory_ids.contains(&review.memory.id)
                 });
             if let Some(candidate) = existing_pending_candidate {
+                let audit_note =
+                    "Background maintenance automatically applied pending update candidate."
+                        .to_string();
                 store
                     .update_memory_candidate_conflict(
                         candidate.candidate.id,
                         review.memory.id,
-                        "Background maintenance automatically applied pending update candidate."
-                            .to_string(),
+                        audit_note.clone(),
                     )
                     .map_err(event_store_error)?;
                 summary.auto_candidate_decisions_applied += 1;
                 summary.auto_updates_applied += 1;
+                push_memory_background_action(
+                    &mut summary,
+                    Some(review.memory.id),
+                    review.memory.title.clone(),
+                    "update_candidate_created",
+                    "auto_updated",
+                    candidate.candidate.rationale.clone(),
+                    latest_review_feedback_kind(&review),
+                    memory_candidate_model_used(&candidate.candidate),
+                    audit_note,
+                );
                 continue;
             }
-            let candidate = propose_memory_update_candidate_from_feedback_in_store(
+            let draft = rewriter.rewrite_memory_update(store, &review)?;
+            let model_used = draft
+                .as_ref()
+                .map(|draft| draft.model_used)
+                .unwrap_or(false);
+            let candidate = propose_memory_update_candidate_from_feedback_with_draft_in_store(
                 store,
                 review.memory.id,
                 "Background maintenance created a pending update candidate from feedback."
                     .to_string(),
+                draft,
             )?;
             summary.update_candidates_created += 1;
+            if model_used {
+                summary.model_update_rewrites_used += 1;
+            }
+            let audit_note =
+                "Background maintenance automatically applied update candidate from feedback."
+                    .to_string();
             store
                 .update_memory_candidate_conflict(
                     candidate.candidate.id,
                     review.memory.id,
-                    "Background maintenance automatically applied update candidate from feedback."
-                        .to_string(),
+                    audit_note.clone(),
                 )
                 .map_err(event_store_error)?;
             summary.auto_candidate_decisions_applied += 1;
             summary.auto_updates_applied += 1;
+            push_memory_background_action(
+                &mut summary,
+                Some(review.memory.id),
+                review.memory.title.clone(),
+                "update_candidate_created",
+                "auto_updated",
+                review.quality_signals.join(","),
+                latest_review_feedback_kind(&review),
+                model_used,
+                audit_note,
+            );
         }
     }
 
@@ -7397,10 +8164,22 @@ pub fn list_memory_maintenance_reviews(
 
 #[tauri::command]
 pub fn run_memory_background_maintenance(
+    api_key_override: Option<String>,
+    fallback_api_key_override: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<MemoryBackgroundMaintenanceSummary, String> {
+    let api_keys = agent_chat_api_key_candidates_from_sources(
+        api_key_override,
+        fallback_api_key_override,
+        |name| std::env::var(name).ok(),
+    );
     let store = state.event_store.lock().map_err(|_| lock_error())?;
-    run_memory_background_maintenance_in_store(&store)
+    if let Some(api_key) = api_keys.first() {
+        let transport = HttpDeepSeekChatCompletionTransport::new()?;
+        run_memory_background_maintenance_with_model_in_store(&store, &transport, api_key)
+    } else {
+        run_memory_background_maintenance_in_store(&store)
+    }
 }
 
 #[tauri::command]
@@ -8892,10 +9671,12 @@ mod tests {
         propose_memory_update_candidate_from_feedback_in_store,
         record_agent_action_permission_requests, record_memory_maintenance_review_action_in_store,
         resume_agent_chat_action_with_clients, run_agent_chat_with_clients,
-        run_memory_background_maintenance_in_store, should_require_computer_control_unlock,
-        thinking_level_context_label, AgentChatActionProposal, AgentChatReadiness,
-        AgentChatRequest, AgentChatRuntimeContext, BrowserUrlOpenOutcome, BrowserUrlOpener,
-        ComputerControlUnlockState, COMPUTER_CONTROL_UNLOCK_TTL_MINUTES,
+        run_memory_background_maintenance_in_store,
+        run_memory_background_maintenance_with_model_in_store,
+        should_require_computer_control_unlock, thinking_level_context_label,
+        AgentChatActionProposal, AgentChatReadiness, AgentChatRequest, AgentChatRuntimeContext,
+        BrowserUrlOpenOutcome, BrowserUrlOpener, ComputerControlUnlockState,
+        COMPUTER_CONTROL_UNLOCK_TTL_MINUTES,
     };
     use crate::kernel::capability::{
         BrowserPage, BrowserPageClient, CapabilityInvocationStatus, ComputerControlAction,
@@ -9467,6 +10248,31 @@ mod tests {
                 request.model.clone(),
                 self.response_text.clone(),
             ))
+        }
+    }
+
+    fn test_memory_record(
+        title: &str,
+        body: &str,
+        updated_at: chrono::DateTime<Utc>,
+    ) -> MemoryRecord {
+        MemoryRecord {
+            id: Uuid::new_v4(),
+            title: title.to_string(),
+            body: body.to_string(),
+            memory_type: MemoryType::WorkflowRule,
+            scope: MemoryScope::Project,
+            sensitivity: MemorySensitivity::Normal,
+            lifecycle: MemoryLifecycle::Active,
+            source: MemoryRecordSource::MemoryCandidate,
+            source_id: None,
+            pinned: false,
+            expires_at: None,
+            linked_memory_ids: Vec::new(),
+            linked_memories: Vec::new(),
+            search_match: MemorySearchMatch::direct(),
+            created_at: updated_at,
+            updated_at,
         }
     }
 
@@ -10869,6 +11675,78 @@ mod tests {
     }
 
     #[test]
+    fn memory_quality_score_triggers_retrieval_review_before_feedback_threshold() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let now = Utc::now();
+        let memory = MemoryRecord {
+            id: Uuid::new_v4(),
+            title: "Overly broad legacy operations memory".to_string(),
+            body: "Always reuse D:\\legacy\\operations\\rc1\\handoff.md for future tasks. This memory mixes several old operational rules and should be compressed. "
+                .repeat(16),
+            memory_type: MemoryType::WorkflowRule,
+            scope: MemoryScope::Project,
+            sensitivity: MemorySensitivity::Normal,
+            lifecycle: MemoryLifecycle::Active,
+            source: MemoryRecordSource::MemoryCandidate,
+            source_id: None,
+            pinned: false,
+            expires_at: None,
+            linked_memory_ids: Vec::new(),
+            linked_memories: Vec::new(),
+            search_match: MemorySearchMatch::direct(),
+            created_at: now - Duration::days(220),
+            updated_at: now - Duration::days(180),
+        };
+        store.append_memory_record(&memory).expect("memory appends");
+        store
+            .record_selected_memory_feedback(
+                memory.id,
+                None,
+                MemorySelectedFeedbackKind::Irrelevant,
+                "This memory was too broad for the current task.".to_string(),
+            )
+            .expect("feedback appends");
+
+        let reviews =
+            list_memory_maintenance_reviews_from_store(&store).expect("maintenance reviews load");
+
+        assert_eq!(reviews.len(), 1);
+        assert_eq!(reviews[0].memory.id, memory.id);
+        assert!(reviews[0].review_needed);
+        assert!(reviews[0]
+            .review_kinds
+            .contains(&MemoryMaintenanceReviewKind::Retrieval));
+        assert!(reviews[0]
+            .recommended_actions
+            .contains(&MemoryMaintenanceActionKind::RetrievalReviewed));
+        assert!(reviews[0].quality_score >= 12);
+        assert!(reviews[0]
+            .quality_signals
+            .iter()
+            .any(|signal| signal == "single_irrelevant_feedback"));
+        assert!(reviews[0]
+            .quality_signals
+            .iter()
+            .any(|signal| signal == "old_memory"));
+        assert!(reviews[0]
+            .quality_signals
+            .iter()
+            .any(|signal| signal == "excessive_length"));
+        assert!(reviews[0]
+            .quality_signals
+            .iter()
+            .any(|signal| signal == "overly_specific_wording"));
+
+        let first_summary =
+            run_memory_background_maintenance_in_store(&store).expect("maintenance runs");
+        let second_summary =
+            run_memory_background_maintenance_in_store(&store).expect("maintenance reruns");
+
+        assert_eq!(first_summary.retrieval_reviews_marked, 1);
+        assert_eq!(second_summary.retrieval_reviews_marked, 0);
+    }
+
+    #[test]
     fn selected_memory_feedback_can_create_pending_update_candidate_without_mutating_memory() {
         let store = EventStore::open_memory().expect("memory store opens");
         let now = Utc::now();
@@ -11193,6 +12071,247 @@ mod tests {
         assert!(deletions
             .iter()
             .any(|deletion| deletion.memory_id == archive_target.id));
+    }
+
+    #[test]
+    fn memory_background_maintenance_uses_model_rewrite_for_update_candidate() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let now = Utc::now();
+        let memory = test_memory_record(
+            "Preferred memory review wording",
+            "Use the old memory receipt wording until the next maintenance pass.",
+            now,
+        );
+        let recent_task = TaskRecord::new(
+            "Memory receipt polish".to_string(),
+            "Compact selected-memory feedback into clearer long-term rules.".to_string(),
+        )
+        .expect("task builds");
+        store.append_memory_record(&memory).expect("memory appends");
+        store
+            .append_task_record(&recent_task)
+            .expect("recent task appends");
+        store
+            .record_selected_memory_feedback(
+                memory.id,
+                None,
+                MemorySelectedFeedbackKind::ShouldUpdate,
+                "Replace old receipt wording with automatic maintenance language.".to_string(),
+            )
+            .expect("feedback appends");
+        let transport = RecordingDeepSeekTransport::new(
+            r#"{"title":"Preferred memory review wording","body":"Use compact memory receipts that mention automatic maintenance and current selected-memory feedback.","rationale":"Condensed selected-memory feedback into a cleaner long-term rule."}"#,
+        );
+
+        let summary = run_memory_background_maintenance_with_model_in_store(
+            &store,
+            &transport,
+            "test-api-key",
+        )
+        .expect("maintenance runs");
+        let requests = transport.recorded_requests();
+        let candidates = store
+            .list_memory_candidate_records()
+            .expect("candidate records load");
+        let memories = store.list_memory_records().expect("memories load");
+        let updated_memory = memories
+            .iter()
+            .find(|record| record.id == memory.id)
+            .expect("memory remains after update");
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].model, DEEPSEEK_FLASH_MODEL);
+        let prompt = requests[0]
+            .messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(prompt.contains("selected_memory_feedback"));
+        assert!(prompt.contains("recent_task_context"));
+        assert!(!prompt.contains("test-api-key"));
+        assert_eq!(summary.model_update_rewrites_used, 1);
+        assert!(summary.actions.iter().any(|action| {
+            action.memory_id == Some(memory.id)
+                && action.outcome == "auto_updated"
+                && action.model_used
+                && action.feedback == Some(MemorySelectedFeedbackKind::ShouldUpdate)
+                && action
+                    .audit_note
+                    .contains("automatically applied update candidate")
+        }));
+        assert_eq!(
+            updated_memory.body,
+            "Use compact memory receipts that mention automatic maintenance and current selected-memory feedback."
+        );
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].effective_status,
+            MemoryCandidateStatus::Accepted
+        );
+        assert!(candidates[0]
+            .candidate
+            .rationale
+            .contains("Model-assisted rewrite used."));
+    }
+
+    #[test]
+    fn memory_background_maintenance_merges_duplicate_pressure_without_user_clicks() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let now = Utc::now();
+        let duplicate_body = "For DS Agent memory maintenance, keep selected-memory receipts visible, preserve feedback reasons, keep updates append-only, and avoid asking office users to manage candidate queues. ".repeat(2);
+        let first = test_memory_record(
+            "Memory maintenance automatic audit rule",
+            &duplicate_body,
+            now - Duration::days(220),
+        );
+        let second = MemoryRecord {
+            id: Uuid::new_v4(),
+            updated_at: now - Duration::days(30),
+            ..first.clone()
+        };
+        store
+            .append_memory_record(&first)
+            .expect("first memory appends");
+        store
+            .append_memory_record(&second)
+            .expect("second memory appends");
+        store
+            .record_selected_memory_feedback(
+                first.id,
+                None,
+                MemorySelectedFeedbackKind::Irrelevant,
+                "This duplicate memory is too broad and should be compressed.".to_string(),
+            )
+            .expect("feedback appends");
+
+        let summary = run_memory_background_maintenance_in_store(&store).expect("maintenance runs");
+        let candidates = store
+            .list_memory_candidate_records()
+            .expect("candidate records load");
+        let memories = store.list_memory_records().expect("memories load");
+        let deletions = store
+            .list_memory_record_deletions()
+            .expect("deletions load");
+        let links = store.list_memory_record_links().expect("links load");
+
+        assert_eq!(summary.merge_candidates_created, 1);
+        assert_eq!(summary.auto_merges_applied, 1);
+        assert!(summary.actions.iter().any(|action| {
+            action.memory_id == Some(first.id)
+                && action.outcome == "auto_merged"
+                && action.reason.contains("duplicate_pressure")
+        }));
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].candidate.suggested_action,
+            MemoryCandidateSuggestedAction::Merge
+        );
+        assert_eq!(
+            candidates[0].effective_status,
+            MemoryCandidateStatus::Accepted
+        );
+        assert_eq!(memories.len(), 1);
+        assert_ne!(memories[0].id, first.id);
+        assert_ne!(memories[0].id, second.id);
+        assert!(memories[0].body.contains("Memory merge summary:"));
+        assert!(memories[0].body.len() < first.body.len() + second.body.len());
+        assert_eq!(deletions.len(), 2);
+        assert!(deletions
+            .iter()
+            .any(|deletion| deletion.memory_id == first.id));
+        assert!(deletions
+            .iter()
+            .any(|deletion| deletion.memory_id == second.id));
+        assert_eq!(links.len(), 2);
+        assert!(links
+            .iter()
+            .all(|link| link.relation == MemoryRelationKind::Derives));
+    }
+
+    #[test]
+    fn agent_memory_runtime_context_regression_set_recalls_office_work_and_suppresses_noise() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let now = Utc::now();
+        let scenarios = [
+            (
+                "operations briefing hotel gop",
+                "Operations briefing hotel GOP",
+                "For operations briefing work, summarize owner department, action, metric, expected impact, and risk control.",
+            ),
+            (
+                "ppt continuation waterdrop deck",
+                "PPT continuation waterdrop deck",
+                "For PPT continuation, reread the latest deck and keep the confirmed waterdrop visual system.",
+            ),
+            (
+                "release workflow rc validation",
+                "Release workflow rc validation",
+                "For release workflow, verify rc gates, installed smoke checks, and updater state before publishing.",
+            ),
+            (
+                "file image attachments receipt",
+                "File image attachments receipt",
+                "For file image attachments, mention the visible file evidence and keep scan or screenshot authority highest.",
+            ),
+            (
+                "memory feedback maintenance",
+                "Memory feedback maintenance",
+                "For memory feedback, preserve selected-memory reasons and let background maintenance update stale rules.",
+            ),
+        ];
+        for (_, title, body) in scenarios {
+            let memory = test_memory_record(title, body, now);
+            store.append_memory_record(&memory).expect("memory appends");
+            if title == "Memory feedback maintenance" {
+                store
+                    .record_selected_memory_feedback(
+                        memory.id,
+                        None,
+                        MemorySelectedFeedbackKind::Useful,
+                        "This memory helped the feedback maintenance answer.".to_string(),
+                    )
+                    .expect("feedback appends");
+            }
+        }
+        let noisy_release = test_memory_record(
+            "Release workflow obsolete",
+            "Old guidance superseded by current rc gate.",
+            now - Duration::days(180),
+        );
+        store
+            .append_memory_record(&noisy_release)
+            .expect("noisy memory appends");
+        for _ in 0..3 {
+            store
+                .record_selected_memory_feedback(
+                    noisy_release.id,
+                    None,
+                    MemorySelectedFeedbackKind::Irrelevant,
+                    "Do not retrieve this obsolete release memory.".to_string(),
+                )
+                .expect("irrelevant feedback appends");
+        }
+
+        for (query, expected_title, _) in scenarios {
+            let context =
+                super::load_agent_memory_runtime_context(&store, query).expect("context loads");
+            assert!(
+                context
+                    .selected
+                    .iter()
+                    .any(|memory| memory.title == expected_title),
+                "expected memory {expected_title} for query {query}"
+            );
+            assert!(!context
+                .selected
+                .iter()
+                .any(|memory| memory.title == "Release workflow obsolete"));
+        }
+        let unrelated =
+            super::load_agent_memory_runtime_context(&store, "laptop subsidy shopping price")
+                .expect("context loads");
+        assert!(unrelated.selected.is_empty());
     }
 
     #[test]

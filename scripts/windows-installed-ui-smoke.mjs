@@ -13,6 +13,7 @@ const allowedArgs = new Set([
   "--agent-chat",
   "--help",
   "--memory-feedback",
+  "--memory-maintenance",
   "--self-test",
   "--workflow",
 ]);
@@ -27,6 +28,7 @@ if (rawArgs.includes("--help")) {
       "Flags:",
       "  --agent-chat Exercise the installed Tauri agent chat command bridge.",
       "  --memory-feedback Exercise installed memory candidate + selected-memory feedback bridge.",
+      "  --memory-maintenance Exercise installed background memory update/archive maintenance.",
       "  --self-test Run deterministic helper checks without launching DS Agent.",
       "  --workflow  Exercise the installed Tauri workflow and report exports.",
     ].join("\n"),
@@ -46,6 +48,9 @@ const includeAgentChatSmoke =
 const includeMemoryFeedbackSmoke =
   args.has("--memory-feedback") ||
   process.env.DEEPSEEK_AGENT_OS_INSTALLED_MEMORY_FEEDBACK_SMOKE === "1";
+const includeMemoryMaintenanceSmoke =
+  args.has("--memory-maintenance") ||
+  process.env.DEEPSEEK_AGENT_OS_INSTALLED_MEMORY_MAINTENANCE_SMOKE === "1";
 const expectModelTelemetry = Boolean(process.env.DEEPSEEK_API_KEY?.trim());
 const timeoutMs = readPositiveInteger(
   process.env.DEEPSEEK_AGENT_OS_INSTALLED_UI_TIMEOUT_MS ?? "20000",
@@ -122,6 +127,9 @@ async function main() {
     const memoryFeedback = includeMemoryFeedbackSmoke
       ? await runInstalledMemoryFeedbackSmoke(cdp)
       : null;
+    const memoryMaintenance = includeMemoryMaintenanceSmoke
+      ? await runInstalledMemoryMaintenanceSmoke(cdp)
+      : null;
     const workflow = includeWorkflowSmoke
       ? await runInstalledWorkflowSmoke(cdp)
       : null;
@@ -153,6 +161,7 @@ async function main() {
           screenshot: screenshotPath,
           agent_chat: agentChat ?? "skipped",
           memory_feedback: memoryFeedback ?? "skipped",
+          memory_maintenance: memoryMaintenance ?? "skipped",
           workflow: workflow ?? "skipped",
         },
         null,
@@ -493,6 +502,161 @@ async function runInstalledMemoryFeedbackSmoke(client) {
     app_data_events: "restored",
     app_data_events_restored: true,
   };
+}
+
+async function runInstalledMemoryMaintenanceSmoke(client) {
+  const directoryState = await invokeTauri(client, "get_local_directory_state", {});
+  const appDataEventsBackup = await backupAppDataEventsFile(
+    directoryState?.settings_file,
+  );
+  let smokeResult = null;
+  let appDataEventsRestored = false;
+
+  try {
+    const beforeRecords = await invokeTauri(client, "list_memory_records", {});
+    const stamp = new Date().toISOString().replaceAll(":", "-").replaceAll(".", "-");
+    const updateMemory = await createAcceptedMemory(client, {
+      title: `Installed maintenance update smoke ${stamp}`,
+      body: "Use the old memory maintenance wording that requires users to process candidates.",
+      note: "Installed maintenance smoke accepted update target.",
+    });
+    const archiveMemory = await createAcceptedMemory(client, {
+      title: `Installed maintenance stale smoke ${stamp}`,
+      body: "This stale maintenance memory should be archived by repeated stale feedback.",
+      note: "Installed maintenance smoke accepted archive target.",
+    });
+    const updateBody =
+      "Use automatic background maintenance for memory upkeep; users only review audit and correction hints.";
+
+    await invokeTauri(client, "record_selected_memory_feedback", {
+      memoryId: updateMemory.id,
+      contextReceiptId: null,
+      feedback: "should_update",
+      note: updateBody,
+    });
+    for (let i = 0; i < 2; i += 1) {
+      await invokeTauri(client, "record_selected_memory_feedback", {
+        memoryId: archiveMemory.id,
+        contextReceiptId: null,
+        feedback: "stale",
+        note: "This temporary installed maintenance memory is stale.",
+      });
+    }
+
+    const firstSummary = await invokeTauri(
+      client,
+      "run_memory_background_maintenance",
+      {},
+    );
+    const secondSummary = await invokeTauri(
+      client,
+      "run_memory_background_maintenance",
+      {},
+    );
+    const afterRecords = await invokeTauri(client, "list_memory_records", {});
+    const candidates = await invokeTauri(client, "list_memory_candidate_records", {});
+    const reviews = await invokeTauri(client, "list_memory_maintenance_reviews", {});
+    const updatedMemory = afterRecords.find((memory) => memory?.id === updateMemory.id);
+    const archivedMemory = afterRecords.find((memory) => memory?.id === archiveMemory.id);
+    const updateCandidate = candidates.find(
+      (record) =>
+        record?.candidate?.source_id === updateMemory.id &&
+        record?.candidate?.suggested_action === "update",
+    );
+    const updateReview = reviews.find((review) => review?.memory?.id === updateMemory.id);
+
+    if (!updatedMemory) {
+      throw new Error("Installed memory maintenance smoke lost the update target.");
+    }
+    if (!String(updatedMemory.body ?? "").includes(updateBody)) {
+      throw new Error("Installed memory maintenance smoke did not apply the should_update body.");
+    }
+    if (archivedMemory) {
+      throw new Error("Installed memory maintenance smoke did not archive repeated stale memory.");
+    }
+    if (firstSummary?.update_candidates_created !== 1) {
+      throw new Error("Installed memory maintenance smoke expected one update candidate.");
+    }
+    if (firstSummary?.auto_updates_applied !== 1) {
+      throw new Error("Installed memory maintenance smoke expected one automatic update.");
+    }
+    if (firstSummary?.auto_archives_applied !== 1) {
+      throw new Error("Installed memory maintenance smoke expected one automatic archive.");
+    }
+    if (
+      secondSummary?.update_candidates_created !== 0 ||
+      secondSummary?.auto_updates_applied !== 0 ||
+      secondSummary?.auto_archives_applied !== 0
+    ) {
+      throw new Error("Installed memory maintenance smoke expected idempotent rerun counts.");
+    }
+    if (updateCandidate?.effective_status !== "accepted") {
+      throw new Error("Installed memory maintenance smoke expected accepted update candidate audit.");
+    }
+    if (updateReview?.review_needed !== false) {
+      throw new Error("Installed memory maintenance smoke expected audit-only resolved update review.");
+    }
+
+    smokeResult = {
+      ok: true,
+      mode: "memory_maintenance",
+      update_memory_id: updateMemory.id,
+      archived_memory_id: archiveMemory.id,
+      update_candidate_status: updateCandidate.effective_status,
+      update_review_needed: updateReview?.review_needed ?? null,
+      first_summary: firstSummary,
+      second_summary: secondSummary,
+      memory_count_before: Array.isArray(beforeRecords) ? beforeRecords.length : null,
+      memory_count_after_maintenance: Array.isArray(afterRecords)
+        ? afterRecords.length
+        : null,
+      app_data_events: "pending_restore",
+      app_data_events_restored: false,
+    };
+  } finally {
+    await closeInstalledAppForAppDataRestore();
+    appDataEventsRestored = await restoreAppDataEventsFile(appDataEventsBackup);
+  }
+
+  if (appDataEventsRestored !== true) {
+    throw new Error(
+      "Installed memory maintenance smoke could not verify restored app-data event store.",
+    );
+  }
+
+  return {
+    ...smokeResult,
+    app_data_events: "restored",
+    app_data_events_restored: true,
+  };
+}
+
+async function createAcceptedMemory(client, { title, body, note }) {
+  const candidateRecord = await invokeTauri(client, "propose_memory_candidate", {
+    title,
+    body,
+    memoryType: "project_context",
+    scope: "workspace",
+    sensitivity: "normal",
+    lifecycle: "active",
+    expiresAt: null,
+  });
+  const candidateId = candidateRecord?.candidate?.id;
+  if (!candidateId) {
+    throw new Error("Installed memory smoke did not create a candidate id.");
+  }
+
+  await invokeTauri(client, "resolve_memory_candidate", {
+    candidateId,
+    accepted: true,
+    note,
+  });
+  const records = await invokeTauri(client, "list_memory_records", {});
+  const acceptedMemory = records.find((memory) => memory?.source_id === candidateId);
+  if (!acceptedMemory?.id) {
+    throw new Error("Installed memory smoke did not find accepted memory.");
+  }
+  return acceptedMemory;
 }
 
 async function runInstalledWorkflowSmoke(client) {
@@ -1001,9 +1165,20 @@ async function runSelfTest() {
   if (!allowedArgs.has("--memory-feedback")) {
     throw new Error("Self-test expected --memory-feedback to be a supported installed UI smoke flag.");
   }
+  if (!allowedArgs.has("--memory-maintenance")) {
+    throw new Error("Self-test expected --memory-maintenance to be a supported installed UI smoke flag.");
+  }
   validateInstalledUiSmokeFlagCombination(["--memory-feedback", "--agent-chat"]);
   assertSelfTestThrows(
     () => validateInstalledUiSmokeFlagCombination(["--memory-feedback", "--workflow"]),
+    "cannot be combined",
+  );
+  assertSelfTestThrows(
+    () => validateInstalledUiSmokeFlagCombination(["--memory-maintenance", "--workflow"]),
+    "cannot be combined",
+  );
+  assertSelfTestThrows(
+    () => validateInstalledUiSmokeFlagCombination(["--memory-maintenance", "--memory-feedback"]),
     "cannot be combined",
   );
   if (meaningfulBodyText("中\nEN\n设置")) {
@@ -1122,6 +1297,12 @@ function validateInstalledUiSmokeFlagCombination(values) {
   const valueSet = new Set(values);
   if (valueSet.has("--memory-feedback") && valueSet.has("--workflow")) {
     throw new Error("--memory-feedback cannot be combined with --workflow.");
+  }
+  if (valueSet.has("--memory-maintenance") && valueSet.has("--workflow")) {
+    throw new Error("--memory-maintenance cannot be combined with --workflow.");
+  }
+  if (valueSet.has("--memory-maintenance") && valueSet.has("--memory-feedback")) {
+    throw new Error("--memory-maintenance cannot be combined with --memory-feedback.");
   }
 }
 

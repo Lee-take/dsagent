@@ -1,6 +1,6 @@
 # DeepSeek Agent OS v0.1.0 Candidate Notes
 
-Status: Windows-first release candidate. The `v0.1.0-rc.10` prerelease is
+Status: Windows-first release candidate. The `v0.1.0-rc.11` prerelease is
 intended for colleague testing through a GitHub release asset after the final
 local gates pass.
 
@@ -10,6 +10,25 @@ so Windows may show an unknown-publisher warning, but it embeds the Microsoft
 WebView2 bootstrapper and runs it silently when the target machine needs the
 WebView2 runtime. Ordinary users do not need Node.js, pnpm, Rust, or a source
 checkout to run the installed app.
+
+## v0.1.0-rc.11 Update
+
+- Completes the Memory optimization six-pack: model-assisted maintenance
+  rewrites, deterministic quality scoring, automatic merge/compression, fixed
+  retrieval regression scenarios, installed maintenance release-gate coverage,
+  and clearer maintenance audit summaries.
+- Lets background maintenance call DeepSeek Flash when selected-memory feedback
+  needs cleaner replacement text, while DS Agent keeps schema validation,
+  privacy filtering, append-only events, and deterministic fallback ownership.
+- Uses duplicate-pressure quality signals to generate merge/compression
+  candidates, preserve tombstones and Derives links, then append a compressed
+  accepted-memory update instead of silently rewriting history.
+- Adds Memory Studio audit details for quality score, quality signals,
+  recommended actions, model use, feedback cause, and the audit note behind
+  each automatic update, archive, retrieval review, or merge.
+- Adds fixed retrieval regression coverage for operations briefing, PPT
+  continuation, release workflow, file/image attachments, and memory feedback,
+  with negative suppression for obsolete or unrelated memories.
 
 ## v0.1.0-rc.10 Update
 

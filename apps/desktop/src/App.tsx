@@ -2221,8 +2221,16 @@ export function App() {
   };
 
   const runMemoryBackgroundMaintenance = async () => {
+    const apiKeyCandidates = deepSeekApiKeyCandidates(
+      sessionDeepSeekApiKey,
+      fallbackDeepSeekApiKey,
+    );
     const summary = await invoke<MemoryBackgroundMaintenanceSummary>(
       "run_memory_background_maintenance",
+      {
+        apiKeyOverride: apiKeyCandidates[0] ?? null,
+        fallbackApiKeyOverride: apiKeyCandidates[1] ?? null,
+      },
     );
     await Promise.all([refreshMemoryCandidateRecords(), refreshMemoryMaintenanceReviews()]);
     return summary;
@@ -2343,6 +2351,9 @@ export function App() {
           maintenanceSummary.auto_updates_applied,
           maintenanceSummary.auto_archives_applied,
           maintenanceSummary.auto_candidate_decisions_applied,
+          maintenanceSummary.merge_candidates_created,
+          maintenanceSummary.auto_merges_applied,
+          maintenanceSummary.model_update_rewrites_used,
         ),
       );
     } catch (error) {
@@ -5597,6 +5608,9 @@ export function App() {
                           </div>
                           <p>{item.memory.body}</p>
                           <div className="memory-meta">
+                            <span>
+                              {copy.memory.maintenanceQuality}: {item.quality_score}
+                            </span>
                             {item.review_kinds.map((kind) => (
                               <span key={kind}>{copy.memory.maintenanceReviewKindOptions[kind]}</span>
                             ))}
@@ -5609,6 +5623,22 @@ export function App() {
                                 </span>
                               ))}
                           </div>
+                          {item.quality_signals.length > 0 ? (
+                            <p className="memory-feedback-note">
+                              {copy.memory.maintenanceQualitySignals}:{" "}
+                              {item.quality_signals
+                                .map((signal) => signal.replace(/_/g, " "))
+                                .join(", ")}
+                            </p>
+                          ) : null}
+                          {item.recommended_actions.length > 0 ? (
+                            <p className="memory-feedback-note">
+                              {copy.memory.maintenanceRecommendedActions}:{" "}
+                              {item.recommended_actions
+                                .map((action) => copy.memory.maintenanceActionOptions[action])
+                                .join(", ")}
+                            </p>
+                          ) : null}
                           {item.latest_feedback ? (
                             <p className="memory-feedback-note">
                               {copy.memory.latestFeedback}:{" "}

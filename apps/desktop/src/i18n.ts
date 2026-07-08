@@ -584,6 +584,9 @@ type TranslationSet = {
     maintenanceNoUserAction: string;
     maintenanceSnoozeUntil: string;
     maintenanceLastAction: string;
+    maintenanceQuality: string;
+    maintenanceQualitySignals: string;
+    maintenanceRecommendedActions: string;
     maintenanceCreateUpdateCandidate: string;
     maintenanceCandidateCreated: string;
     maintenanceRetrievalReviewed: string;
@@ -609,6 +612,9 @@ type TranslationSet = {
       autoUpdates: number,
       autoArchives: number,
       candidateDecisions: number,
+      mergeCandidates: number,
+      autoMerges: number,
+      modelRewrites: number,
     ) => string;
     recordFailed: string;
     options: Record<MemorySelectedFeedbackKind, string>;
@@ -1610,6 +1616,9 @@ export const translations: Record<Language, TranslationSet> = {
       maintenanceNoUserAction: "无需操作；DS Agent 会在后台处理更新、归档和候选决策，这里只保留审计与纠错线索。",
       maintenanceSnoozeUntil: "稍后至",
       maintenanceLastAction: "最近维护",
+      maintenanceQuality: "质量分",
+      maintenanceQualitySignals: "质量信号",
+      maintenanceRecommendedActions: "建议动作",
       maintenanceCreateUpdateCandidate: "生成更新候选",
       maintenanceCandidateCreated: "DS Agent 已根据反馈生成更新候选，并交由后台维护处理。",
       maintenanceRetrievalReviewed: "检索已调优",
@@ -1635,15 +1644,21 @@ export const translations: Record<Language, TranslationSet> = {
         autoUpdates,
         autoArchives,
         candidateDecisions,
+        mergeCandidates,
+        autoMerges,
+        modelRewrites,
       ) => {
         const updates = updateCandidates > 0 ? `，已生成 ${updateCandidates} 条更新候选` : "";
+        const merges = mergeCandidates > 0 ? `，已生成 ${mergeCandidates} 条合并压缩候选` : "";
         const decisions =
           candidateDecisions > 0 ? `，已自动处理 ${candidateDecisions} 个候选决策` : "";
         const applied = autoUpdates > 0 ? `，已自动更新 ${autoUpdates} 条记忆` : "";
+        const merged = autoMerges > 0 ? `，已自动合并 ${autoMerges} 组记忆` : "";
         const archived = autoArchives > 0 ? `，已自动归档 ${autoArchives} 条过时记忆` : "";
+        const rewrites = modelRewrites > 0 ? `，模型辅助改写 ${modelRewrites} 条` : "";
         const retrieval =
           retrievalReviews > 0 ? `，已记录 ${retrievalReviews} 条检索调优` : "";
-        return `记忆反馈已记录，后台维护已自动运行${updates}${decisions}${applied}${archived}${retrieval}。`;
+        return `记忆反馈已记录，后台维护已自动运行${updates}${merges}${decisions}${applied}${merged}${archived}${rewrites}${retrieval}。`;
       },
       recordFailed: "记忆反馈记录失败。",
       options: {
@@ -2668,6 +2683,9 @@ export const translations: Record<Language, TranslationSet> = {
         "No action needed; DS Agent handles updates, archives, and candidate decisions in the background while this view keeps the audit and correction trail.",
       maintenanceSnoozeUntil: "Snoozed until",
       maintenanceLastAction: "Latest maintenance",
+      maintenanceQuality: "Quality score",
+      maintenanceQualitySignals: "Quality signals",
+      maintenanceRecommendedActions: "Recommended actions",
       maintenanceCreateUpdateCandidate: "Create update candidate",
       maintenanceCandidateCreated:
         "DS Agent created an update candidate from feedback and handed it to background maintenance.",
@@ -2694,20 +2712,29 @@ export const translations: Record<Language, TranslationSet> = {
         autoUpdates,
         autoArchives,
         candidateDecisions,
+        mergeCandidates,
+        autoMerges,
+        modelRewrites,
       ) => {
         const updates =
           updateCandidates > 0 ? `, created ${updateCandidates} update candidate(s)` : "";
+        const merges =
+          mergeCandidates > 0 ? `, created ${mergeCandidates} merge/compression candidate(s)` : "";
         const decisions =
           candidateDecisions > 0
             ? `, resolved ${candidateDecisions} candidate decision(s)`
             : "";
         const applied =
           autoUpdates > 0 ? `, automatically updated ${autoUpdates} memory record(s)` : "";
+        const merged =
+          autoMerges > 0 ? `, automatically merged ${autoMerges} memory group(s)` : "";
         const archived =
           autoArchives > 0 ? `, automatically archived ${autoArchives} stale record(s)` : "";
+        const rewrites =
+          modelRewrites > 0 ? `, used model rewrites for ${modelRewrites} memory record(s)` : "";
         const retrieval =
           retrievalReviews > 0 ? `, recorded ${retrievalReviews} retrieval tuning item(s)` : "";
-        return `Memory feedback recorded and background maintenance ran${updates}${decisions}${applied}${archived}${retrieval}.`;
+        return `Memory feedback recorded and background maintenance ran${updates}${merges}${decisions}${applied}${merged}${archived}${rewrites}${retrieval}.`;
       },
       recordFailed: "Memory feedback failed to record.",
       options: {

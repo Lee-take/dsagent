@@ -111,10 +111,22 @@ function buildReleaseLocalPlan({
     commands.push(...buildLiveDeepSeekCommands());
   }
 
-  if (includeInstalledUi || includeInstalledWorkflow) {
+  if (includeInstalledWorkflow) {
     commands.push(
       buildInstalledUiCommand({
-        includeInstalledWorkflow,
+        includeInstalledWorkflow: true,
+        skipLiveDeepSeek,
+        env,
+      }),
+      buildInstalledMemoryMaintenanceCommand({
+        skipLiveDeepSeek,
+        env,
+      }),
+    );
+  } else if (includeInstalledUi) {
+    commands.push(
+      buildInstalledUiCommand({
+        includeInstalledWorkflow: false,
         skipLiveDeepSeek,
         env,
       }),
@@ -162,6 +174,26 @@ function buildInstalledUiCommand({
   }
 
   if (includeInstalledWorkflow && skipLiveDeepSeek) {
+    command.env = { ...env };
+    delete command.env.DEEPSEEK_API_KEY;
+  }
+
+  return command;
+}
+
+function buildInstalledMemoryMaintenanceCommand({ skipLiveDeepSeek, env }) {
+  const command = {
+    name: "Windows installed UI memory maintenance smoke",
+    parts: [
+      "npx",
+      "pnpm@9.15.9",
+      "test:windows-installed-ui",
+      "--",
+      "--memory-maintenance",
+    ],
+  };
+
+  if (skipLiveDeepSeek) {
     command.env = { ...env };
     delete command.env.DEEPSEEK_API_KEY;
   }
@@ -329,6 +361,19 @@ function runSelfTest() {
     [installedWorkflowCommand],
     "Windows installed UI workflow smoke",
     ["npx", "pnpm@9.15.9", "test:windows-installed-ui", "--", "--workflow"],
+  );
+  const installedWorkflowPlan = buildReleaseLocalPlan({
+    skipLiveDeepSeek: false,
+    requireLiveDeepSeek: true,
+    hasDeepSeekKey: true,
+    includeInstalledUi: false,
+    includeInstalledWorkflow: true,
+    env: {},
+  });
+  assertSelfTestCommandParts(
+    installedWorkflowPlan.commands,
+    "Windows installed UI memory maintenance smoke",
+    ["npx", "pnpm@9.15.9", "test:windows-installed-ui", "--", "--memory-maintenance"],
   );
 
   const command = buildInstalledUiCommand({

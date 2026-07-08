@@ -484,6 +484,8 @@ export type MemoryMaintenanceReviewItem = {
   memory: MemoryRecord;
   feedback_counts: MemoryMaintenanceFeedbackCounts;
   feedback_count: number;
+  quality_score: number;
+  quality_signals: string[];
   latest_feedback: MemorySelectedFeedback | null;
   review_kinds: MemoryMaintenanceReviewKind[];
   recommended_actions: MemoryMaintenanceActionKind[];
@@ -492,12 +494,27 @@ export type MemoryMaintenanceReviewItem = {
   last_action: MemoryMaintenanceReviewAction | null;
 };
 
+export type MemoryBackgroundMaintenanceActionSummary = {
+  memory_id: string | null;
+  memory_title: string;
+  action: string;
+  outcome: string;
+  reason: string;
+  feedback: MemorySelectedFeedbackKind | null;
+  model_used: boolean;
+  audit_note: string;
+};
+
 export type MemoryBackgroundMaintenanceSummary = {
   retrieval_reviews_marked: number;
   update_candidates_created: number;
+  merge_candidates_created: number;
   auto_candidate_decisions_applied: number;
   auto_updates_applied: number;
+  auto_merges_applied: number;
   auto_archives_applied: number;
+  model_update_rewrites_used: number;
+  actions: MemoryBackgroundMaintenanceActionSummary[];
 };
 
 export type MemoryRecordUpdate = {

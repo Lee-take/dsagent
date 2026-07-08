@@ -1672,14 +1672,14 @@ function checkPublicReleaseCopyPositioning() {
   checkTextIncludesCollapsed(
     "docs/RELEASE_NOTES_v0.1.0.md",
     releaseNotes,
-    "v0.1.0-rc.10 Update",
-    "release notes rc.10 update heading",
+    "v0.1.0-rc.11 Update",
+    "release notes rc.11 update heading",
   );
   checkTextIncludes(
     "apps/desktop/src-tauri/src/commands.rs",
     readText("apps/desktop/src-tauri/src/commands.rs"),
-    'APP_UPDATE_CURRENT_RELEASE_TAG: &str = "v0.1.0-rc.10"',
-    "app updater current release tag rc.10",
+    'APP_UPDATE_CURRENT_RELEASE_TAG: &str = "v0.1.0-rc.11"',
+    "app updater current release tag rc.11",
   );
   checkTextIncludes(
     "apps/desktop/src-tauri/src/commands.rs",
@@ -4320,8 +4320,20 @@ function checkLocalReleaseHelperSelfTests() {
   checkTextIncludes(
     "scripts/windows-installed-ui-smoke.mjs",
     windowsInstalledUiSmoke,
+    "--memory-maintenance",
+    "Windows installed UI memory-maintenance smoke flag",
+  );
+  checkTextIncludes(
+    "scripts/windows-installed-ui-smoke.mjs",
+    windowsInstalledUiSmoke,
     "runInstalledMemoryFeedbackSmoke",
     "Windows installed UI memory-feedback smoke helper",
+  );
+  checkTextIncludes(
+    "scripts/windows-installed-ui-smoke.mjs",
+    windowsInstalledUiSmoke,
+    "runInstalledMemoryMaintenanceSmoke",
+    "Windows installed UI memory-maintenance smoke helper",
   );
   checkTextIncludes(
     "scripts/windows-installed-ui-smoke.mjs",
@@ -4332,8 +4344,20 @@ function checkLocalReleaseHelperSelfTests() {
   checkTextIncludes(
     "scripts/windows-installed-ui-smoke.mjs",
     windowsInstalledUiSmoke,
+    "auto_archives_applied",
+    "Windows installed UI memory-maintenance checks automatic archive summary",
+  );
+  checkTextIncludes(
+    "scripts/windows-installed-ui-smoke.mjs",
+    windowsInstalledUiSmoke,
     "memory_feedback:",
     "Windows installed UI memory-feedback JSON output",
+  );
+  checkTextIncludes(
+    "scripts/windows-installed-ui-smoke.mjs",
+    windowsInstalledUiSmoke,
+    "memory_maintenance:",
+    "Windows installed UI memory-maintenance JSON output",
   );
 
   const releaseLocal = readText("scripts/release-local-check.mjs");

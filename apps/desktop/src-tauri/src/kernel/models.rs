@@ -899,6 +899,8 @@ pub struct MemoryMaintenanceReviewItem {
     pub memory: MemoryRecord,
     pub feedback_counts: MemoryMaintenanceFeedbackCounts,
     pub feedback_count: usize,
+    pub quality_score: i32,
+    pub quality_signals: Vec<String>,
     pub latest_feedback: Option<MemorySelectedFeedback>,
     pub review_kinds: Vec<MemoryMaintenanceReviewKind>,
     pub recommended_actions: Vec<MemoryMaintenanceActionKind>,
