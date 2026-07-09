@@ -144,8 +144,8 @@ const AGENT_OFFICE_CREATE_EVIDENCE_TEXT_LIMIT: usize = 1200;
 const APP_UPDATE_RELEASES_API_URL: &str = "https://api.github.com/repos/Lee-take/dsagent/releases";
 const APP_UPDATE_RELEASE_DOWNLOAD_PREFIX: &str =
     "https://github.com/Lee-take/dsagent/releases/download/";
-const APP_UPDATE_USER_AGENT: &str = "DS-Agent-Updater/0.1.1";
-const APP_UPDATE_CURRENT_RELEASE_TAG: &str = "v0.1.1";
+const APP_UPDATE_USER_AGENT: &str = "DS-Agent-Updater/0.1.2";
+const APP_UPDATE_CURRENT_RELEASE_TAG: &str = "v0.1.2";
 const AGENT_SOUL_PROFILE_FILE_NAME: &str = "soul.md";
 const AGENT_SOUL_PROFILE_CONTEXT_MAX_BYTES: usize = 800;
 const AGENT_SOUL_PROFILE_MAX_BYTES: usize = 16 * 1024;
@@ -10334,7 +10334,7 @@ mod tests {
 
     #[test]
     fn app_update_version_compare_accepts_newer_release_tags() {
-        assert!(is_newer_version("v0.1.1", "0.1.0"));
+        assert!(is_newer_version("v0.1.2", "0.1.1"));
         assert!(is_newer_version("0.2.0", "0.1.9"));
         assert!(is_newer_version("v0.1.0-rc.3", "v0.1.0-rc.1"));
         assert!(is_newer_version("v0.1.0", "v0.1.0-rc.3"));
@@ -10420,13 +10420,13 @@ mod tests {
     fn app_update_status_keeps_current_formal_release_quiet_from_release_list() {
         let releases = vec![
             GithubRelease {
-                tag_name: "v0.1.1".to_string(),
-                html_url: "https://github.com/Lee-take/dsagent/releases/tag/v0.1.1"
+                tag_name: "v0.1.2".to_string(),
+                html_url: "https://github.com/Lee-take/dsagent/releases/tag/v0.1.2"
                     .to_string(),
                 assets: vec![GithubReleaseAsset {
-                    name: "DS Agent_0.1.1_x64-setup.exe".to_string(),
+                    name: "DS Agent_0.1.2_x64-setup.exe".to_string(),
                     browser_download_url:
-                        "https://github.com/Lee-take/dsagent/releases/download/v0.1.1/DS.Agent_0.1.1_x64-setup.exe"
+                        "https://github.com/Lee-take/dsagent/releases/download/v0.1.2/DS.Agent_0.1.2_x64-setup.exe"
                             .to_string(),
                 }],
             },
@@ -10446,18 +10446,18 @@ mod tests {
         let status = update_status_from_releases(releases, app_update_current_version());
 
         assert!(!status.update_available);
-        assert_eq!(status.current_version, "v0.1.1");
-        assert_eq!(status.latest_version.as_deref(), Some("0.1.1"));
+        assert_eq!(status.current_version, "v0.1.2");
+        assert_eq!(status.latest_version.as_deref(), Some("0.1.2"));
         assert!(status.asset_name.is_none());
     }
 
     #[test]
     fn app_update_asset_filter_accepts_windows_installers_only() {
-        assert!(is_windows_installer_asset("DS Agent_0.1.1_x64-setup.exe"));
-        assert!(is_windows_installer_asset("DS-Agent-0.1.1.msi"));
+        assert!(is_windows_installer_asset("DS Agent_0.1.2_x64-setup.exe"));
+        assert!(is_windows_installer_asset("DS-Agent-0.1.2.msi"));
         assert!(!is_windows_installer_asset("Source code.zip"));
-        assert!(!is_windows_installer_asset("DS-Agent-0.1.1-debug.exe"));
-        assert!(!is_windows_installer_asset("DS-Agent-0.1.1-symbols.exe"));
+        assert!(!is_windows_installer_asset("DS-Agent-0.1.2-debug.exe"));
+        assert!(!is_windows_installer_asset("DS-Agent-0.1.2-symbols.exe"));
     }
 
     #[test]

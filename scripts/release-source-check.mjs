@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
-const expectedVersion = "0.1.1";
+const expectedVersion = "0.1.2";
 const maxSourceFileBytes = 2 * 1024 * 1024;
 const binaryReleaseExtensions = new Set([
   ".appimage",
@@ -47,6 +47,7 @@ const allowedSourceBinaryFiles = new Set([
 const requiredDocs = [
   "README.md",
   "docs/INSTALLATION.md",
+  "docs/RELEASE_NOTES_v0.1.2.md",
   "docs/RELEASE_NOTES_v0.1.0.md",
 ];
 const publicReleaseCopyFiles = [
@@ -61,6 +62,7 @@ const publicReleaseCopyFiles = [
   "apps/desktop/package.json",
   "docs/INSTALLATION.md",
   "docs/OPEN_SOURCE_RELEASE.md",
+  "docs/RELEASE_NOTES_v0.1.2.md",
   "docs/RELEASE_NOTES_v0.1.0.md",
   "docs/RELEASE_NOTES_v0.1-alpha.md",
   "package.json",
@@ -698,8 +700,16 @@ function checkRequiredDocs() {
       "README.md searchable DSAgent aliases",
     ],
     [
-      "Latest release: [DS Agent v0.1.1]",
+      "Latest release: [DS Agent v0.1.2]",
       "README.md latest release link",
+    ],
+    [
+      "Background Agent runs keep the composer usable while work is queued, claimed, executed, cancelled, and audited.",
+      "README.md v0.1.2 background Agent run summary",
+    ],
+    [
+      "Skill manifests declare permissions, source identity, integrity, trust state, execution plans, audit events, and disable or uninstall controls.",
+      "README.md v0.1.2 safe skill ecosystem summary",
     ],
     [
       "turning local evidence into reviewable office outputs",
@@ -870,7 +880,7 @@ function checkRequiredDocs() {
   }
 
   for (const phrase of [
-    "The current 0.1.0 preview includes the permission loop",
+    "The current 0.1.2 preview includes the permission loop",
     "Harness architecture v1",
     "runs through a stable Agent OS Kernel plus Workflow Packs",
     "uses permissioned tool boundaries, source-linked evidence, bounded workflow runs, selective context assembly, and token-efficient DeepSeek routing",
@@ -1729,8 +1739,20 @@ function checkPublicReleaseCopyPositioning() {
   checkTextIncludes(
     "apps/desktop/src-tauri/src/commands.rs",
     readText("apps/desktop/src-tauri/src/commands.rs"),
-    'APP_UPDATE_CURRENT_RELEASE_TAG: &str = "v0.1.1"',
-    "app updater current release tag v0.1.1",
+    'APP_UPDATE_CURRENT_RELEASE_TAG: &str = "v0.1.2"',
+    "app updater current release tag v0.1.2",
+  );
+  checkTextIncludesCollapsed(
+    "docs/RELEASE_NOTES_v0.1.2.md",
+    readText("docs/RELEASE_NOTES_v0.1.2.md"),
+    "Bumps the package, Tauri, Cargo, and updater current-release tag to `0.1.2` / `v0.1.2` so installed Windows clients can detect this release as newer than `v0.1.1`.",
+    "v0.1.2 release notes updater version bump",
+  );
+  checkTextIncludesCollapsed(
+    "docs/RELEASE_NOTES_v0.1.2.md",
+    readText("docs/RELEASE_NOTES_v0.1.2.md"),
+    "DS Agent now treats user instructions as background Agent runs instead of a single blocking chat turn.",
+    "v0.1.2 release notes background Agent run positioning",
   );
   checkTextIncludes(
     "apps/desktop/src-tauri/src/commands.rs",
