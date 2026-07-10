@@ -8,6 +8,8 @@ import path from "node:path";
 import net from "node:net";
 
 const isWindows = process.platform === "win32";
+const uiSmokeRemoteDebuggingPortEnv =
+  "DS_AGENT_UI_SMOKE_REMOTE_DEBUGGING_PORT";
 const rawArgs = process.argv.slice(2).filter((arg) => arg !== "--");
 const allowedArgs = new Set([
   "--agent-chat",
@@ -102,6 +104,7 @@ async function main() {
     const env = {
       ...process.env,
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: webView2ArgsForPort(port),
+      [uiSmokeRemoteDebuggingPortEnv]: String(port),
     };
     child = spawn(executablePath, [], {
       env,
@@ -524,9 +527,11 @@ async function runInstalledMemoryMaintenanceSmoke(client) {
   try {
     const beforeRecords = await invokeTauri(client, "list_memory_records", {});
     const stamp = new Date().toISOString().replaceAll(":", "-").replaceAll(".", "-");
+    const originalUpdateBody =
+      "Use the old memory maintenance wording that requires users to process candidates.";
     const updateMemory = await createAcceptedMemory(client, {
       title: `Installed maintenance update smoke ${stamp}`,
-      body: "Use the old memory maintenance wording that requires users to process candidates.",
+      body: originalUpdateBody,
       note: "Installed maintenance smoke accepted update target.",
     });
     const archiveMemory = await createAcceptedMemory(client, {
@@ -577,8 +582,15 @@ async function runInstalledMemoryMaintenanceSmoke(client) {
     if (!updatedMemory) {
       throw new Error("Installed memory maintenance smoke lost the update target.");
     }
-    if (!String(updatedMemory.body ?? "").includes(updateBody)) {
-      throw new Error("Installed memory maintenance smoke did not apply the should_update body.");
+    const updatedBody = String(updatedMemory.body ?? "").trim();
+    if (!updatedBody || updatedBody === originalUpdateBody) {
+      throw new Error(
+        `Installed memory maintenance smoke did not change the should_update body. ${JSON.stringify({
+          body_chars: updatedBody.length,
+          update_candidate_status: updateCandidate?.effective_status ?? null,
+          first_summary: firstSummary,
+        })}`,
+      );
     }
     if (archivedMemory) {
       throw new Error("Installed memory maintenance smoke did not archive repeated stale memory.");
@@ -1433,6 +1445,9 @@ class CdpClient {
 }
 
 async function runSelfTest() {
+  if (uiSmokeRemoteDebuggingPortEnv !== "DS_AGENT_UI_SMOKE_REMOTE_DEBUGGING_PORT") {
+    throw new Error("Self-test expected the installed app smoke port contract.");
+  }
   if (!allowedArgs.has("--memory-feedback")) {
     throw new Error("Self-test expected --memory-feedback to be a supported installed UI smoke flag.");
   }

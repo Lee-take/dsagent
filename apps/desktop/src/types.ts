@@ -60,6 +60,9 @@ export type SkillEnablementStatus = "enabled" | "disabled";
 export type AgentRunStatus =
   | "queued"
   | "running"
+  | "waiting_for_prerequisite"
+  | "waiting_for_confirmation"
+  | "blocked"
   | "cancel_requested"
   | "completed"
   | "failed"
@@ -72,6 +75,7 @@ export type AgentRunQueuedGuidance = {
   run_id: string;
   guidance: string;
   queued_at: string;
+  applied_at: string | null;
 };
 
 export type AgentRunStepRecord = {
@@ -97,15 +101,25 @@ export type AgentRunRecord = {
   id: string;
   conversation_id: string;
   prompt: string;
+  execution_prompt: string | null;
+  execution_context_recorded_at: string | null;
   attachment_count: number;
   status: AgentRunStatus;
   worker_id: string | null;
   lease_expires_at: string | null;
+  recovery_count: number;
+  last_recovered_at: string | null;
+  recovery_reason: string | null;
+  continuation_count: number;
+  continuation_queued_at: string | null;
+  continuation_tool_invocation_id: string | null;
   queued_guidance: AgentRunQueuedGuidance[];
   steps: AgentRunStepRecord[];
   artifacts: AgentRunArtifactRecord[];
   cancel_requested: boolean;
   cancel_reason: string | null;
+  status_reason: string | null;
+  waiting_tool_invocation_id: string | null;
   started_at: string;
   updated_at: string;
   finished_at: string | null;
@@ -158,6 +172,8 @@ export type SkillRecord = {
   enablement_status: SkillEnablementStatus;
   last_audit_note: string | null;
   updated_at: string;
+  entry_available: boolean;
+  entry_sha256: string | null;
 };
 
 export type SkillPackagePreflight = {
@@ -166,6 +182,7 @@ export type SkillPackagePreflight = {
   blocked_files: string[];
   warnings: string[];
   audit_summary: string;
+  entry_sha256: string | null;
 };
 
 export type SkillSourceVerification = {
@@ -178,7 +195,7 @@ export type SkillSourceVerification = {
   checked_at: string;
 };
 
-export type SkillExecutionStatus = "planned" | "blocked";
+export type SkillExecutionStatus = "planned" | "blocked" | "activated";
 
 export type SkillExecutionRecord = {
   id: string;
@@ -191,6 +208,10 @@ export type SkillExecutionRecord = {
   execution_plan: string;
   blocked_reason: string | null;
   requested_at: string;
+  tool_invocation_id: string | null;
+  run_id: string | null;
+  evidence_ref: string | null;
+  completed_at: string | null;
 };
 
 export type LocalDirectorySettings = {
@@ -505,7 +526,11 @@ export type CapabilityKind =
   | "terminal_read"
   | "terminal_write"
   | "computer_screenshot"
-  | "computer_control";
+  | "computer_control"
+  | "app_update_check"
+  | "app_update_download"
+  | "app_update_install"
+  | "skill_use";
 
 export type CapabilityFamily =
   | "file"
@@ -514,7 +539,9 @@ export type CapabilityFamily =
   | "email"
   | "drive"
   | "terminal"
-  | "computer_use";
+  | "computer_use"
+  | "app_update"
+  | "skill";
 
 export type RiskLevel = "low" | "medium" | "high" | "critical";
 
@@ -815,6 +842,106 @@ export type CapabilityInvocation = {
   warnings: string[];
   elapsed_ms: number;
   created_at: string;
+};
+
+export type ToolValueType = "string" | "boolean" | "number" | "object" | "array";
+
+export type ToolFieldSchema = {
+  name: string;
+  value_type: ToolValueType;
+  nullable: boolean;
+  description: string;
+};
+
+export type ToolObjectSchema = {
+  properties: ToolFieldSchema[];
+  required: string[];
+  allow_additional: boolean;
+};
+
+export type ToolPathScope =
+  | "none"
+  | "workspace"
+  | "local_filesystem"
+  | "app_evidence_directory"
+  | "app_update_directory"
+  | "installed_skill_store";
+
+export type ToolResourceAccess = "read" | "write";
+
+export type ToolResourceRequirement = {
+  key: string;
+  access: ToolResourceAccess;
+  lease_seconds: number;
+};
+
+export type ToolConstraints = {
+  allowed_network_hosts: string[];
+  path_scope: ToolPathScope;
+  mutates_machine_state: boolean;
+  protected_path_policy: string;
+  resource: ToolResourceRequirement | null;
+};
+
+export type ToolVerificationContract = {
+  recipe_id: string;
+  description: string;
+  required_evidence_kinds: string[];
+};
+
+export type AgentToolContract = {
+  id: string;
+  version: string;
+  title: string;
+  description: string;
+  capability: CapabilityKind;
+  risk_level: RiskLevel;
+  executor_id: string;
+  input_schema: ToolObjectSchema;
+  output_schema: ToolObjectSchema;
+  constraints: ToolConstraints;
+  verification: ToolVerificationContract;
+  recovery_hint: string;
+};
+
+export type ToolExecutionStatus =
+  | "waiting_for_confirmation"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "blocked";
+
+export type ToolEvidence = {
+  kind: string;
+  reference: string;
+  summary: string;
+};
+
+export type ToolVerificationResult = {
+  passed: boolean;
+  summary: string;
+  checked_at: string;
+};
+
+export type ToolInvocationRecord = {
+  id: string;
+  run_id: string | null;
+  tool_id: string;
+  tool_version: string;
+  capability: CapabilityKind;
+  status: ToolExecutionStatus;
+  policy_decision: PolicyDecision;
+  approval_request_id: string | null;
+  input_summary: string;
+  request_fingerprint: string;
+  output: Record<string, unknown> | null;
+  evidence: ToolEvidence[];
+  verification: ToolVerificationResult;
+  error: string | null;
+  recovery_hint: string;
+  elapsed_ms: number;
+  created_at: string;
+  finished_at: string | null;
 };
 
 export type AgentContextReceipt = {

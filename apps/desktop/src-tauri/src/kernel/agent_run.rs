@@ -2,11 +2,16 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub const AGENT_RUN_GUIDANCE_MAX_CHARS: usize = 4_000;
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentRunStatus {
     Queued,
     Running,
+    WaitingForPrerequisite,
+    WaitingForConfirmation,
+    Blocked,
     CancelRequested,
     Completed,
     Failed,
@@ -34,11 +39,55 @@ pub struct AgentRunClaim {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentRunRecovery {
+    pub id: Uuid,
+    pub run_id: Uuid,
+    pub previous_worker_id: String,
+    pub previous_lease_expires_at: DateTime<Utc>,
+    pub reason: String,
+    pub recovered_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentRunRecoverySweep {
+    pub recovered: usize,
+    pub blocked: usize,
+    pub cancelled: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentRunExecutionContext {
+    pub id: Uuid,
+    pub run_id: Uuid,
+    pub execution_prompt: String,
+    pub recorded_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentRunContinuationQueued {
+    pub id: Uuid,
+    pub run_id: Uuid,
+    pub tool_invocation_id: Uuid,
+    pub reason: String,
+    pub queued_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AgentRunQueuedGuidance {
     pub id: Uuid,
     pub run_id: Uuid,
     pub guidance: String,
     pub queued_at: DateTime<Utc>,
+    #[serde(default)]
+    pub applied_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentRunGuidanceApplied {
+    pub id: Uuid,
+    pub run_id: Uuid,
+    pub guidance_id: Uuid,
+    pub applied_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -47,6 +96,45 @@ pub struct AgentRunCancelRequest {
     pub run_id: Uuid,
     pub reason: String,
     pub requested_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentRunTransition {
+    pub id: Uuid,
+    pub run_id: Uuid,
+    pub status: AgentRunStatus,
+    pub reason: String,
+    pub tool_invocation_id: Option<Uuid>,
+    pub transitioned_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRunResourceAccess {
+    Read,
+    Write,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentRunResourceClaim {
+    pub id: Uuid,
+    pub run_id: Option<Uuid>,
+    pub tool_invocation_id: Uuid,
+    pub resource_key: String,
+    pub access: AgentRunResourceAccess,
+    pub claimed_at: DateTime<Utc>,
+    pub lease_expires_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentRunResourceRelease {
+    pub id: Uuid,
+    pub claim_id: Uuid,
+    pub run_id: Option<Uuid>,
+    pub tool_invocation_id: Uuid,
+    pub resource_key: String,
+    pub outcome: String,
+    pub released_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -94,15 +182,33 @@ pub struct AgentRunRecord {
     pub id: Uuid,
     pub conversation_id: String,
     pub prompt: String,
+    #[serde(default)]
+    pub execution_prompt: Option<String>,
+    #[serde(default)]
+    pub execution_context_recorded_at: Option<DateTime<Utc>>,
     pub attachment_count: usize,
     pub status: AgentRunStatus,
     pub worker_id: Option<String>,
     pub lease_expires_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub recovery_count: usize,
+    #[serde(default)]
+    pub last_recovered_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub recovery_reason: Option<String>,
+    #[serde(default)]
+    pub continuation_count: usize,
+    #[serde(default)]
+    pub continuation_queued_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub continuation_tool_invocation_id: Option<Uuid>,
     pub queued_guidance: Vec<AgentRunQueuedGuidance>,
     pub steps: Vec<AgentRunStepRecord>,
     pub artifacts: Vec<AgentRunArtifactRecord>,
     pub cancel_requested: bool,
     pub cancel_reason: Option<String>,
+    pub status_reason: Option<String>,
+    pub waiting_tool_invocation_id: Option<Uuid>,
     pub started_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
@@ -154,13 +260,78 @@ impl AgentRunClaim {
     }
 }
 
-impl AgentRunQueuedGuidance {
-    pub fn new(run_id: Uuid, guidance: String) -> Result<Self, String> {
+impl AgentRunRecovery {
+    pub fn new(
+        run_id: Uuid,
+        previous_worker_id: String,
+        previous_lease_expires_at: DateTime<Utc>,
+        reason: String,
+    ) -> Result<Self, String> {
         Ok(Self {
             id: Uuid::new_v4(),
             run_id,
-            guidance: required_text(guidance, "agent run queued guidance")?,
+            previous_worker_id: required_text(
+                previous_worker_id,
+                "agent run recovery previous_worker_id",
+            )?,
+            previous_lease_expires_at,
+            reason: required_text(reason, "agent run recovery reason")?,
+            recovered_at: Utc::now(),
+        })
+    }
+}
+
+impl AgentRunExecutionContext {
+    pub fn new(run_id: Uuid, execution_prompt: String) -> Result<Self, String> {
+        Ok(Self {
+            id: Uuid::new_v4(),
+            run_id,
+            execution_prompt: required_text(execution_prompt, "agent run execution prompt")?,
+            recorded_at: Utc::now(),
+        })
+    }
+}
+
+impl AgentRunContinuationQueued {
+    pub fn new(run_id: Uuid, tool_invocation_id: Uuid, reason: String) -> Result<Self, String> {
+        Ok(Self {
+            id: Uuid::new_v4(),
+            run_id,
+            tool_invocation_id,
+            reason: required_text(reason, "agent run continuation reason")?,
             queued_at: Utc::now(),
+        })
+    }
+}
+
+impl AgentRunQueuedGuidance {
+    pub fn new(run_id: Uuid, guidance: String) -> Result<Self, String> {
+        let guidance = required_text(guidance, "agent run queued guidance")?;
+        if guidance.chars().count() > AGENT_RUN_GUIDANCE_MAX_CHARS {
+            return Err(format!(
+                "agent run queued guidance exceeds {AGENT_RUN_GUIDANCE_MAX_CHARS} characters"
+            ));
+        }
+        Ok(Self {
+            id: Uuid::new_v4(),
+            run_id,
+            guidance,
+            queued_at: Utc::now(),
+            applied_at: None,
+        })
+    }
+}
+
+impl AgentRunGuidanceApplied {
+    pub fn new(run_id: Uuid, guidance_id: Uuid) -> Result<Self, String> {
+        if guidance_id.is_nil() {
+            return Err("agent run applied guidance id is required".to_string());
+        }
+        Ok(Self {
+            id: Uuid::new_v4(),
+            run_id,
+            guidance_id,
+            applied_at: Utc::now(),
         })
     }
 }
@@ -176,6 +347,68 @@ impl AgentRunCancelRequest {
     }
 }
 
+impl AgentRunTransition {
+    pub fn new(
+        run_id: Uuid,
+        status: AgentRunStatus,
+        reason: String,
+        tool_invocation_id: Option<Uuid>,
+    ) -> Result<Self, String> {
+        if !matches!(
+            status,
+            AgentRunStatus::Running
+                | AgentRunStatus::WaitingForPrerequisite
+                | AgentRunStatus::WaitingForConfirmation
+                | AgentRunStatus::Blocked
+        ) {
+            return Err("agent run transition status must be non-terminal".to_string());
+        }
+        Ok(Self {
+            id: Uuid::new_v4(),
+            run_id,
+            status,
+            reason: required_text(reason, "agent run transition reason")?,
+            tool_invocation_id,
+            transitioned_at: Utc::now(),
+        })
+    }
+}
+
+impl AgentRunResourceClaim {
+    pub fn new(
+        run_id: impl Into<Option<Uuid>>,
+        tool_invocation_id: Uuid,
+        resource_key: String,
+        access: AgentRunResourceAccess,
+        lease_seconds: i64,
+    ) -> Result<Self, String> {
+        let claimed_at = Utc::now();
+        Ok(Self {
+            id: Uuid::new_v4(),
+            run_id: run_id.into(),
+            tool_invocation_id,
+            resource_key: required_text(resource_key, "agent run resource key")?,
+            access,
+            claimed_at,
+            lease_expires_at: claimed_at + chrono::Duration::seconds(lease_seconds.max(1)),
+        })
+    }
+}
+
+impl AgentRunResourceRelease {
+    pub fn new(claim: &AgentRunResourceClaim, outcome: String) -> Result<Self, String> {
+        Ok(Self {
+            id: Uuid::new_v4(),
+            claim_id: claim.id,
+            run_id: claim.run_id,
+            tool_invocation_id: claim.tool_invocation_id,
+            resource_key: claim.resource_key.clone(),
+            outcome: required_text(outcome, "agent run resource release outcome")?,
+            released_at: Utc::now(),
+        })
+    }
+}
+
 impl AgentRunFinish {
     pub fn new(
         run_id: Uuid,
@@ -185,7 +418,12 @@ impl AgentRunFinish {
     ) -> Result<Self, String> {
         if matches!(
             status,
-            AgentRunStatus::Queued | AgentRunStatus::Running | AgentRunStatus::CancelRequested
+            AgentRunStatus::Queued
+                | AgentRunStatus::Running
+                | AgentRunStatus::WaitingForPrerequisite
+                | AgentRunStatus::WaitingForConfirmation
+                | AgentRunStatus::Blocked
+                | AgentRunStatus::CancelRequested
         ) {
             return Err("agent run finish status must be terminal".to_string());
         }

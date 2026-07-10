@@ -21,6 +21,10 @@ pub enum CapabilityKind {
     TerminalWrite,
     ComputerScreenshot,
     ComputerControl,
+    AppUpdateCheck,
+    AppUpdateDownload,
+    AppUpdateInstall,
+    SkillUse,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -33,6 +37,8 @@ pub enum CapabilityFamily {
     Drive,
     Terminal,
     ComputerUse,
+    AppUpdate,
+    Skill,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -270,6 +276,38 @@ pub fn builtin_capability_catalog() -> Vec<CapabilityDescriptor> {
             "computer_control",
             true,
         ),
+        descriptor(
+            CapabilityFamily::AppUpdate,
+            CapabilityKind::AppUpdateCheck,
+            "Check for DS Agent updates",
+            "Read trusted release metadata and compare it with the installed version.",
+            "trusted_release_metadata",
+            false,
+        ),
+        descriptor(
+            CapabilityFamily::AppUpdate,
+            CapabilityKind::AppUpdateDownload,
+            "Download a DS Agent update",
+            "Download a trusted Windows installer into the isolated update directory.",
+            "app_update_directory",
+            false,
+        ),
+        descriptor(
+            CapabilityFamily::AppUpdate,
+            CapabilityKind::AppUpdateInstall,
+            "Install a DS Agent update",
+            "Launch a verified installer and restart DS Agent after explicit approval.",
+            "verified_update_installer",
+            false,
+        ),
+        descriptor(
+            CapabilityFamily::Skill,
+            CapabilityKind::SkillUse,
+            "Use an installed declarative skill",
+            "Load a trusted, enabled, hash-verified declarative skill entry as planning evidence.",
+            "installed_skill_catalog",
+            false,
+        ),
     ]
     .to_vec()
 }
@@ -335,13 +373,18 @@ pub fn capability_risk(capability: CapabilityKind) -> RiskLevel {
         | CapabilityKind::BrowserBrowse
         | CapabilityKind::EmailDraft
         | CapabilityKind::DriveRead
-        | CapabilityKind::TerminalRead => RiskLevel::Low,
+        | CapabilityKind::TerminalRead
+        | CapabilityKind::AppUpdateCheck
+        | CapabilityKind::SkillUse => RiskLevel::Low,
         CapabilityKind::EmailRead | CapabilityKind::ComputerScreenshot => RiskLevel::Medium,
         CapabilityKind::FileWrite
         | CapabilityKind::BrowserSubmit
         | CapabilityKind::DriveWrite
-        | CapabilityKind::TerminalWrite => RiskLevel::High,
-        CapabilityKind::EmailSend | CapabilityKind::ComputerControl => RiskLevel::Critical,
+        | CapabilityKind::TerminalWrite
+        | CapabilityKind::AppUpdateDownload => RiskLevel::High,
+        CapabilityKind::EmailSend
+        | CapabilityKind::ComputerControl
+        | CapabilityKind::AppUpdateInstall => RiskLevel::Critical,
     }
 }
 
@@ -357,7 +400,9 @@ pub fn decide(access_mode: AccessMode, capability: CapabilityKind) -> PolicyDeci
             RiskLevel::High | RiskLevel::Critical => PolicyDecision::Ask,
         },
         AccessMode::FullAccess => match capability {
-            CapabilityKind::EmailSend | CapabilityKind::ComputerControl => PolicyDecision::Ask,
+            CapabilityKind::EmailSend
+            | CapabilityKind::ComputerControl
+            | CapabilityKind::AppUpdateInstall => PolicyDecision::Ask,
             _ => PolicyDecision::Allow,
         },
     }
@@ -372,7 +417,9 @@ fn decision_reason(
     match (access_mode, capability, risk_level, decision) {
         (
             _,
-            CapabilityKind::EmailSend | CapabilityKind::ComputerControl,
+            CapabilityKind::EmailSend
+            | CapabilityKind::ComputerControl
+            | CapabilityKind::AppUpdateInstall,
             RiskLevel::Critical,
             _,
         ) => "critical capability requires explicit approval",

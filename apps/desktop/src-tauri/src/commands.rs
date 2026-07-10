@@ -17,29 +17,28 @@ use crate::kernel::agent_context::{
     agent_loop_mode_descriptor, classify_agent_action_loop_mode, AgentContextReceipt, AgentLoopMode,
 };
 use crate::kernel::agent_run::{
-    AgentRunArtifactRecord, AgentRunCancelRequest, AgentRunFinish, AgentRunQueuedGuidance,
-    AgentRunRecord, AgentRunStart, AgentRunStatus, AgentRunStepRecord, AgentRunStepStatus,
+    AgentRunArtifactRecord, AgentRunCancelRequest, AgentRunContinuationQueued,
+    AgentRunExecutionContext, AgentRunFinish, AgentRunGuidanceApplied, AgentRunQueuedGuidance,
+    AgentRunRecord, AgentRunResourceAccess, AgentRunResourceClaim, AgentRunStart, AgentRunStatus,
+    AgentRunStepRecord, AgentRunStepStatus, AgentRunTransition,
 };
 use crate::kernel::attachments::{stage_agent_attachment_paths, AgentAttachment};
 use crate::kernel::capability::{
-    run_browser_browse, run_browser_submit_boundary, run_computer_control_boundary,
-    run_computer_screenshot, run_drive_read_boundary, run_drive_write_boundary,
-    run_email_draft_boundary, run_email_read_boundary, run_email_send_boundary,
-    run_evidence_folder_ingest, run_file_read, run_file_write_boundary,
-    run_filesystem_mutation_boundary, run_network_search_boundary,
-    run_terminal_read as run_terminal_read_capability, run_terminal_write_boundary,
-    BrowserBrowseRequest, BrowserPageClient, BrowserSubmitRequest, CapabilityInvocation,
+    normalize_terminal_read_command, parse_computer_control_action, run_browser_submit_boundary,
+    run_drive_read_boundary, run_drive_write_boundary, run_email_draft_boundary,
+    run_email_read_boundary, run_email_send_boundary, run_evidence_folder_ingest,
+    run_terminal_write_boundary, BrowserPageClient, BrowserSubmitRequest, CapabilityInvocation,
     CapabilityInvocationStatus, CodexBridgeComputerControlClient,
     CodexBridgeComputerScreenshotClient, CodexBridgeNetworkSearchClient, ComputerControlClient,
-    ComputerControlRequest, ComputerScreenshotRequest, DriveReadRequest, DriveWriteExportFile,
-    DriveWriteRequest, EmailDraftRequest, EmailReadRequest, EmailSendRequest,
-    EvidenceFolderRequest, FileContentClient, FileReadRequest, FileSystemMutationOperation,
-    FileSystemMutationRequest, FileWriteClient, FileWriteRequest, FileWriteResult,
-    HttpBrowserPageClient, HttpNetworkSearchClient, LocalComputerControlClient,
-    LocalComputerScreenshotClient, LocalDriveFolderClient, LocalEvidenceFolderClient,
-    LocalFileContentClient, LocalFileSystemMutationClient, LocalTerminalReadClient,
-    LocalWorkspaceFileWriteClient, NetworkSearchClient, NetworkSearchRequest, NetworkSearchResult,
-    TerminalReadRequest, TerminalWriteRequest,
+    ComputerScreenshotClient, DriveReadRequest, DriveWriteExportFile, DriveWriteRequest,
+    EmailDraftRequest, EmailReadRequest, EmailSendRequest, EvidenceFolderClient,
+    EvidenceFolderRequest, FileContentClient, FileSystemMutationClient,
+    FileSystemMutationOperation, FileWriteClient, FileWriteResult, HttpBrowserPageClient,
+    HttpNetworkSearchClient, LocalComputerControlClient, LocalComputerScreenshotClient,
+    LocalDriveFolderClient, LocalEvidenceFolderClient, LocalFileContentClient,
+    LocalFileSystemMutationClient, LocalTerminalReadClient, LocalWorkspaceFileWriteClient,
+    NetworkSearchClient, NetworkSearchResult, NetworkSearchResultItem, TerminalReadClient,
+    TerminalWriteRequest, TERMINAL_READ_DIRECTORY_LIST_PREFIX,
 };
 use crate::kernel::computer_use::{
     computer_use_backend_status_for_strategy, ComputerUseBackendStatus,
@@ -80,6 +79,7 @@ use crate::kernel::models::{
     MemoryRecordLink, MemoryRecordUpdate, MemoryRelationKind, MemoryScope, MemorySelectedFeedback,
     MemorySelectedFeedbackKind, MemorySensitivity, MemoryType,
 };
+use crate::kernel::network_sandbox::{send_public_get, validate_public_http_url_syntax};
 use crate::kernel::network_search::{
     network_search_route_status_for_strategy, NetworkSearchRouteStatus,
 };
@@ -96,11 +96,25 @@ use crate::kernel::policy::{
     CapabilityDescriptor, CapabilityGrantState, CapabilityKind, PermissionAuditEntry,
     PermissionResolution, PolicyDecision,
 };
+use crate::kernel::sandbox::{
+    enforce_local_mutation_path, enforce_local_read_path, enforce_workspace_relative_mutation_path,
+    enforce_workspace_relative_read_path,
+};
 use crate::kernel::skill::{
-    validate_remote_skill_source_url, SkillEnablementChange, SkillEnablementStatus,
-    SkillExecutionRecord, SkillInstallationRecord, SkillManifest, SkillPackagePreflight,
-    SkillRecord, SkillSourceVerification, SkillTrustReset, SkillUninstallRecord,
-    MAX_REMOTE_SKILL_PACKAGE_BYTES,
+    validate_remote_skill_source_url, SkillActivationContext, SkillEnablementChange,
+    SkillEnablementStatus, SkillExecutionRecord, SkillInstallationRecord, SkillManifest,
+    SkillPackagePreflight, SkillRecord, SkillSourceVerification, SkillTrustLevel, SkillTrustReset,
+    SkillUninstallRecord, MAX_REMOTE_SKILL_PACKAGE_BYTES,
+};
+use crate::kernel::tool_runtime::{
+    builtin_tool_catalog, prepare_tool_execution, tool_request_fingerprint, AgentToolExecutor,
+    ToolEvidence, ToolExecutionOutput, ToolExecutionPlan, ToolExecutionRequest,
+    ToolExecutionStatus, ToolInvocationRecord, ToolResourceAccess, ToolVerificationResult,
+    APP_UPDATE_CHECK_TOOL_ID, APP_UPDATE_DOWNLOAD_TOOL_ID, APP_UPDATE_INSTALL_TOOL_ID,
+    BROWSER_BROWSE_TOOL_ID, BROWSER_OPEN_TOOL_ID, COMPUTER_CONTROL_TOOL_ID,
+    COMPUTER_SCREENSHOT_TOOL_ID, FILESYSTEM_MUTATE_TOOL_ID, FILE_READ_TOOL_ID, FILE_WRITE_TOOL_ID,
+    NETWORK_SEARCH_TOOL_ID, OFFICE_CREATE_TOOL_ID, OFFICE_OPEN_TOOL_ID, OFFICE_UPDATE_TOOL_ID,
+    OPERATIONS_BRIEFING_TOOL_ID, SKILL_ACTIVATE_TOOL_ID, TERMINAL_READ_TOOL_ID,
 };
 use crate::kernel::tool_strategy::{
     model_driven_tool_strategy_for_current_platform, ModelDrivenToolStrategy,
@@ -118,7 +132,8 @@ use crate::kernel::workflow::{
     run_operations_briefing_template_seed as build_operations_briefing_template_seed,
     run_operations_briefing_with_synthesizer as build_operations_briefing_run_with_synthesizer,
     LocalOperationsBriefingTemplateSeeder, OperationsBriefingRequest, OperationsBriefingRun,
-    OperationsBriefingTemplateSeedRequest,
+    OperationsBriefingRunStatus, OperationsBriefingTemplateSeedRequest,
+    OPERATIONS_BRIEFING_WORKFLOW_ID,
 };
 
 pub struct AppState {
@@ -139,6 +154,10 @@ impl AppState {
 
 const COMPUTER_CONTROL_UNLOCK_TTL_MINUTES: i64 = 5;
 const COMPUTER_CONTROL_UNLOCK_CHALLENGE_LENGTH: usize = 6;
+const AGENT_TOOL_LOOP_MAX_ROUNDS: usize = 4;
+const AGENT_RUN_GUIDANCE_MAX_ITEMS_PER_ROUND: usize = 8;
+const AGENT_RUN_GUIDANCE_PROMPT_CHAR_LIMIT: usize = 12_000;
+const AGENT_SKILL_CATALOG_MAX_ITEMS: usize = 24;
 const AGENT_CHAT_SYSTEM_PROMPT: &str = "You are the DeepSeek reasoning layer for DS Agent. DS Agent is the local execution layer. Read the full user message and return one structured agent envelope as JSON. Separate reply_to_user from agent_actions, missing_prerequisites, required_confirmations, artifact_targets, and memory_candidates. Do not claim local tools ran; propose actions for DS Agent to validate and execute.";
 const AGENT_OFFICE_CREATE_EVIDENCE_TEXT_LIMIT: usize = 1200;
 const APP_UPDATE_RELEASES_API_URL: &str = "https://api.github.com/repos/Lee-take/dsagent/releases";
@@ -146,8 +165,8 @@ const APP_UPDATE_RELEASE_DOWNLOAD_PREFIX: &str =
     "https://github.com/Lee-take/dsagent/releases/download/";
 const APP_UPDATE_LEGACY_RELEASE_DOWNLOAD_PREFIX: &str =
     "https://github.com/Lee-take/deepseek-agent-os/releases/download/";
-const APP_UPDATE_USER_AGENT: &str = "DS-Agent-Updater/0.1.2";
-const APP_UPDATE_CURRENT_RELEASE_TAG: &str = "v0.1.2";
+const APP_UPDATE_USER_AGENT: &str = "DS-Agent-Updater/0.2.0";
+const APP_UPDATE_CURRENT_RELEASE_TAG: &str = "v0.2.0";
 const AGENT_SOUL_PROFILE_FILE_NAME: &str = "soul.md";
 const AGENT_SOUL_PROFILE_CONTEXT_MAX_BYTES: usize = 800;
 const AGENT_SOUL_PROFILE_MAX_BYTES: usize = 16 * 1024;
@@ -157,6 +176,7 @@ const AGENT_MEMORY_CONTEXT_SNIPPET_CHARS: usize = 220;
 const AGENT_MEMORY_FEEDBACK_MAINTENANCE_THRESHOLD: usize = 2;
 const AGENT_MEMORY_QUALITY_MAINTENANCE_THRESHOLD: i32 = 12;
 const AGENT_RUN_WORKER_LEASE_SECONDS: i64 = 30 * 60;
+const AGENT_RUN_WORKER_HEARTBEAT_SECONDS: u64 = 5 * 60;
 const AGENT_MEMORY_QUALITY_OLD_DAYS: i64 = 120;
 const AGENT_MEMORY_QUALITY_LONG_BODY_CHARS: usize = 800;
 const AGENT_MEMORY_MODEL_REWRITE_MAX_BODY_CHARS: usize = 1200;
@@ -178,6 +198,7 @@ pub struct AgentChatRequest {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AgentChatRuntimeContext {
+    active_run_id: Option<Uuid>,
     workspace_ready: AgentChatReadiness,
     workspace_note: String,
     network_search_ready: AgentChatReadiness,
@@ -185,12 +206,14 @@ struct AgentChatRuntimeContext {
     network_search_source_model: Option<NetworkSearchSourceModel>,
     soul_profile: Option<AgentSoulProfileContext>,
     memory_context: AgentMemoryRuntimeContext,
+    skill_catalog: Vec<AgentSkillCatalogItem>,
     desktop_dir: Option<PathBuf>,
 }
 
 impl Default for AgentChatRuntimeContext {
     fn default() -> Self {
         Self {
+            active_run_id: None,
             workspace_ready: AgentChatReadiness::Unknown,
             workspace_note: "workspace readiness unavailable in this test context".to_string(),
             network_search_ready: AgentChatReadiness::Unknown,
@@ -199,9 +222,20 @@ impl Default for AgentChatRuntimeContext {
             network_search_source_model: None,
             soul_profile: None,
             memory_context: AgentMemoryRuntimeContext::default(),
+            skill_catalog: Vec::new(),
             desktop_dir: None,
         }
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AgentSkillCatalogItem {
+    id: Uuid,
+    name: String,
+    version: String,
+    description: String,
+    entry_kind: String,
+    capability_summary: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -578,6 +612,23 @@ enum AgentNetworkSearchClient {
     Unavailable(String),
 }
 
+enum AgentComputerScreenshotClient {
+    Local(LocalComputerScreenshotClient),
+    Bridge(CodexBridgeComputerScreenshotClient),
+}
+
+enum AgentComputerControlClient {
+    Local(LocalComputerControlClient),
+    Bridge(CodexBridgeComputerControlClient),
+}
+
+struct AgentComputerUseClient {
+    screenshot: AgentComputerScreenshotClient,
+    control: AgentComputerControlClient,
+}
+
+struct UnavailableAgentComputerUseClient;
+
 enum AgentFileWriteClient {
     Local {
         file_client: LocalWorkspaceFileWriteClient,
@@ -603,6 +654,44 @@ impl NetworkSearchClient for AgentNetworkSearchClient {
             Self::Http(client) => client.search(query, scope),
             Self::Unavailable(reason) => Err(reason.clone()),
         }
+    }
+}
+
+impl ComputerScreenshotClient for AgentComputerUseClient {
+    fn capture_screenshot(&self) -> Result<crate::kernel::capability::ComputerScreenshot, String> {
+        match &self.screenshot {
+            AgentComputerScreenshotClient::Local(client) => client.capture_screenshot(),
+            AgentComputerScreenshotClient::Bridge(client) => client.capture_screenshot(),
+        }
+    }
+}
+
+impl ComputerControlClient for AgentComputerUseClient {
+    fn execute_control(
+        &self,
+        target: &str,
+        action: &crate::kernel::capability::ComputerControlAction,
+    ) -> Result<crate::kernel::capability::ComputerControlExecution, String> {
+        match &self.control {
+            AgentComputerControlClient::Local(client) => client.execute_control(target, action),
+            AgentComputerControlClient::Bridge(client) => client.execute_control(target, action),
+        }
+    }
+}
+
+impl ComputerScreenshotClient for UnavailableAgentComputerUseClient {
+    fn capture_screenshot(&self) -> Result<crate::kernel::capability::ComputerScreenshot, String> {
+        Err("computer screenshot client is unavailable in this execution context".to_string())
+    }
+}
+
+impl ComputerControlClient for UnavailableAgentComputerUseClient {
+    fn execute_control(
+        &self,
+        _target: &str,
+        _action: &crate::kernel::capability::ComputerControlAction,
+    ) -> Result<crate::kernel::capability::ComputerControlExecution, String> {
+        Err("computer control client is unavailable in this execution context".to_string())
     }
 }
 
@@ -675,6 +764,40 @@ fn agent_network_search_client(
                 ),
             }
         }
+    }
+}
+
+fn agent_computer_use_client(
+    strategy: &ModelDrivenToolStrategy,
+    evidence_base_dir: PathBuf,
+) -> AgentComputerUseClient {
+    let screenshot = match strategy.computer_screenshot_backend {
+        ComputerScreenshotBackend::LocalWindowsScreenCapture
+        | ComputerScreenshotBackend::LocalMacosScreenCapture => {
+            AgentComputerScreenshotClient::Local(LocalComputerScreenshotClient::new(
+                evidence_base_dir.clone(),
+            ))
+        }
+        ComputerScreenshotBackend::CodexBridgeScreenCapture
+        | ComputerScreenshotBackend::CodexStyleScreenCapture => {
+            AgentComputerScreenshotClient::Bridge(CodexBridgeComputerScreenshotClient::from_env(
+                evidence_base_dir,
+            ))
+        }
+    };
+    let control = match strategy.computer_control_backend {
+        ComputerControlBackend::LocalWindowsInputControl
+        | ComputerControlBackend::LocalMacosInputControl => {
+            AgentComputerControlClient::Local(LocalComputerControlClient::new())
+        }
+        ComputerControlBackend::CodexBridgeInputControl
+        | ComputerControlBackend::CodexStyleInputControl => {
+            AgentComputerControlClient::Bridge(CodexBridgeComputerControlClient::from_env())
+        }
+    };
+    AgentComputerUseClient {
+        screenshot,
+        control,
     }
 }
 
@@ -757,6 +880,3123 @@ fn lock_error() -> String {
 
 fn computer_control_unlock_lock_error() -> String {
     "computer control unlock lock is unavailable".to_string()
+}
+
+struct AuthorizedAgentToolExecution {
+    plan: ToolExecutionPlan,
+    approval_request_id: Option<Uuid>,
+}
+
+enum AgentToolAuthorization {
+    Ready(AuthorizedAgentToolExecution),
+    Finished(ToolInvocationRecord),
+}
+
+struct FileWriteAgentToolExecutor<'a, T: FileWriteClient + ?Sized> {
+    client: &'a T,
+}
+
+impl<T: FileWriteClient + ?Sized> AgentToolExecutor for FileWriteAgentToolExecutor<'_, T> {
+    fn execute(&self, plan: &ToolExecutionPlan) -> Result<ToolExecutionOutput, String> {
+        if plan.contract.id != FILE_WRITE_TOOL_ID {
+            return Err(format!(
+                "file write executor cannot execute `{}`",
+                plan.contract.id
+            ));
+        }
+        let path = plan.request.input["path"]
+            .as_str()
+            .ok_or_else(|| "file.write requires a string path".to_string())?;
+        let summary = plan.request.input["summary"]
+            .as_str()
+            .ok_or_else(|| "file.write requires a string summary".to_string())?;
+        let content = plan.request.input["content"]
+            .as_str()
+            .ok_or_else(|| "file.write requires string content".to_string())?;
+        let result = self.client.write_file(path, content)?;
+        let expected_bytes = content.len() as u64;
+        if result.bytes != expected_bytes {
+            return Err(format!(
+                "file.write verification expected {expected_bytes} bytes but executor reported {}",
+                result.bytes
+            ));
+        }
+        if !result.encoding.eq_ignore_ascii_case("utf-8") {
+            return Err(format!(
+                "file.write verification requires utf-8 output, got `{}`",
+                result.encoding
+            ));
+        }
+
+        Ok(ToolExecutionOutput {
+            output: serde_json::to_value(&result).map_err(event_store_error)?,
+            evidence: vec![ToolEvidence {
+                kind: "written_file".to_string(),
+                reference: result.path.clone(),
+                summary: format!("{summary} ({expected_bytes} UTF-8 bytes written)."),
+            }],
+            verification: ToolVerificationResult::passed(format!(
+                "file.write verified the output path and {expected_bytes} UTF-8 bytes written"
+            )),
+        })
+    }
+}
+
+struct OfficeCreateAgentToolExecutor<'a, T: OfficeArtifactClient + ?Sized> {
+    client: &'a T,
+}
+
+impl<T: OfficeArtifactClient + ?Sized> AgentToolExecutor for OfficeCreateAgentToolExecutor<'_, T> {
+    fn execute(&self, plan: &ToolExecutionPlan) -> Result<ToolExecutionOutput, String> {
+        if plan.contract.id != OFFICE_CREATE_TOOL_ID {
+            return Err(format!(
+                "office create executor cannot execute `{}`",
+                plan.contract.id
+            ));
+        }
+        let spec = serde_json::from_value::<OfficeCreateSpec>(plan.request.input.clone())
+            .map_err(|error| format!("office.create input could not be decoded: {error}"))?;
+        let result = self.client.write_office_artifact(&spec)?;
+        if result.app != spec.app {
+            return Err("office.create executor reported a different Office app".to_string());
+        }
+        if result.bytes == 0 {
+            return Err("office.create executor reported an empty artifact".to_string());
+        }
+        if result.path.trim().is_empty() || result.artifact_kind.trim().is_empty() {
+            return Err("office.create executor returned incomplete artifact metadata".to_string());
+        }
+        let expected_name = Path::new(&spec.path).file_name();
+        let actual_name = Path::new(&result.path).file_name();
+        if expected_name.is_none() || expected_name != actual_name {
+            return Err(
+                "office.create executor reported a different artifact filename".to_string(),
+            );
+        }
+
+        Ok(ToolExecutionOutput {
+            output: serde_json::to_value(&result).map_err(event_store_error)?,
+            evidence: vec![ToolEvidence {
+                kind: "office_artifact".to_string(),
+                reference: result.path.clone(),
+                summary: format!(
+                    "Created a verified {} artifact with {} binary bytes.",
+                    result.app.user_facing_name(),
+                    result.bytes
+                ),
+            }],
+            verification: ToolVerificationResult::passed(format!(
+                "office.create verified app identity, filename, artifact kind, and {} binary bytes",
+                result.bytes
+            )),
+        })
+    }
+}
+
+struct OfficeOpenAgentToolExecutor<'a, T: OfficeOpenClient + ?Sized> {
+    client: &'a T,
+}
+
+impl<T: OfficeOpenClient + ?Sized> AgentToolExecutor for OfficeOpenAgentToolExecutor<'_, T> {
+    fn execute(&self, plan: &ToolExecutionPlan) -> Result<ToolExecutionOutput, String> {
+        if plan.contract.id != OFFICE_OPEN_TOOL_ID {
+            return Err(format!(
+                "office open executor cannot execute `{}`",
+                plan.contract.id
+            ));
+        }
+        let path = plan.request.input["path"]
+            .as_str()
+            .ok_or_else(|| "office.open requires a string path".to_string())?;
+        let preferred_app_label = plan.request.input["preferred_app"]
+            .as_str()
+            .ok_or_else(|| "office.open requires a preferred_app string".to_string())?;
+        let preferred_app = OfficeApp::from_label(preferred_app_label)
+            .ok_or_else(|| "office.open preferred_app is invalid".to_string())?;
+        let result = self
+            .client
+            .open_office_artifact(path, Some(preferred_app))?;
+        if result.app != preferred_app {
+            return Err("office.open executor reported a different Office app".to_string());
+        }
+        if result.path.trim().is_empty() || result.opener_label.trim().is_empty() {
+            return Err("office.open executor returned incomplete launch metadata".to_string());
+        }
+        let expected_name = Path::new(path).file_name();
+        let actual_name = Path::new(&result.path).file_name();
+        if expected_name.is_none() || expected_name != actual_name {
+            return Err("office.open executor reported a different artifact filename".to_string());
+        }
+        let fallback_note = result.fallback_note.clone().unwrap_or_default();
+
+        Ok(ToolExecutionOutput {
+            output: serde_json::json!({
+                "path": result.path,
+                "app": result.app,
+                "opener_label": result.opener_label,
+                "fallback_note": fallback_note,
+            }),
+            evidence: vec![ToolEvidence {
+                kind: "office_open_receipt".to_string(),
+                reference: result.path.clone(),
+                summary: format!(
+                    "Opened the verified {} artifact with {}.",
+                    result.app.user_facing_name(),
+                    result.opener_label
+                ),
+            }],
+            verification: ToolVerificationResult::passed(format!(
+                "office.open verified app identity, filename, and launcher `{}`",
+                result.opener_label
+            )),
+        })
+    }
+}
+
+struct OfficeUpdateAgentToolExecutor<'a, T: OfficeUpdateClient + ?Sized> {
+    client: &'a T,
+}
+
+impl<T: OfficeUpdateClient + ?Sized> AgentToolExecutor for OfficeUpdateAgentToolExecutor<'_, T> {
+    fn execute(&self, plan: &ToolExecutionPlan) -> Result<ToolExecutionOutput, String> {
+        if plan.contract.id != OFFICE_UPDATE_TOOL_ID {
+            return Err(format!(
+                "office update executor cannot execute `{}`",
+                plan.contract.id
+            ));
+        }
+        let spec = serde_json::from_value::<OfficeUpdateSpec>(plan.request.input.clone())
+            .map_err(|error| format!("office.update input could not be decoded: {error}"))?;
+        let result = self.client.update_office_artifact(&spec)?;
+        if result.app != spec.app {
+            return Err("office.update executor reported a different Office app".to_string());
+        }
+        if result.bytes == 0 {
+            return Err("office.update executor reported an empty artifact".to_string());
+        }
+        if result.path.trim().is_empty()
+            || result.artifact_kind.trim().is_empty()
+            || result.summary.trim().is_empty()
+        {
+            return Err("office.update executor returned incomplete artifact metadata".to_string());
+        }
+        let expected_name = Path::new(&spec.path).file_name();
+        let actual_name = Path::new(&result.path).file_name();
+        if expected_name.is_none() || expected_name != actual_name {
+            return Err(
+                "office.update executor reported a different artifact filename".to_string(),
+            );
+        }
+
+        Ok(ToolExecutionOutput {
+            output: serde_json::to_value(&result).map_err(event_store_error)?,
+            evidence: vec![ToolEvidence {
+                kind: "office_artifact_update".to_string(),
+                reference: result.path.clone(),
+                summary: format!(
+                    "Updated a verified {} artifact to {} binary bytes: {}.",
+                    result.app.user_facing_name(),
+                    result.bytes,
+                    result.summary
+                ),
+            }],
+            verification: ToolVerificationResult::passed(format!(
+                "office.update verified app identity, filename, artifact kind, update summary, and {} binary bytes",
+                result.bytes
+            )),
+        })
+    }
+}
+
+struct FileReadAgentToolExecutor<'a, T: FileContentClient + ?Sized> {
+    client: &'a T,
+}
+
+impl<T: FileContentClient + ?Sized> AgentToolExecutor for FileReadAgentToolExecutor<'_, T> {
+    fn execute(&self, plan: &ToolExecutionPlan) -> Result<ToolExecutionOutput, String> {
+        if plan.contract.id != FILE_READ_TOOL_ID {
+            return Err(format!(
+                "file read executor cannot execute `{}`",
+                plan.contract.id
+            ));
+        }
+        let path = plan.request.input["path"]
+            .as_str()
+            .ok_or_else(|| "file.read requires a string path".to_string())?;
+        let purpose = plan.request.input["summary"]
+            .as_str()
+            .ok_or_else(|| "file.read requires a string summary".to_string())?;
+        let file = self.client.read_file(path)?;
+        if Path::new(&file.path) != Path::new(path) {
+            return Err("file.read executor reported a different file path".to_string());
+        }
+        let expected_bytes = file.text.len() as u64;
+        if file.bytes != expected_bytes {
+            return Err(format!(
+                "file.read expected {expected_bytes} UTF-8 bytes but executor reported {}",
+                file.bytes
+            ));
+        }
+        if !file.encoding.eq_ignore_ascii_case("utf-8") {
+            return Err(format!(
+                "file.read verification requires utf-8 content, got `{}`",
+                file.encoding
+            ));
+        }
+
+        Ok(ToolExecutionOutput {
+            output: serde_json::to_value(&file).map_err(event_store_error)?,
+            evidence: vec![ToolEvidence {
+                kind: "file_content".to_string(),
+                reference: file.path.clone(),
+                summary: format!("{purpose} Verified {expected_bytes} UTF-8 bytes."),
+            }],
+            verification: ToolVerificationResult::passed(format!(
+                "file.read verified the file path and {expected_bytes} UTF-8 bytes"
+            )),
+        })
+    }
+}
+
+const BROWSER_BROWSE_TEXT_CHAR_LIMIT: usize = 20_000;
+const BROWSER_BROWSE_TITLE_CHAR_LIMIT: usize = 500;
+const NETWORK_SEARCH_RESULT_LIMIT: usize = 10;
+
+struct BrowserBrowseAgentToolExecutor<'a, T: BrowserPageClient + ?Sized> {
+    client: &'a T,
+}
+
+impl<T: BrowserPageClient + ?Sized> AgentToolExecutor for BrowserBrowseAgentToolExecutor<'_, T> {
+    fn execute(&self, plan: &ToolExecutionPlan) -> Result<ToolExecutionOutput, String> {
+        if plan.contract.id != BROWSER_BROWSE_TOOL_ID {
+            return Err(format!(
+                "browser browse executor cannot execute `{}`",
+                plan.contract.id
+            ));
+        }
+        let requested_url = plan.request.input["url"]
+            .as_str()
+            .ok_or_else(|| "browser.browse requires a string url".to_string())?;
+        let purpose = plan.request.input["summary"]
+            .as_str()
+            .ok_or_else(|| "browser.browse requires a string summary".to_string())?;
+        let requested_url = validate_public_http_url_syntax(requested_url)?.to_string();
+        let page = self.client.fetch_page(&requested_url)?;
+        let final_url = validate_public_http_url_syntax(&page.final_url)?.to_string();
+        let text = page.text.trim();
+        if text.is_empty() {
+            return Err("browser.browse returned no readable page text".to_string());
+        }
+        let text = text
+            .chars()
+            .take(BROWSER_BROWSE_TEXT_CHAR_LIMIT)
+            .collect::<String>();
+        let title = page
+            .title
+            .trim()
+            .chars()
+            .take(BROWSER_BROWSE_TITLE_CHAR_LIMIT)
+            .collect::<String>();
+        let text_chars = text.chars().count();
+
+        Ok(ToolExecutionOutput {
+            output: serde_json::json!({
+                "requested_url": requested_url,
+                "final_url": final_url,
+                "title": title,
+                "text": text,
+            }),
+            evidence: vec![ToolEvidence {
+                kind: "browser_page".to_string(),
+                reference: final_url,
+                summary: format!("{purpose} Verified {text_chars} bounded page-text characters."),
+            }],
+            verification: ToolVerificationResult::passed(format!(
+                "browser.browse verified the final public URL and {text_chars} page-text characters"
+            )),
+        })
+    }
+}
+
+struct BrowserOpenAgentToolExecutor<'a, T: BrowserUrlOpener + ?Sized> {
+    opener: &'a T,
+}
+
+impl<T: BrowserUrlOpener + ?Sized> AgentToolExecutor for BrowserOpenAgentToolExecutor<'_, T> {
+    fn execute(&self, plan: &ToolExecutionPlan) -> Result<ToolExecutionOutput, String> {
+        if plan.contract.id != BROWSER_OPEN_TOOL_ID {
+            return Err(format!(
+                "browser open executor cannot execute `{}`",
+                plan.contract.id
+            ));
+        }
+        let url = plan.request.input["url"]
+            .as_str()
+            .ok_or_else(|| "browser.open requires a string url".to_string())?;
+        let preferred_browser = plan.request.input["preferred_browser"]
+            .as_str()
+            .ok_or_else(|| "browser.open requires a preferred_browser string".to_string())?;
+        let summary = plan.request.input["summary"]
+            .as_str()
+            .ok_or_else(|| "browser.open requires a summary string".to_string())?;
+        let preferred_browser = (preferred_browser == "chrome").then_some("chrome");
+        let outcome = self.opener.open_url(url, preferred_browser)?;
+        if outcome.browser_label.trim().is_empty() {
+            return Err("browser.open executor returned no browser label".to_string());
+        }
+        let fallback_note = outcome.fallback_note.unwrap_or_default();
+
+        Ok(ToolExecutionOutput {
+            output: serde_json::json!({
+                "url": url,
+                "browser_label": outcome.browser_label,
+                "fallback_note": fallback_note,
+            }),
+            evidence: vec![ToolEvidence {
+                kind: "browser_open_receipt".to_string(),
+                reference: url.to_string(),
+                summary: format!("{summary} Opened with {}.", outcome.browser_label),
+            }],
+            verification: ToolVerificationResult::passed(format!(
+                "browser.open verified URL identity and launcher `{}`",
+                outcome.browser_label
+            )),
+        })
+    }
+}
+
+struct OperationsBriefingAgentToolExecutor<'a, T: EvidenceFolderClient + ?Sized> {
+    client: &'a T,
+}
+
+impl<T: EvidenceFolderClient> AgentToolExecutor for OperationsBriefingAgentToolExecutor<'_, T> {
+    fn execute(&self, plan: &ToolExecutionPlan) -> Result<ToolExecutionOutput, String> {
+        if plan.contract.id != OPERATIONS_BRIEFING_TOOL_ID {
+            return Err(format!(
+                "operations briefing executor cannot execute `{}`",
+                plan.contract.id
+            ));
+        }
+        let evidence_folder_path = plan.request.input["evidence_folder_path"]
+            .as_str()
+            .ok_or_else(|| {
+                "operations.briefing requires an evidence_folder_path string".to_string()
+            })?;
+        let purpose = plan.request.input["summary"]
+            .as_str()
+            .ok_or_else(|| "operations.briefing requires a summary string".to_string())?;
+        let outcome = build_operations_briefing_run(
+            OperationsBriefingRequest {
+                access_mode: AccessMode::FullAccess,
+                evidence_folder_path: evidence_folder_path.to_string(),
+                approval_granted: true,
+            },
+            self.client,
+        )?;
+        if outcome.evidence_invocation.status != CapabilityInvocationStatus::Succeeded {
+            let error = outcome
+                .evidence_invocation
+                .warnings
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "evidence folder ingestion did not succeed".to_string());
+            return Err(format!("operations.briefing evidence read failed: {error}"));
+        }
+        let mut run = outcome.run;
+        run.evidence_invocation_id = Some(plan.invocation_id);
+        if run.workflow_id != OPERATIONS_BRIEFING_WORKFLOW_ID
+            || run.status != OperationsBriefingRunStatus::DraftReady
+        {
+            return Err(
+                "operations.briefing did not produce a draft-ready workflow run".to_string(),
+            );
+        }
+        let verified_evidence_path = run
+            .evidence_folder_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                "operations.briefing run is missing its evidence folder reference".to_string()
+            })?;
+        if Path::new(&verified_evidence_path) != Path::new(evidence_folder_path) {
+            return Err("operations.briefing run reported a different evidence folder".to_string());
+        }
+        if run.summary.trim().is_empty() || run.context_receipt.validation_results.is_empty() {
+            return Err(
+                "operations.briefing run is missing summary or validation evidence".to_string(),
+            );
+        }
+        let workflow_run_id = run.id;
+        let summary = run.summary.clone();
+
+        Ok(ToolExecutionOutput {
+            output: serde_json::json!({
+                "workflow_run_id": workflow_run_id,
+                "status": run.status,
+                "evidence_folder_path": verified_evidence_path.clone(),
+                "summary": summary,
+                "run": run,
+            }),
+            evidence: vec![ToolEvidence {
+                kind: "operations_briefing_draft".to_string(),
+                reference: verified_evidence_path,
+                summary: format!(
+                    "{purpose} Produced verified draft-ready workflow run {workflow_run_id}."
+                ),
+            }],
+            verification: ToolVerificationResult::passed(format!(
+                "operations briefing draft ready; verified evidence identity, context receipt, and workflow run {workflow_run_id}"
+            )),
+        })
+    }
+}
+
+struct NetworkSearchAgentToolExecutor<'a, T: NetworkSearchClient + ?Sized> {
+    client: &'a T,
+}
+
+impl<T: NetworkSearchClient + ?Sized> AgentToolExecutor for NetworkSearchAgentToolExecutor<'_, T> {
+    fn execute(&self, plan: &ToolExecutionPlan) -> Result<ToolExecutionOutput, String> {
+        if plan.contract.id != NETWORK_SEARCH_TOOL_ID {
+            return Err(format!(
+                "network search executor cannot execute `{}`",
+                plan.contract.id
+            ));
+        }
+        let query = plan.request.input["query"]
+            .as_str()
+            .ok_or_else(|| "network.search requires a string query".to_string())?
+            .trim();
+        let scope = plan.request.input["scope"]
+            .as_str()
+            .ok_or_else(|| "network.search requires a string scope".to_string())?
+            .trim();
+        let purpose = plan.request.input["summary"]
+            .as_str()
+            .ok_or_else(|| "network.search requires a string summary".to_string())?
+            .trim();
+        let result = self.client.search(query, scope)?;
+        if result.provider.trim().is_empty() {
+            return Err("network.search returned no source adapter label".to_string());
+        }
+        if result.query.trim() != query || result.scope.trim() != scope {
+            return Err("network.search executor reported different query metadata".to_string());
+        }
+        if result.items.is_empty() {
+            return Err("network.search returned no source links".to_string());
+        }
+        if result.items.len() > NETWORK_SEARCH_RESULT_LIMIT {
+            return Err(format!(
+                "network.search returned {} items, exceeding the limit of {NETWORK_SEARCH_RESULT_LIMIT}",
+                result.items.len()
+            ));
+        }
+        let search_url = validate_public_http_url_syntax(&result.search_url)?.to_string();
+        let mut verified_items = Vec::with_capacity(result.items.len());
+        for (index, item) in result.items.into_iter().enumerate() {
+            let title = item.title.trim();
+            if title.is_empty() {
+                return Err(format!("network.search result {} has no title", index + 1));
+            }
+            let url = validate_public_http_url_syntax(&item.url)?.to_string();
+            verified_items.push(NetworkSearchResultItem {
+                title: title.to_string(),
+                url,
+                snippet: item.snippet.trim().to_string(),
+            });
+        }
+        let source_count = verified_items.len();
+        let output = NetworkSearchResult {
+            provider: result.provider.trim().to_string(),
+            query: query.to_string(),
+            scope: scope.to_string(),
+            search_url: search_url.clone(),
+            items: verified_items,
+        };
+
+        Ok(ToolExecutionOutput {
+            output: serde_json::to_value(&output).map_err(event_store_error)?,
+            evidence: vec![ToolEvidence {
+                kind: "source_links".to_string(),
+                reference: search_url,
+                summary: format!("{purpose} Verified {source_count} public source links."),
+            }],
+            verification: ToolVerificationResult::passed(format!(
+                "network.search verified query metadata and {source_count} public source links"
+            )),
+        })
+    }
+}
+
+struct ComputerScreenshotAgentToolExecutor<'a, T: ComputerScreenshotClient + ?Sized> {
+    client: &'a T,
+}
+
+impl<T: ComputerScreenshotClient + ?Sized> AgentToolExecutor
+    for ComputerScreenshotAgentToolExecutor<'_, T>
+{
+    fn execute(&self, plan: &ToolExecutionPlan) -> Result<ToolExecutionOutput, String> {
+        if plan.contract.id != COMPUTER_SCREENSHOT_TOOL_ID {
+            return Err(format!(
+                "computer screenshot executor cannot execute `{}`",
+                plan.contract.id
+            ));
+        }
+        let purpose = plan.request.input["summary"]
+            .as_str()
+            .ok_or_else(|| "computer.screenshot requires a string summary".to_string())?
+            .trim();
+        let screenshot = self.client.capture_screenshot()?;
+        let display_label = screenshot.display_label.trim();
+        let evidence_ref = screenshot.evidence_ref.trim();
+        if display_label.is_empty() {
+            return Err("computer.screenshot returned no display label".to_string());
+        }
+        if evidence_ref.is_empty() {
+            return Err("computer.screenshot returned no durable evidence reference".to_string());
+        }
+        if screenshot.width == 0 || screenshot.height == 0 {
+            return Err("computer.screenshot returned empty dimensions".to_string());
+        }
+        let dimensions = format!("{}x{}", screenshot.width, screenshot.height);
+
+        Ok(ToolExecutionOutput {
+            output: serde_json::json!({
+                "display_label": display_label,
+                "evidence_ref": evidence_ref,
+                "width": screenshot.width,
+                "height": screenshot.height,
+                "captured_at": screenshot.captured_at.to_rfc3339(),
+            }),
+            evidence: vec![ToolEvidence {
+                kind: "screenshot_image".to_string(),
+                reference: evidence_ref.to_string(),
+                summary: format!("{purpose} Captured {display_label} at {dimensions}."),
+            }],
+            verification: ToolVerificationResult::passed(format!(
+                "computer.screenshot verified {dimensions} image evidence for {display_label}"
+            )),
+        })
+    }
+}
+
+struct ComputerControlAgentToolExecutor<'a, T: ComputerControlClient + ?Sized> {
+    client: &'a T,
+}
+
+impl<T: ComputerControlClient + ?Sized> AgentToolExecutor
+    for ComputerControlAgentToolExecutor<'_, T>
+{
+    fn execute(&self, plan: &ToolExecutionPlan) -> Result<ToolExecutionOutput, String> {
+        if plan.contract.id != COMPUTER_CONTROL_TOOL_ID {
+            return Err(format!(
+                "computer control executor cannot execute `{}`",
+                plan.contract.id
+            ));
+        }
+        let target = plan.request.input["target"]
+            .as_str()
+            .ok_or_else(|| "computer.control requires a string target".to_string())?
+            .trim();
+        let action = plan.request.input["action"]
+            .as_str()
+            .ok_or_else(|| "computer.control requires a string action".to_string())?
+            .trim();
+        let purpose = plan.request.input["summary"]
+            .as_str()
+            .ok_or_else(|| "computer.control requires a string summary".to_string())?
+            .trim();
+        let structured_action = parse_computer_control_action(action)?;
+        let action_summary = structured_action.audit_summary();
+        let execution = self.client.execute_control(target, &structured_action)?;
+        let execution_summary = execution.summary.trim();
+        if execution_summary.is_empty() {
+            return Err("computer.control executor returned no acknowledgement".to_string());
+        }
+
+        Ok(ToolExecutionOutput {
+            output: serde_json::json!({
+                "target": target,
+                "action": action_summary,
+                "summary": execution_summary,
+            }),
+            evidence: vec![ToolEvidence {
+                kind: "computer_control_receipt".to_string(),
+                reference: "computer://foreground_desktop".to_string(),
+                summary: format!("{purpose} Executor acknowledged: {action_summary}."),
+            }],
+            verification: ToolVerificationResult::passed(format!(
+                "computer.control verified the structured action and execution receipt; visible task state still requires a screenshot"
+            )),
+        })
+    }
+}
+
+struct SkillActivateAgentToolExecutor {
+    activation: Result<SkillActivationContext, String>,
+}
+
+impl AgentToolExecutor for SkillActivateAgentToolExecutor {
+    fn execute(&self, plan: &ToolExecutionPlan) -> Result<ToolExecutionOutput, String> {
+        if plan.contract.id != SKILL_ACTIVATE_TOOL_ID {
+            return Err(format!(
+                "skill activation executor cannot execute `{}`",
+                plan.contract.id
+            ));
+        }
+        let activation = self.activation.as_ref().map_err(Clone::clone)?;
+        let requested_skill_id = plan.request.input["skill_id"]
+            .as_str()
+            .ok_or_else(|| "skill.activate requires a string skill_id".to_string())?;
+        let requested_summary = plan.request.input["input_summary"]
+            .as_str()
+            .ok_or_else(|| "skill.activate requires a string input_summary".to_string())?;
+        if requested_skill_id.trim() != activation.skill_id.to_string() {
+            return Err("skill activation returned a different skill id".to_string());
+        }
+        if requested_summary.trim() != activation.input_summary {
+            return Err("skill activation returned a different input summary".to_string());
+        }
+        if activation.instructions.trim().is_empty() {
+            return Err("skill activation returned empty instructions".to_string());
+        }
+        let evidence_ref = format!(
+            "skill://{}/{}",
+            activation.skill_id, activation.entry_sha256
+        );
+        Ok(ToolExecutionOutput {
+            output: serde_json::to_value(activation).map_err(event_store_error)?,
+            evidence: vec![ToolEvidence {
+                kind: "skill_context".to_string(),
+                reference: evidence_ref,
+                summary: format!(
+                    "Activated {} v{} from a hash-verified {} entry.",
+                    activation.skill_name, activation.skill_version, activation.entry_kind
+                ),
+            }],
+            verification: ToolVerificationResult::passed(format!(
+                "skill.activate verified enabled trust state and entry SHA-256 {}",
+                activation.entry_sha256
+            )),
+        })
+    }
+}
+
+struct FileSystemMutationAgentToolExecutor<'a, T: FileSystemMutationClient + ?Sized> {
+    client: &'a T,
+}
+
+impl<T: FileSystemMutationClient + ?Sized> AgentToolExecutor
+    for FileSystemMutationAgentToolExecutor<'_, T>
+{
+    fn execute(&self, plan: &ToolExecutionPlan) -> Result<ToolExecutionOutput, String> {
+        if plan.contract.id != FILESYSTEM_MUTATE_TOOL_ID {
+            return Err(format!(
+                "filesystem mutation executor cannot execute `{}`",
+                plan.contract.id
+            ));
+        }
+        let operation_name = plan.request.input["operation"]
+            .as_str()
+            .ok_or_else(|| "filesystem.mutate requires a string operation".to_string())?;
+        let operation = filesystem_mutation_operation_from_tool_name(operation_name)?;
+        let path = plan.request.input["path"]
+            .as_str()
+            .ok_or_else(|| "filesystem.mutate requires a string path".to_string())?;
+        let destination = plan.request.input["destination"].as_str();
+        let content = plan.request.input["content"].as_str();
+        let purpose = plan.request.input["summary"]
+            .as_str()
+            .ok_or_else(|| "filesystem.mutate requires a string summary".to_string())?;
+
+        let result = self.client.mutate(operation, path, destination, content)?;
+        verify_filesystem_mutation_postcondition(operation, path, destination, content, &result)?;
+        let evidence_reference = destination.unwrap_or(path).to_string();
+        let output = serde_json::json!({
+            "operation": operation_name,
+            "path": result.path,
+            "destination": result.destination,
+            "bytes": result.bytes,
+            "summary": result.summary,
+        });
+
+        Ok(ToolExecutionOutput {
+            output,
+            evidence: vec![ToolEvidence {
+                kind: "filesystem_state".to_string(),
+                reference: evidence_reference,
+                summary: format!("{purpose} Postcondition verified for `{operation_name}`."),
+            }],
+            verification: ToolVerificationResult::passed(format!(
+                "filesystem.mutate verified the `{operation_name}` postcondition on disk"
+            )),
+        })
+    }
+}
+
+fn filesystem_mutation_operation_from_tool_name(
+    operation: &str,
+) -> Result<FileSystemMutationOperation, String> {
+    match operation {
+        "create_file" => Ok(FileSystemMutationOperation::CreateFile),
+        "update_file" => Ok(FileSystemMutationOperation::UpdateFile),
+        "delete_file" => Ok(FileSystemMutationOperation::DeleteFile),
+        "rename_file" => Ok(FileSystemMutationOperation::RenameFile),
+        "create_directory" => Ok(FileSystemMutationOperation::CreateDirectory),
+        "rename_directory" => Ok(FileSystemMutationOperation::RenameDirectory),
+        "delete_directory" => Ok(FileSystemMutationOperation::DeleteDirectory),
+        _ => Err(format!(
+            "filesystem.mutate operation `{operation}` is unsupported"
+        )),
+    }
+}
+
+fn filesystem_mutation_tool_name(operation: FileSystemMutationOperation) -> &'static str {
+    match operation {
+        FileSystemMutationOperation::CreateFile => "create_file",
+        FileSystemMutationOperation::UpdateFile => "update_file",
+        FileSystemMutationOperation::DeleteFile => "delete_file",
+        FileSystemMutationOperation::RenameFile => "rename_file",
+        FileSystemMutationOperation::CreateDirectory => "create_directory",
+        FileSystemMutationOperation::RenameDirectory => "rename_directory",
+        FileSystemMutationOperation::DeleteDirectory => "delete_directory",
+    }
+}
+
+fn verify_filesystem_mutation_postcondition(
+    operation: FileSystemMutationOperation,
+    path: &str,
+    destination: Option<&str>,
+    content: Option<&str>,
+    result: &crate::kernel::capability::FileSystemMutationResult,
+) -> Result<(), String> {
+    if Path::new(&result.path) != Path::new(path) {
+        return Err("filesystem.mutate executor reported a different source path".to_string());
+    }
+    if result.destination.as_deref() != destination {
+        return Err("filesystem.mutate executor reported a different destination path".to_string());
+    }
+
+    let path = Path::new(path);
+    match operation {
+        FileSystemMutationOperation::CreateFile | FileSystemMutationOperation::UpdateFile => {
+            let expected = content
+                .ok_or_else(|| "filesystem.mutate verification requires content".to_string())?
+                .as_bytes();
+            let actual = fs::read(path).map_err(|error| {
+                format!(
+                    "filesystem.mutate could not verify file `{}`: {error}",
+                    path.display()
+                )
+            })?;
+            if actual != expected {
+                return Err("filesystem.mutate verification found different file bytes".to_string());
+            }
+            if result.bytes != expected.len() as u64 {
+                return Err(format!(
+                    "filesystem.mutate expected {} bytes but executor reported {}",
+                    expected.len(),
+                    result.bytes
+                ));
+            }
+        }
+        FileSystemMutationOperation::DeleteFile | FileSystemMutationOperation::DeleteDirectory => {
+            if path.exists() {
+                return Err(format!(
+                    "filesystem.mutate verification found `{}` still present",
+                    path.display()
+                ));
+            }
+        }
+        FileSystemMutationOperation::RenameFile => {
+            let destination = Path::new(destination.ok_or_else(|| {
+                "filesystem.mutate rename verification requires a destination".to_string()
+            })?);
+            if path.exists() || !destination.is_file() {
+                return Err("filesystem.mutate could not verify the renamed file".to_string());
+            }
+        }
+        FileSystemMutationOperation::CreateDirectory => {
+            if !path.is_dir() {
+                return Err("filesystem.mutate could not verify the created directory".to_string());
+            }
+        }
+        FileSystemMutationOperation::RenameDirectory => {
+            let destination = Path::new(destination.ok_or_else(|| {
+                "filesystem.mutate rename verification requires a destination".to_string()
+            })?);
+            if path.exists() || !destination.is_dir() {
+                return Err("filesystem.mutate could not verify the renamed directory".to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
+const TERMINAL_READ_OUTPUT_CHAR_LIMIT: usize = 4_000;
+
+struct TerminalReadAgentToolExecutor<'a, T: TerminalReadClient + ?Sized> {
+    client: &'a T,
+}
+
+impl<T: TerminalReadClient + ?Sized> AgentToolExecutor for TerminalReadAgentToolExecutor<'_, T> {
+    fn execute(&self, plan: &ToolExecutionPlan) -> Result<ToolExecutionOutput, String> {
+        if plan.contract.id != TERMINAL_READ_TOOL_ID {
+            return Err(format!(
+                "terminal read executor cannot execute `{}`",
+                plan.contract.id
+            ));
+        }
+        let command = plan.request.input["command"]
+            .as_str()
+            .ok_or_else(|| "terminal.read requires a string command".to_string())?;
+        let purpose = plan.request.input["summary"]
+            .as_str()
+            .ok_or_else(|| "terminal.read requires a string summary".to_string())?;
+        let normalized_command = normalize_terminal_read_command(command)?;
+        let output = self.client.run_readonly_command(&normalized_command)?;
+        if output.command != normalized_command {
+            return Err("terminal.read executor reported a different command".to_string());
+        }
+        if output.exit_code != 0 {
+            return Err(format!(
+                "terminal.read command exited with code {}: {}",
+                output.exit_code,
+                output.stderr.trim()
+            ));
+        }
+        if output.stdout.chars().count() > TERMINAL_READ_OUTPUT_CHAR_LIMIT
+            || output.stderr.chars().count() > TERMINAL_READ_OUTPUT_CHAR_LIMIT
+        {
+            return Err(format!(
+                "terminal.read output exceeded the {TERMINAL_READ_OUTPUT_CHAR_LIMIT}-character evidence limit"
+            ));
+        }
+        let stdout_chars = output.stdout.chars().count();
+
+        Ok(ToolExecutionOutput {
+            output: serde_json::to_value(&output).map_err(event_store_error)?,
+            evidence: vec![ToolEvidence {
+                kind: "terminal_output".to_string(),
+                reference: normalized_command,
+                summary: format!("{purpose} Verified zero exit code and {stdout_chars} stdout characters."),
+            }],
+            verification: ToolVerificationResult::passed(format!(
+                "terminal.read verified a zero exit code and bounded output ({stdout_chars} stdout characters)"
+            )),
+        })
+    }
+}
+
+fn append_agent_tool_invocation_audit(
+    store: &EventStore,
+    invocation: &ToolInvocationRecord,
+) -> Result<(), String> {
+    store
+        .append_tool_invocation(invocation)
+        .map_err(event_store_error)?;
+    store
+        .append_capability_invocation(&capability_invocation_from_tool_record(invocation))
+        .map_err(event_store_error)
+}
+
+fn append_agent_tool_run_transition(
+    store: &EventStore,
+    plan: &ToolExecutionPlan,
+    status: AgentRunStatus,
+    reason: impl Into<String>,
+) -> Result<(), String> {
+    let Some(run_id) = plan.request.run_id else {
+        return Ok(());
+    };
+    let transition =
+        AgentRunTransition::new(run_id, status, reason.into(), Some(plan.invocation_id))
+            .map_err(event_store_error)?;
+    store
+        .append_agent_run_transition(&transition)
+        .map_err(event_store_error)
+}
+
+fn blocked_agent_tool_authorization(
+    store: &EventStore,
+    plan: &ToolExecutionPlan,
+    reason: impl Into<String>,
+    transition_run: bool,
+) -> Result<AgentToolAuthorization, String> {
+    let reason = reason.into();
+    let invocation = ToolInvocationRecord::blocked(plan, reason.clone());
+    append_agent_tool_invocation_audit(store, &invocation)?;
+    if transition_run {
+        append_agent_tool_run_transition(store, plan, AgentRunStatus::Blocked, reason)?;
+    }
+    Ok(AgentToolAuthorization::Finished(invocation))
+}
+
+fn ready_agent_tool_authorization(
+    store: &EventStore,
+    plan: ToolExecutionPlan,
+    approval_request_id: Option<Uuid>,
+) -> Result<AgentToolAuthorization, String> {
+    if let Some(resource) = &plan.contract.constraints.resource {
+        let access = match resource.access {
+            ToolResourceAccess::Read => AgentRunResourceAccess::Read,
+            ToolResourceAccess::Write => AgentRunResourceAccess::Write,
+        };
+        let claim = AgentRunResourceClaim::new(
+            plan.request.run_id,
+            plan.invocation_id,
+            resource.key.clone(),
+            access,
+            resource.lease_seconds,
+        )
+        .map_err(event_store_error)?;
+        match store.claim_agent_run_resource(claim) {
+            Ok(_) => {}
+            Err(EventStoreError::InvalidState(reason)) => {
+                return blocked_agent_tool_authorization(store, &plan, reason, true);
+            }
+            Err(error) => return Err(event_store_error(error)),
+        }
+    }
+
+    let authorized = AuthorizedAgentToolExecution {
+        plan,
+        approval_request_id,
+    };
+    if let Err(error) = store.append_tool_invocation(&ToolInvocationRecord::running(
+        &authorized.plan,
+        authorized.approval_request_id,
+    )) {
+        let _ = store.release_agent_run_resources_for_invocation(
+            authorized.plan.invocation_id,
+            "authorization audit failed before executor start".to_string(),
+        );
+        return Err(event_store_error(error));
+    }
+    if let Err(error) = append_agent_tool_run_transition(
+        store,
+        &authorized.plan,
+        AgentRunStatus::Running,
+        format!("Tool `{}` is executing.", authorized.plan.contract.id),
+    ) {
+        let _ = store.release_agent_run_resources_for_invocation(
+            authorized.plan.invocation_id,
+            "authorization failed before executor start".to_string(),
+        );
+        return Err(error);
+    }
+    Ok(AgentToolAuthorization::Ready(authorized))
+}
+
+fn bind_agent_tool_plan_to_grant(
+    store: &EventStore,
+    plan: &mut ToolExecutionPlan,
+    grant: &CapabilityAccessRecord,
+) -> Result<(), String> {
+    match grant.grant_state {
+        CapabilityGrantState::Reusable => Ok(()),
+        CapabilityGrantState::OneShotAvailable => {
+            let fingerprint = tool_request_fingerprint(&plan.request);
+            let pending = store
+                .list_tool_invocations()
+                .map_err(event_store_error)?
+                .into_iter()
+                .find(|invocation| {
+                    invocation.status == ToolExecutionStatus::WaitingForConfirmation
+                        && invocation.approval_request_id == Some(grant.request.id)
+                        && invocation.tool_id == plan.contract.id
+                        && invocation.run_id == plan.request.run_id
+                        && !invocation.request_fingerprint.is_empty()
+                        && invocation.request_fingerprint == fingerprint
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "one-shot approval {} is not bound to this exact `{}` tool request",
+                        grant.request.id, plan.contract.id
+                    )
+                })?;
+            plan.invocation_id = pending.id;
+            Ok(())
+        }
+        CapabilityGrantState::NotGranted | CapabilityGrantState::OneShotConsumed => Err(format!(
+            "local permission grant {} is not available for tool execution",
+            grant.request.id
+        )),
+    }
+}
+
+fn authorize_agent_tool_execution(
+    store: &EventStore,
+    request: ToolExecutionRequest,
+) -> Result<AgentToolAuthorization, String> {
+    let plan = prepare_tool_execution(&request)?;
+    if let Some(run_id) = plan.request.run_id {
+        let record = store
+            .list_agent_run_records()
+            .map_err(event_store_error)?
+            .into_iter()
+            .find(|record| record.id == run_id)
+            .ok_or_else(|| format!("agent run {run_id} does not exist"))?;
+        if record.cancel_requested || record.status == AgentRunStatus::CancelRequested {
+            return blocked_agent_tool_authorization(
+                store,
+                &plan,
+                format!("agent run {run_id} was cancelled before tool dispatch"),
+                false,
+            );
+        }
+        if matches!(
+            record.status,
+            AgentRunStatus::Completed | AgentRunStatus::Failed | AgentRunStatus::Cancelled
+        ) {
+            return blocked_agent_tool_authorization(
+                store,
+                &plan,
+                format!(
+                    "agent run {run_id} is already terminal with status {:?}",
+                    record.status
+                ),
+                false,
+            );
+        }
+    }
+    if plan.request.run_id.is_some() {
+        let fingerprint = tool_request_fingerprint(&plan.request);
+        if let Some(invocation) = store
+            .list_tool_invocations()
+            .map_err(event_store_error)?
+            .into_iter()
+            .find(|invocation| {
+                invocation.run_id == plan.request.run_id
+                    && invocation.tool_id == plan.contract.id
+                    && invocation.status == ToolExecutionStatus::Succeeded
+                    && invocation.verification.passed
+                    && !invocation.evidence.is_empty()
+                    && !invocation.request_fingerprint.is_empty()
+                    && invocation.request_fingerprint == fingerprint
+            })
+        {
+            return Ok(AgentToolAuthorization::Finished(invocation));
+        }
+    }
+    if let Err(reason) = validate_agent_tool_local_constraints(&plan) {
+        return blocked_agent_tool_authorization(store, &plan, reason, true);
+    }
+    match plan.policy_decision {
+        PolicyDecision::Allow => ready_agent_tool_authorization(store, plan, None),
+        PolicyDecision::Ask => {
+            let fingerprint = tool_request_fingerprint(&plan.request);
+            let invocations = store.list_tool_invocations().map_err(event_store_error)?;
+            let available_grant = store
+                .list_capability_access_records()
+                .map_err(event_store_error)?
+                .into_iter()
+                .find(|record| {
+                    if record.request.capability != plan.contract.capability {
+                        return false;
+                    }
+                    match record.grant_state {
+                        CapabilityGrantState::Reusable => true,
+                        CapabilityGrantState::OneShotAvailable => {
+                            invocations.iter().any(|invocation| {
+                                invocation.status == ToolExecutionStatus::WaitingForConfirmation
+                                    && invocation.approval_request_id == Some(record.request.id)
+                                    && invocation.tool_id == plan.contract.id
+                                    && invocation.run_id == plan.request.run_id
+                                    && !invocation.request_fingerprint.is_empty()
+                                    && invocation.request_fingerprint == fingerprint
+                            })
+                        }
+                        CapabilityGrantState::NotGranted
+                        | CapabilityGrantState::OneShotConsumed => false,
+                    }
+                });
+            if let Some(grant) = available_grant {
+                let mut plan = plan;
+                if let Err(reason) = bind_agent_tool_plan_to_grant(store, &mut plan, &grant) {
+                    return blocked_agent_tool_authorization(store, &plan, reason, true);
+                }
+                return ready_agent_tool_authorization(store, plan, Some(grant.request.id));
+            }
+
+            let pending_request_id = store
+                .list_pending_capability_access_records()
+                .map_err(event_store_error)?
+                .into_iter()
+                .find(|record| {
+                    record.request.capability == plan.contract.capability
+                        && invocations.iter().any(|invocation| {
+                            invocation.status == ToolExecutionStatus::WaitingForConfirmation
+                                && invocation.approval_request_id == Some(record.request.id)
+                                && invocation.tool_id == plan.contract.id
+                                && invocation.run_id == plan.request.run_id
+                                && !invocation.request_fingerprint.is_empty()
+                                && invocation.request_fingerprint == fingerprint
+                        })
+                })
+                .map(|record| record.request.id);
+            let approval_request_id = match pending_request_id {
+                Some(request_id) => request_id,
+                None => {
+                    let request = build_capability_access_request(
+                        plan.request.access_mode,
+                        plan.contract.capability,
+                    )?;
+                    let entry = PermissionAuditEntry::evaluate(
+                        plan.request.access_mode,
+                        plan.contract.capability,
+                    );
+                    store
+                        .append_capability_access_request(&request)
+                        .map_err(event_store_error)?;
+                    store
+                        .append_permission_audit_entry(&entry)
+                        .map_err(event_store_error)?;
+                    request.id
+                }
+            };
+            let invocation =
+                ToolInvocationRecord::waiting_for_confirmation(&plan, approval_request_id);
+            store
+                .append_tool_invocation(&invocation)
+                .map_err(event_store_error)?;
+            store
+                .append_capability_invocation(&capability_invocation_from_tool_record(&invocation))
+                .map_err(event_store_error)?;
+            append_agent_tool_run_transition(
+                store,
+                &plan,
+                AgentRunStatus::WaitingForConfirmation,
+                format!(
+                    "Tool `{}` is waiting for local permission approval.",
+                    plan.contract.id
+                ),
+            )?;
+            Ok(AgentToolAuthorization::Finished(invocation))
+        }
+        PolicyDecision::Deny => blocked_agent_tool_authorization(
+            store,
+            &plan,
+            "local capability policy denied this tool execution",
+            true,
+        ),
+    }
+}
+
+fn validate_agent_tool_local_constraints(plan: &ToolExecutionPlan) -> Result<(), String> {
+    if plan.contract.id == FILE_READ_TOOL_ID {
+        let path = plan.request.input["path"]
+            .as_str()
+            .ok_or_else(|| "file.read requires a string path".to_string())?;
+        let path_ref = Path::new(path);
+        if path_ref.is_absolute() {
+            enforce_local_read_path(path_ref)?;
+        } else {
+            enforce_workspace_relative_read_path(path)?;
+        }
+    }
+    if plan.contract.id == FILE_WRITE_TOOL_ID {
+        let path = plan.request.input["path"]
+            .as_str()
+            .ok_or_else(|| "file.write requires a string path".to_string())?;
+        enforce_workspace_relative_mutation_path(path)?;
+    }
+    if matches!(
+        plan.contract.id.as_str(),
+        OFFICE_CREATE_TOOL_ID | OFFICE_UPDATE_TOOL_ID
+    ) {
+        let path = plan.request.input["path"]
+            .as_str()
+            .ok_or_else(|| format!("{} requires a string path", plan.contract.id))?;
+        let path_ref = Path::new(path);
+        if path_ref.is_absolute() {
+            enforce_local_mutation_path(path_ref)?;
+        } else {
+            enforce_workspace_relative_mutation_path(path)?;
+        }
+    }
+    if plan.contract.id == OFFICE_OPEN_TOOL_ID {
+        let path = plan.request.input["path"]
+            .as_str()
+            .ok_or_else(|| "office.open requires a string path".to_string())?;
+        let path_ref = Path::new(path);
+        if path_ref.is_absolute() {
+            enforce_local_read_path(path_ref)?;
+        } else {
+            enforce_workspace_relative_read_path(path)?;
+        }
+    }
+    if plan.contract.id == FILESYSTEM_MUTATE_TOOL_ID {
+        for field in ["path", "destination"] {
+            let Some(path) = plan
+                .request
+                .input
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+            else {
+                continue;
+            };
+            let path = Path::new(path);
+            if !path.is_absolute() {
+                return Err(format!(
+                    "filesystem.mutate input field `{field}` must be an absolute local path"
+                ));
+            }
+            enforce_local_mutation_path(path)?;
+        }
+    }
+    if plan.contract.id == TERMINAL_READ_TOOL_ID {
+        let command = plan.request.input["command"]
+            .as_str()
+            .ok_or_else(|| "terminal.read requires a string command".to_string())?;
+        let normalized = normalize_terminal_read_command(command)?;
+        if let Some(path) = normalized.strip_prefix(TERMINAL_READ_DIRECTORY_LIST_PREFIX) {
+            enforce_local_read_path(Path::new(path.trim()))?;
+        }
+    }
+    if plan.contract.id == BROWSER_BROWSE_TOOL_ID {
+        let url = plan.request.input["url"]
+            .as_str()
+            .ok_or_else(|| "browser.browse requires a string url".to_string())?;
+        validate_public_http_url_syntax(url)?;
+    }
+    if plan.contract.id == BROWSER_OPEN_TOOL_ID {
+        let url = plan.request.input["url"]
+            .as_str()
+            .ok_or_else(|| "browser.open requires a string url".to_string())?;
+        if extract_safe_browser_url(url).as_deref() != Some(url) {
+            return Err("browser.open requires one normalized HTTP(S) URL".to_string());
+        }
+    }
+    if plan.contract.id == OPERATIONS_BRIEFING_TOOL_ID {
+        let path = plan.request.input["evidence_folder_path"]
+            .as_str()
+            .ok_or_else(|| {
+                "operations.briefing requires an evidence_folder_path string".to_string()
+            })?;
+        let path_ref = Path::new(path);
+        if path_ref.is_absolute() {
+            enforce_local_read_path(path_ref)?;
+        } else {
+            enforce_workspace_relative_read_path(path)?;
+        }
+    }
+    if plan.contract.id == COMPUTER_CONTROL_TOOL_ID {
+        let action = plan.request.input["action"]
+            .as_str()
+            .ok_or_else(|| "computer.control requires a string action".to_string())?;
+        parse_computer_control_action(action)?;
+    }
+    Ok(())
+}
+
+fn run_authorized_agent_tool_execution(
+    authorized: AuthorizedAgentToolExecution,
+    executor: &impl AgentToolExecutor,
+) -> ToolInvocationRecord {
+    let started_at = Instant::now();
+    match executor.execute(&authorized.plan) {
+        Ok(output) => ToolInvocationRecord::succeeded(
+            &authorized.plan,
+            output.output,
+            output.evidence,
+            output.verification,
+            authorized.approval_request_id,
+            started_at.elapsed().as_millis(),
+        )
+        .unwrap_or_else(|error| {
+            ToolInvocationRecord::failed(
+                &authorized.plan,
+                error,
+                authorized.approval_request_id,
+                started_at.elapsed().as_millis(),
+            )
+        }),
+        Err(error) => ToolInvocationRecord::failed(
+            &authorized.plan,
+            error,
+            authorized.approval_request_id,
+            started_at.elapsed().as_millis(),
+        ),
+    }
+}
+
+fn record_completed_agent_tool_execution(
+    store: &EventStore,
+    invocation: &ToolInvocationRecord,
+) -> Result<(), String> {
+    append_agent_tool_invocation_audit(store, invocation)?;
+    store
+        .release_agent_run_resources_for_invocation(
+            invocation.id,
+            format!(
+                "tool execution finished with status {:?}",
+                invocation.status
+            ),
+        )
+        .map_err(event_store_error)?;
+    if let Some(run_id) = invocation.run_id {
+        let record = store
+            .list_agent_run_records()
+            .map_err(event_store_error)?
+            .into_iter()
+            .find(|record| record.id == run_id)
+            .ok_or_else(|| format!("agent run {run_id} does not exist"))?;
+        let step = AgentRunStepRecord::new(
+            run_id,
+            record
+                .steps
+                .iter()
+                .map(|step| step.sequence)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1),
+            if invocation.status == ToolExecutionStatus::Succeeded {
+                AgentRunStepStatus::Completed
+            } else {
+                AgentRunStepStatus::Failed
+            },
+            invocation.tool_id.clone(),
+            invocation.verification.summary.clone(),
+        )
+        .map_err(event_store_error)?;
+        store
+            .append_agent_run_step(&step)
+            .map_err(event_store_error)?;
+        if !record.cancel_requested {
+            let status = match invocation.status {
+                ToolExecutionStatus::Succeeded => AgentRunStatus::Running,
+                ToolExecutionStatus::Failed | ToolExecutionStatus::Blocked => {
+                    AgentRunStatus::Blocked
+                }
+                ToolExecutionStatus::WaitingForConfirmation | ToolExecutionStatus::Running => {
+                    AgentRunStatus::Running
+                }
+            };
+            let transition = AgentRunTransition::new(
+                run_id,
+                status,
+                invocation.verification.summary.clone(),
+                Some(invocation.id),
+            )
+            .map_err(event_store_error)?;
+            store
+                .append_agent_run_transition(&transition)
+                .map_err(event_store_error)?;
+        }
+    }
+    if invocation.tool_id == SKILL_ACTIVATE_TOOL_ID
+        && invocation.status == ToolExecutionStatus::Succeeded
+    {
+        let activation = invocation
+            .output
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| "successful skill activation is missing output".to_string())
+            .and_then(|output| {
+                serde_json::from_value::<SkillActivationContext>(output).map_err(event_store_error)
+            })?;
+        let evidence_ref = invocation
+            .evidence
+            .iter()
+            .find(|evidence| evidence.kind == "skill_context")
+            .map(|evidence| evidence.reference.clone())
+            .ok_or_else(|| {
+                "successful skill activation is missing skill_context evidence".to_string()
+            })?;
+        let execution = SkillExecutionRecord::activated(
+            &activation,
+            invocation.id,
+            invocation.run_id,
+            evidence_ref,
+        )
+        .map_err(event_store_error)?;
+        store
+            .append_skill_execution(&execution)
+            .map_err(event_store_error)?;
+    }
+    Ok(())
+}
+
+fn execute_agent_tool_with_executor(
+    store: &EventStore,
+    request: ToolExecutionRequest,
+    executor: &impl AgentToolExecutor,
+) -> Result<ToolInvocationRecord, String> {
+    match authorize_agent_tool_execution(store, request)? {
+        AgentToolAuthorization::Ready(authorized) => {
+            let invocation = run_authorized_agent_tool_execution(authorized, executor);
+            record_completed_agent_tool_execution(store, &invocation)?;
+            Ok(invocation)
+        }
+        AgentToolAuthorization::Finished(invocation) => Ok(invocation),
+    }
+}
+
+fn capability_invocation_from_tool_record(
+    invocation: &ToolInvocationRecord,
+) -> CapabilityInvocation {
+    let status = match invocation.status {
+        ToolExecutionStatus::WaitingForConfirmation => CapabilityInvocationStatus::PendingApproval,
+        ToolExecutionStatus::Succeeded => CapabilityInvocationStatus::Succeeded,
+        ToolExecutionStatus::Running
+        | ToolExecutionStatus::Failed
+        | ToolExecutionStatus::Blocked => CapabilityInvocationStatus::Failed,
+    };
+    let terminal_command = invocation
+        .output
+        .as_ref()
+        .filter(|_| invocation.tool_id == TERMINAL_READ_TOOL_ID)
+        .and_then(|output| output["command"].as_str())
+        .map(ToString::to_string);
+    let file_path = invocation
+        .output
+        .as_ref()
+        .filter(|_| invocation.tool_id == FILE_READ_TOOL_ID)
+        .and_then(|output| output["path"].as_str())
+        .map(ToString::to_string);
+    let file_title = invocation
+        .output
+        .as_ref()
+        .filter(|_| invocation.tool_id == FILE_READ_TOOL_ID)
+        .and_then(|output| output["title"].as_str())
+        .map(ToString::to_string);
+    let file_excerpt = invocation
+        .output
+        .as_ref()
+        .filter(|_| invocation.tool_id == FILE_READ_TOOL_ID)
+        .and_then(|output| output["text"].as_str())
+        .map(compact_tool_evidence_excerpt);
+    let browser_output = invocation
+        .output
+        .as_ref()
+        .filter(|_| invocation.tool_id == BROWSER_BROWSE_TOOL_ID);
+    let browser_requested_url = browser_output
+        .and_then(|output| output["requested_url"].as_str())
+        .map(ToString::to_string);
+    let browser_final_url = browser_output
+        .and_then(|output| output["final_url"].as_str())
+        .map(ToString::to_string);
+    let browser_title = browser_output
+        .and_then(|output| output["title"].as_str())
+        .map(ToString::to_string);
+    let browser_excerpt = browser_output
+        .and_then(|output| output["text"].as_str())
+        .map(compact_tool_evidence_excerpt);
+    let network_output = invocation
+        .output
+        .as_ref()
+        .filter(|_| invocation.tool_id == NETWORK_SEARCH_TOOL_ID);
+    let network_resource = network_output.map(|output| {
+        let query = output["query"].as_str().unwrap_or_default();
+        let scope = output["scope"].as_str().unwrap_or_default();
+        format!("{query} ({scope})")
+    });
+    let network_search_url = network_output
+        .and_then(|output| output["search_url"].as_str())
+        .map(ToString::to_string);
+    let network_evidence_url = network_output
+        .and_then(|output| output["items"].as_array())
+        .and_then(|items| items.first())
+        .and_then(|item| item["url"].as_str())
+        .map(ToString::to_string);
+    let network_title = network_output
+        .and_then(|output| output["provider"].as_str())
+        .map(ToString::to_string);
+    let network_excerpt = network_output
+        .and_then(|output| output["items"].as_array())
+        .map(|items| {
+            let sources = items
+                .iter()
+                .take(3)
+                .map(|item| {
+                    let title = item["title"].as_str().unwrap_or_default();
+                    let snippet = item["snippet"].as_str().unwrap_or_default();
+                    format!("{title}: {snippet}")
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            compact_tool_evidence_excerpt(&sources)
+        });
+    let screenshot_output = invocation
+        .output
+        .as_ref()
+        .filter(|_| invocation.tool_id == COMPUTER_SCREENSHOT_TOOL_ID);
+    let screenshot_resource = screenshot_output.map(|_| "visible desktop screenshot".to_string());
+    let screenshot_title = screenshot_output
+        .and_then(|output| output["display_label"].as_str())
+        .map(|label| format!("Computer screenshot: {label}"));
+    let screenshot_excerpt = screenshot_output.map(|output| {
+        let width = output["width"].as_u64().unwrap_or_default();
+        let height = output["height"].as_u64().unwrap_or_default();
+        let captured_at = output["captured_at"].as_str().unwrap_or_default();
+        format!("{width}x{height} captured at {captured_at}")
+    });
+    let control_output = invocation
+        .output
+        .as_ref()
+        .filter(|_| invocation.tool_id == COMPUTER_CONTROL_TOOL_ID);
+    let control_resource = control_output
+        .and_then(|output| output["target"].as_str())
+        .map(ToString::to_string);
+    let control_title = control_resource
+        .as_ref()
+        .map(|target| format!("Computer control: {target}"));
+    let control_excerpt = control_output.map(|output| {
+        let action = output["action"].as_str().unwrap_or_default();
+        let summary = output["summary"].as_str().unwrap_or_default();
+        compact_tool_evidence_excerpt(&format!("{action}; {summary}"))
+    });
+    let skill_output = invocation
+        .output
+        .as_ref()
+        .filter(|_| invocation.tool_id == SKILL_ACTIVATE_TOOL_ID);
+    let skill_resource = skill_output
+        .and_then(|output| output["skill_id"].as_str())
+        .map(|skill_id| format!("skill://{skill_id}"));
+    let skill_title = skill_output.map(|output| {
+        let name = output["skill_name"].as_str().unwrap_or("Installed Skill");
+        let version = output["skill_version"].as_str().unwrap_or_default();
+        format!("Skill context: {name} v{version}")
+    });
+    let skill_excerpt = skill_output.map(|output| {
+        let entry_kind = output["entry_kind"].as_str().unwrap_or_default();
+        let input_summary = output["input_summary"].as_str().unwrap_or_default();
+        compact_tool_evidence_excerpt(&format!("{entry_kind}; {input_summary}"))
+    });
+    let terminal_excerpt = invocation
+        .output
+        .as_ref()
+        .filter(|_| invocation.tool_id == TERMINAL_READ_TOOL_ID)
+        .map(|output| {
+            let stdout = output["stdout"].as_str().unwrap_or_default().trim();
+            let stderr = output["stderr"].as_str().unwrap_or_default().trim();
+            let mut parts = Vec::new();
+            if !stdout.is_empty() {
+                parts.push(format!("stdout: {stdout}"));
+            }
+            if !stderr.is_empty() {
+                parts.push(format!("stderr: {stderr}"));
+            }
+            if parts.is_empty() {
+                invocation.verification.summary.clone()
+            } else {
+                compact_tool_evidence_excerpt(&parts.join(" "))
+            }
+        });
+    CapabilityInvocation {
+        id: invocation.id,
+        capability: invocation.capability,
+        status,
+        policy_decision: invocation.policy_decision,
+        approval_request_id: invocation.approval_request_id,
+        requested_resource: terminal_command
+            .or(file_path)
+            .or(network_resource)
+            .or(screenshot_resource)
+            .or(control_resource)
+            .or(skill_resource)
+            .or_else(|| Some(invocation.tool_id.clone())),
+        evidence_ref: invocation
+            .evidence
+            .first()
+            .map(|evidence| evidence.reference.clone()),
+        requested_url: browser_requested_url.or(network_search_url),
+        evidence_url: browser_final_url.or(network_evidence_url),
+        title: browser_title
+            .or(network_title)
+            .or(screenshot_title)
+            .or(control_title)
+            .or(skill_title)
+            .or(file_title)
+            .or_else(|| Some(invocation.tool_id.clone())),
+        excerpt: terminal_excerpt
+            .or(file_excerpt)
+            .or(browser_excerpt)
+            .or(network_excerpt)
+            .or(screenshot_excerpt)
+            .or(control_excerpt)
+            .or(skill_excerpt)
+            .or_else(|| Some(invocation.verification.summary.clone())),
+        warnings: invocation.error.clone().into_iter().collect(),
+        elapsed_ms: invocation.elapsed_ms,
+        created_at: invocation.finished_at.unwrap_or(invocation.created_at),
+    }
+}
+
+fn compact_tool_evidence_excerpt(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(280)
+        .collect()
+}
+
+fn is_agent_app_update_action(action_type: &str) -> bool {
+    matches!(
+        action_type,
+        "app_update_check" | "app_update_download" | "app_update_install"
+    )
+}
+
+fn agent_app_update_tool_request(
+    action: &AgentChatActionProposal,
+    access_mode: AccessMode,
+    run_id: Option<Uuid>,
+) -> Result<ToolExecutionRequest, String> {
+    let (tool_id, input) = match action.action_type.as_str() {
+        "app_update_check" => (APP_UPDATE_CHECK_TOOL_ID, serde_json::json!({})),
+        "app_update_download" => (APP_UPDATE_DOWNLOAD_TOOL_ID, serde_json::json!({})),
+        "app_update_install" => {
+            let installer_path = action
+                .target
+                .as_deref()
+                .map(str::trim)
+                .filter(|target| !target.is_empty())
+                .ok_or_else(|| {
+                    "app_update_install requires the verified installer path in target".to_string()
+                })?;
+            (
+                APP_UPDATE_INSTALL_TOOL_ID,
+                serde_json::json!({"installer_path": installer_path}),
+            )
+        }
+        action_type => return Err(format!("unsupported app update action `{action_type}`")),
+    };
+    Ok(ToolExecutionRequest {
+        tool_id: tool_id.to_string(),
+        input,
+        access_mode,
+        run_id,
+    })
+}
+
+fn is_agent_file_write_tool_action(action_type: &str) -> bool {
+    matches!(action_type, "file_write" | "create_report")
+}
+
+fn agent_file_read_tool_request(
+    action: &AgentChatActionProposal,
+    access_mode: AccessMode,
+    run_id: Option<Uuid>,
+) -> Result<ToolExecutionRequest, String> {
+    if action.action_type != "file_read" {
+        return Err(format!(
+            "unsupported file read action `{}`",
+            action.action_type
+        ));
+    }
+    let path = action
+        .target
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "file_read target is required before dispatch".to_string())?;
+    let summary = action
+        .reason
+        .as_deref()
+        .or(action.title.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Read local file proposed by DeepSeek");
+
+    Ok(ToolExecutionRequest {
+        tool_id: FILE_READ_TOOL_ID.to_string(),
+        input: serde_json::json!({
+            "path": path,
+            "summary": summary,
+        }),
+        access_mode,
+        run_id,
+    })
+}
+
+fn dispatch_agent_file_read_tool_with_executor(
+    store: &EventStore,
+    access_mode: AccessMode,
+    action: &mut AgentChatActionProposal,
+    run_id: Option<Uuid>,
+    client: &impl FileContentClient,
+) -> Result<ToolInvocationRecord, String> {
+    let request = agent_file_read_tool_request(action, access_mode, run_id)?;
+    let executor = FileReadAgentToolExecutor { client };
+    let invocation = execute_agent_tool_with_executor(store, request, &executor)?;
+    apply_tool_invocation_to_agent_action(action, &invocation);
+    Ok(invocation)
+}
+
+fn dispatch_agent_file_read_tool_with_store_mutex(
+    store_mutex: &Mutex<EventStore>,
+    access_mode: AccessMode,
+    action: &mut AgentChatActionProposal,
+    run_id: Option<Uuid>,
+    client: &impl FileContentClient,
+) -> Result<ToolInvocationRecord, String> {
+    let request = agent_file_read_tool_request(action, access_mode, run_id)?;
+    let authorization = {
+        let store = store_mutex.lock().map_err(|_| lock_error())?;
+        authorize_agent_tool_execution(&store, request)?
+    };
+    let invocation = match authorization {
+        AgentToolAuthorization::Finished(invocation) => invocation,
+        AgentToolAuthorization::Ready(authorized) => {
+            let executor = FileReadAgentToolExecutor { client };
+            let invocation = run_authorized_agent_tool_execution(authorized, &executor);
+            let store = store_mutex.lock().map_err(|_| lock_error())?;
+            record_completed_agent_tool_execution(&store, &invocation)?;
+            invocation
+        }
+    };
+    apply_tool_invocation_to_agent_action(action, &invocation);
+    Ok(invocation)
+}
+
+fn agent_network_search_tool_request(
+    action: &AgentChatActionProposal,
+    access_mode: AccessMode,
+    run_id: Option<Uuid>,
+) -> Result<ToolExecutionRequest, String> {
+    if action.action_type != "network_search" {
+        return Err(format!(
+            "unsupported network search action `{}`",
+            action.action_type
+        ));
+    }
+    let query = action
+        .target
+        .as_deref()
+        .or(action.reason.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "network_search target or reason is required before dispatch".to_string())?;
+    let summary = action
+        .reason
+        .as_deref()
+        .or(action.title.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Public web search proposed by DeepSeek");
+
+    Ok(ToolExecutionRequest {
+        tool_id: NETWORK_SEARCH_TOOL_ID.to_string(),
+        input: serde_json::json!({
+            "query": query,
+            "scope": "public web",
+            "summary": summary,
+        }),
+        access_mode,
+        run_id,
+    })
+}
+
+fn dispatch_agent_network_search_tool_with_executor(
+    store: &EventStore,
+    access_mode: AccessMode,
+    action: &mut AgentChatActionProposal,
+    run_id: Option<Uuid>,
+    client: &impl NetworkSearchClient,
+) -> Result<ToolInvocationRecord, String> {
+    let request = agent_network_search_tool_request(action, access_mode, run_id)?;
+    let executor = NetworkSearchAgentToolExecutor { client };
+    let invocation = execute_agent_tool_with_executor(store, request, &executor)?;
+    apply_tool_invocation_to_agent_action(action, &invocation);
+    Ok(invocation)
+}
+
+fn dispatch_agent_network_search_tool_with_store_mutex(
+    store_mutex: &Mutex<EventStore>,
+    access_mode: AccessMode,
+    action: &mut AgentChatActionProposal,
+    run_id: Option<Uuid>,
+    client: &impl NetworkSearchClient,
+) -> Result<ToolInvocationRecord, String> {
+    let request = agent_network_search_tool_request(action, access_mode, run_id)?;
+    let authorization = {
+        let store = store_mutex.lock().map_err(|_| lock_error())?;
+        authorize_agent_tool_execution(&store, request)?
+    };
+    let invocation = match authorization {
+        AgentToolAuthorization::Finished(invocation) => invocation,
+        AgentToolAuthorization::Ready(authorized) => {
+            let executor = NetworkSearchAgentToolExecutor { client };
+            let invocation = run_authorized_agent_tool_execution(authorized, &executor);
+            let store = store_mutex.lock().map_err(|_| lock_error())?;
+            record_completed_agent_tool_execution(&store, &invocation)?;
+            invocation
+        }
+    };
+    apply_tool_invocation_to_agent_action(action, &invocation);
+    Ok(invocation)
+}
+
+fn agent_browser_browse_tool_request(
+    action: &AgentChatActionProposal,
+    access_mode: AccessMode,
+    run_id: Option<Uuid>,
+) -> Result<ToolExecutionRequest, String> {
+    if action.action_type != "browser_browse" {
+        return Err(format!(
+            "unsupported browser browse action `{}`",
+            action.action_type
+        ));
+    }
+    let url = action
+        .target
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "browser_browse target URL is required before dispatch".to_string())?;
+    let summary = action
+        .reason
+        .as_deref()
+        .or(action.title.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Public web page read proposed by DeepSeek");
+
+    Ok(ToolExecutionRequest {
+        tool_id: BROWSER_BROWSE_TOOL_ID.to_string(),
+        input: serde_json::json!({
+            "url": url,
+            "summary": summary,
+        }),
+        access_mode,
+        run_id,
+    })
+}
+
+fn dispatch_agent_browser_browse_tool_with_executor(
+    store: &EventStore,
+    access_mode: AccessMode,
+    action: &mut AgentChatActionProposal,
+    run_id: Option<Uuid>,
+    client: &impl BrowserPageClient,
+) -> Result<ToolInvocationRecord, String> {
+    let request = agent_browser_browse_tool_request(action, access_mode, run_id)?;
+    let executor = BrowserBrowseAgentToolExecutor { client };
+    let invocation = execute_agent_tool_with_executor(store, request, &executor)?;
+    apply_tool_invocation_to_agent_action(action, &invocation);
+    Ok(invocation)
+}
+
+fn dispatch_agent_browser_browse_tool_with_store_mutex(
+    store_mutex: &Mutex<EventStore>,
+    access_mode: AccessMode,
+    action: &mut AgentChatActionProposal,
+    run_id: Option<Uuid>,
+    client: &impl BrowserPageClient,
+) -> Result<ToolInvocationRecord, String> {
+    let request = agent_browser_browse_tool_request(action, access_mode, run_id)?;
+    let authorization = {
+        let store = store_mutex.lock().map_err(|_| lock_error())?;
+        authorize_agent_tool_execution(&store, request)?
+    };
+    let invocation = match authorization {
+        AgentToolAuthorization::Finished(invocation) => invocation,
+        AgentToolAuthorization::Ready(authorized) => {
+            let executor = BrowserBrowseAgentToolExecutor { client };
+            let invocation = run_authorized_agent_tool_execution(authorized, &executor);
+            let store = store_mutex.lock().map_err(|_| lock_error())?;
+            record_completed_agent_tool_execution(&store, &invocation)?;
+            invocation
+        }
+    };
+    apply_tool_invocation_to_agent_action(action, &invocation);
+    Ok(invocation)
+}
+
+fn agent_browser_open_tool_request(
+    action: &AgentChatActionProposal,
+    access_mode: AccessMode,
+    run_id: Option<Uuid>,
+) -> Result<(ToolExecutionRequest, String), String> {
+    if action.action_type != "browser_open" {
+        return Err(format!(
+            "unsupported browser open action `{}`",
+            action.action_type
+        ));
+    }
+    let url = action
+        .target
+        .as_deref()
+        .and_then(extract_safe_browser_url)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "browser_open target URL is required before dispatch".to_string())?;
+    let preferred_browser =
+        normalize_agent_action_browser_preference(action.preferred_browser.as_deref())
+            .or_else(|| infer_agent_action_browser_preference(action))
+            .unwrap_or_else(|| "default".to_string());
+    let summary = action
+        .reason
+        .as_deref()
+        .or(action.title.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Open the user-requested website");
+    Ok((
+        ToolExecutionRequest {
+            tool_id: BROWSER_OPEN_TOOL_ID.to_string(),
+            input: serde_json::json!({
+                "url": url,
+                "preferred_browser": preferred_browser,
+                "summary": summary,
+            }),
+            access_mode,
+            run_id,
+        },
+        url,
+    ))
+}
+
+fn dispatch_agent_browser_open_tool_with_executor(
+    store: &EventStore,
+    access_mode: AccessMode,
+    action: &mut AgentChatActionProposal,
+    run_id: Option<Uuid>,
+    opener: &impl BrowserUrlOpener,
+) -> Result<ToolInvocationRecord, String> {
+    let (request, url) = agent_browser_open_tool_request(action, access_mode, run_id)?;
+    action.target = Some(url);
+    let executor = BrowserOpenAgentToolExecutor { opener };
+    let invocation = execute_agent_tool_with_executor(store, request, &executor)?;
+    apply_tool_invocation_to_agent_action(action, &invocation);
+    Ok(invocation)
+}
+
+fn dispatch_agent_browser_open_tool_with_store_mutex(
+    store_mutex: &Mutex<EventStore>,
+    access_mode: AccessMode,
+    action: &mut AgentChatActionProposal,
+    run_id: Option<Uuid>,
+    opener: &impl BrowserUrlOpener,
+) -> Result<ToolInvocationRecord, String> {
+    let (request, url) = agent_browser_open_tool_request(action, access_mode, run_id)?;
+    action.target = Some(url);
+    let authorization = {
+        let store = store_mutex.lock().map_err(|_| lock_error())?;
+        authorize_agent_tool_execution(&store, request)?
+    };
+    let invocation = match authorization {
+        AgentToolAuthorization::Finished(invocation) => invocation,
+        AgentToolAuthorization::Ready(authorized) => {
+            let executor = BrowserOpenAgentToolExecutor { opener };
+            let invocation = run_authorized_agent_tool_execution(authorized, &executor);
+            let store = store_mutex.lock().map_err(|_| lock_error())?;
+            record_completed_agent_tool_execution(&store, &invocation)?;
+            invocation
+        }
+    };
+    apply_tool_invocation_to_agent_action(action, &invocation);
+    Ok(invocation)
+}
+
+fn agent_operations_briefing_tool_request(
+    action: &AgentChatActionProposal,
+    access_mode: AccessMode,
+    run_id: Option<Uuid>,
+) -> Result<ToolExecutionRequest, String> {
+    if action.action_type != "operations_briefing" {
+        return Err(format!(
+            "unsupported operations briefing action `{}`",
+            action.action_type
+        ));
+    }
+    let evidence_folder_path = action
+        .target
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            "operations_briefing target evidence folder is required before dispatch".to_string()
+        })?;
+    let summary = action
+        .reason
+        .as_deref()
+        .or(action.title.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Build an Operations Briefing from local evidence");
+    Ok(ToolExecutionRequest {
+        tool_id: OPERATIONS_BRIEFING_TOOL_ID.to_string(),
+        input: serde_json::json!({
+            "evidence_folder_path": evidence_folder_path,
+            "summary": summary,
+        }),
+        access_mode,
+        run_id,
+    })
+}
+
+fn persist_operations_briefing_tool_run(
+    store: &EventStore,
+    invocation: &ToolInvocationRecord,
+) -> Result<Option<Uuid>, String> {
+    if invocation.tool_id != OPERATIONS_BRIEFING_TOOL_ID
+        || invocation.status != ToolExecutionStatus::Succeeded
+    {
+        return Ok(None);
+    }
+    let run = invocation
+        .output
+        .as_ref()
+        .and_then(|output| output.get("run"))
+        .cloned()
+        .ok_or_else(|| "successful operations.briefing output is missing its run".to_string())
+        .and_then(|value| {
+            serde_json::from_value::<OperationsBriefingRun>(value).map_err(event_store_error)
+        })?;
+    if run.evidence_invocation_id != Some(invocation.id) {
+        return Err(
+            "operations.briefing run is not bound to its verified tool invocation".to_string(),
+        );
+    }
+    let exists = store
+        .list_operations_briefing_runs()
+        .map_err(event_store_error)?
+        .into_iter()
+        .any(|existing| existing.id == run.id);
+    if !exists {
+        store
+            .append_operations_briefing_run(&run)
+            .map_err(event_store_error)?;
+    }
+    Ok(Some(run.id))
+}
+
+fn apply_operations_briefing_tool_invocation_to_action(
+    action: &mut AgentChatActionProposal,
+    invocation: &ToolInvocationRecord,
+    workflow_run_id: Option<Uuid>,
+) {
+    apply_tool_invocation_to_agent_action(action, invocation);
+    action.workflow_run_id = workflow_run_id;
+}
+
+fn dispatch_agent_operations_briefing_tool_with_executor(
+    store: &EventStore,
+    access_mode: AccessMode,
+    action: &mut AgentChatActionProposal,
+    run_id: Option<Uuid>,
+    client: &impl EvidenceFolderClient,
+) -> Result<ToolInvocationRecord, String> {
+    let request = agent_operations_briefing_tool_request(action, access_mode, run_id)?;
+    let executor = OperationsBriefingAgentToolExecutor { client };
+    let invocation = execute_agent_tool_with_executor(store, request, &executor)?;
+    let workflow_run_id = persist_operations_briefing_tool_run(store, &invocation)?;
+    apply_operations_briefing_tool_invocation_to_action(action, &invocation, workflow_run_id);
+    Ok(invocation)
+}
+
+fn dispatch_agent_operations_briefing_tool_with_store_mutex(
+    store_mutex: &Mutex<EventStore>,
+    access_mode: AccessMode,
+    action: &mut AgentChatActionProposal,
+    run_id: Option<Uuid>,
+    client: &impl EvidenceFolderClient,
+) -> Result<ToolInvocationRecord, String> {
+    let request = agent_operations_briefing_tool_request(action, access_mode, run_id)?;
+    let authorization = {
+        let store = store_mutex.lock().map_err(|_| lock_error())?;
+        authorize_agent_tool_execution(&store, request)?
+    };
+    let (invocation, workflow_run_id) = match authorization {
+        AgentToolAuthorization::Finished(invocation) => {
+            let store = store_mutex.lock().map_err(|_| lock_error())?;
+            let workflow_run_id = persist_operations_briefing_tool_run(&store, &invocation)?;
+            (invocation, workflow_run_id)
+        }
+        AgentToolAuthorization::Ready(authorized) => {
+            let executor = OperationsBriefingAgentToolExecutor { client };
+            let invocation = run_authorized_agent_tool_execution(authorized, &executor);
+            let store = store_mutex.lock().map_err(|_| lock_error())?;
+            record_completed_agent_tool_execution(&store, &invocation)?;
+            let workflow_run_id = persist_operations_briefing_tool_run(&store, &invocation)?;
+            (invocation, workflow_run_id)
+        }
+    };
+    apply_operations_briefing_tool_invocation_to_action(action, &invocation, workflow_run_id);
+    Ok(invocation)
+}
+
+fn agent_computer_screenshot_tool_request(
+    action: &AgentChatActionProposal,
+    access_mode: AccessMode,
+    run_id: Option<Uuid>,
+) -> Result<ToolExecutionRequest, String> {
+    if action.action_type != "computer_screenshot" {
+        return Err(format!(
+            "unsupported computer screenshot action `{}`",
+            action.action_type
+        ));
+    }
+    let summary = action
+        .reason
+        .as_deref()
+        .or(action.title.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Inspect the visible desktop before planning the next action");
+
+    Ok(ToolExecutionRequest {
+        tool_id: COMPUTER_SCREENSHOT_TOOL_ID.to_string(),
+        input: serde_json::json!({"summary": summary}),
+        access_mode,
+        run_id,
+    })
+}
+
+fn dispatch_agent_computer_screenshot_tool_with_executor(
+    store: &EventStore,
+    access_mode: AccessMode,
+    action: &mut AgentChatActionProposal,
+    run_id: Option<Uuid>,
+    client: &impl ComputerScreenshotClient,
+) -> Result<ToolInvocationRecord, String> {
+    let request = agent_computer_screenshot_tool_request(action, access_mode, run_id)?;
+    let executor = ComputerScreenshotAgentToolExecutor { client };
+    let invocation = execute_agent_tool_with_executor(store, request, &executor)?;
+    apply_tool_invocation_to_agent_action(action, &invocation);
+    Ok(invocation)
+}
+
+fn dispatch_agent_computer_screenshot_tool_with_store_mutex(
+    store_mutex: &Mutex<EventStore>,
+    access_mode: AccessMode,
+    action: &mut AgentChatActionProposal,
+    run_id: Option<Uuid>,
+    client: &impl ComputerScreenshotClient,
+) -> Result<ToolInvocationRecord, String> {
+    let request = agent_computer_screenshot_tool_request(action, access_mode, run_id)?;
+    let authorization = {
+        let store = store_mutex.lock().map_err(|_| lock_error())?;
+        authorize_agent_tool_execution(&store, request)?
+    };
+    let invocation = match authorization {
+        AgentToolAuthorization::Finished(invocation) => invocation,
+        AgentToolAuthorization::Ready(authorized) => {
+            let executor = ComputerScreenshotAgentToolExecutor { client };
+            let invocation = run_authorized_agent_tool_execution(authorized, &executor);
+            let store = store_mutex.lock().map_err(|_| lock_error())?;
+            record_completed_agent_tool_execution(&store, &invocation)?;
+            invocation
+        }
+    };
+    apply_tool_invocation_to_agent_action(action, &invocation);
+    Ok(invocation)
+}
+
+fn agent_computer_control_tool_request(
+    action: &AgentChatActionProposal,
+    access_mode: AccessMode,
+    run_id: Option<Uuid>,
+) -> Result<ToolExecutionRequest, String> {
+    if action.action_type != "computer_control" {
+        return Err(format!(
+            "unsupported computer control action `{}`",
+            action.action_type
+        ));
+    }
+    let target = agent_computer_control_target(action).ok_or_else(|| {
+        "computer_control target window or app is required before dispatch".to_string()
+    })?;
+    let control_action = agent_computer_control_action_contract(action).ok_or_else(|| {
+        "computer_control content must be one structured action: click:x,y[,button], move:x,y, type:text, press:key, hotkey:key+key, or scroll:delta[,axis]"
+            .to_string()
+    })?;
+    let summary = action
+        .reason
+        .as_deref()
+        .or(action.title.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Execute one approved desktop input action");
+
+    Ok(ToolExecutionRequest {
+        tool_id: COMPUTER_CONTROL_TOOL_ID.to_string(),
+        input: serde_json::json!({
+            "target": target,
+            "action": control_action,
+            "summary": summary,
+        }),
+        access_mode,
+        run_id,
+    })
+}
+
+fn dispatch_agent_computer_control_tool_with_executor(
+    store: &EventStore,
+    access_mode: AccessMode,
+    action: &mut AgentChatActionProposal,
+    run_id: Option<Uuid>,
+    client: &impl ComputerControlClient,
+) -> Result<ToolInvocationRecord, String> {
+    let request = agent_computer_control_tool_request(action, access_mode, run_id)?;
+    let executor = ComputerControlAgentToolExecutor { client };
+    let invocation = execute_agent_tool_with_executor(store, request, &executor)?;
+    apply_tool_invocation_to_agent_action(action, &invocation);
+    Ok(invocation)
+}
+
+fn dispatch_agent_computer_control_tool_with_store_mutex(
+    store_mutex: &Mutex<EventStore>,
+    access_mode: AccessMode,
+    action: &mut AgentChatActionProposal,
+    run_id: Option<Uuid>,
+    client: &impl ComputerControlClient,
+) -> Result<ToolInvocationRecord, String> {
+    let request = agent_computer_control_tool_request(action, access_mode, run_id)?;
+    let authorization = {
+        let store = store_mutex.lock().map_err(|_| lock_error())?;
+        authorize_agent_tool_execution(&store, request)?
+    };
+    let invocation = match authorization {
+        AgentToolAuthorization::Finished(invocation) => invocation,
+        AgentToolAuthorization::Ready(authorized) => {
+            let executor = ComputerControlAgentToolExecutor { client };
+            let invocation = run_authorized_agent_tool_execution(authorized, &executor);
+            let store = store_mutex.lock().map_err(|_| lock_error())?;
+            record_completed_agent_tool_execution(&store, &invocation)?;
+            invocation
+        }
+    };
+    apply_tool_invocation_to_agent_action(action, &invocation);
+    Ok(invocation)
+}
+
+fn agent_skill_activate_tool_request(
+    action: &AgentChatActionProposal,
+    access_mode: AccessMode,
+    run_id: Option<Uuid>,
+) -> Result<ToolExecutionRequest, String> {
+    if action.action_type != "skill_activate" {
+        return Err(format!(
+            "unsupported skill activation action `{}`",
+            action.action_type
+        ));
+    }
+    let skill_id = action
+        .target
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "skill_activate target skill id is required before dispatch".to_string())?;
+    let input_summary = action
+        .content
+        .as_deref()
+        .or(action.reason.as_deref())
+        .or(action.title.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "skill_activate task context is required before dispatch".to_string())?;
+    Ok(ToolExecutionRequest {
+        tool_id: SKILL_ACTIVATE_TOOL_ID.to_string(),
+        input: serde_json::json!({
+            "skill_id": skill_id,
+            "input_summary": input_summary,
+        }),
+        access_mode,
+        run_id,
+    })
+}
+
+fn skill_activation_for_plan(
+    store: &EventStore,
+    plan: &ToolExecutionPlan,
+) -> Result<SkillActivationContext, String> {
+    let skill_id = plan.request.input["skill_id"]
+        .as_str()
+        .ok_or_else(|| "skill.activate requires a string skill_id".to_string())?;
+    let input_summary = plan.request.input["input_summary"]
+        .as_str()
+        .ok_or_else(|| "skill.activate requires a string input_summary".to_string())?;
+    let skill_id = Uuid::parse_str(skill_id.trim())
+        .map_err(|_| "skill.activate input field `skill_id` must be a UUID".to_string())?;
+    store
+        .prepare_skill_activation(skill_id, input_summary.to_string())
+        .map_err(event_store_error)
+}
+
+fn dispatch_agent_skill_activate_tool_with_executor(
+    store: &EventStore,
+    access_mode: AccessMode,
+    action: &mut AgentChatActionProposal,
+    run_id: Option<Uuid>,
+) -> Result<ToolInvocationRecord, String> {
+    let request = agent_skill_activate_tool_request(action, access_mode, run_id)?;
+    let authorization = authorize_agent_tool_execution(store, request)?;
+    let invocation = match authorization {
+        AgentToolAuthorization::Finished(invocation) => invocation,
+        AgentToolAuthorization::Ready(authorized) => {
+            let executor = SkillActivateAgentToolExecutor {
+                activation: skill_activation_for_plan(store, &authorized.plan),
+            };
+            let invocation = run_authorized_agent_tool_execution(authorized, &executor);
+            record_completed_agent_tool_execution(store, &invocation)?;
+            invocation
+        }
+    };
+    apply_tool_invocation_to_agent_action(action, &invocation);
+    Ok(invocation)
+}
+
+fn dispatch_agent_skill_activate_tool_with_store_mutex(
+    store_mutex: &Mutex<EventStore>,
+    access_mode: AccessMode,
+    action: &mut AgentChatActionProposal,
+    run_id: Option<Uuid>,
+) -> Result<ToolInvocationRecord, String> {
+    let request = agent_skill_activate_tool_request(action, access_mode, run_id)?;
+    let authorization = {
+        let store = store_mutex.lock().map_err(|_| lock_error())?;
+        authorize_agent_tool_execution(&store, request)?
+    };
+    let invocation = match authorization {
+        AgentToolAuthorization::Finished(invocation) => invocation,
+        AgentToolAuthorization::Ready(authorized) => {
+            let activation = {
+                let store = store_mutex.lock().map_err(|_| lock_error())?;
+                skill_activation_for_plan(&store, &authorized.plan)
+            };
+            let executor = SkillActivateAgentToolExecutor { activation };
+            let invocation = run_authorized_agent_tool_execution(authorized, &executor);
+            let store = store_mutex.lock().map_err(|_| lock_error())?;
+            record_completed_agent_tool_execution(&store, &invocation)?;
+            invocation
+        }
+    };
+    apply_tool_invocation_to_agent_action(action, &invocation);
+    Ok(invocation)
+}
+
+fn agent_file_write_tool_request(
+    action: &AgentChatActionProposal,
+    access_mode: AccessMode,
+    run_id: Option<Uuid>,
+) -> Result<ToolExecutionRequest, String> {
+    if !is_agent_file_write_tool_action(&action.action_type) {
+        return Err(format!(
+            "unsupported file write tool action `{}`",
+            action.action_type
+        ));
+    }
+    let path = action
+        .target
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "file_write target is required before dispatch".to_string())?;
+    let content = action
+        .content
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "file_write content is required before dispatch".to_string())?;
+    let summary = action
+        .reason
+        .as_deref()
+        .or(action.title.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Write file proposed by DeepSeek");
+
+    Ok(ToolExecutionRequest {
+        tool_id: FILE_WRITE_TOOL_ID.to_string(),
+        input: serde_json::json!({
+            "path": path,
+            "summary": summary,
+            "content": content,
+        }),
+        access_mode,
+        run_id,
+    })
+}
+
+fn agent_office_create_tool_request(
+    action: &AgentChatActionProposal,
+    access_mode: AccessMode,
+    run_id: Option<Uuid>,
+) -> Result<(ToolExecutionRequest, OfficeCreateSpec), String> {
+    if action.action_type != "office_create" {
+        return Err(format!(
+            "unsupported office create action `{}`",
+            action.action_type
+        ));
+    }
+    let spec = office_create_spec_from_action(
+        &action.action_type,
+        action.target.as_deref(),
+        action.target_location.as_deref(),
+        action.title.as_deref(),
+        action.reason.as_deref(),
+        action.content.as_deref(),
+    )?;
+    let input = serde_json::to_value(&spec).map_err(event_store_error)?;
+    Ok((
+        ToolExecutionRequest {
+            tool_id: OFFICE_CREATE_TOOL_ID.to_string(),
+            input,
+            access_mode,
+            run_id,
+        },
+        spec,
+    ))
+}
+
+fn dispatch_agent_office_create_tool_with_executor(
+    store: &EventStore,
+    access_mode: AccessMode,
+    action: &mut AgentChatActionProposal,
+    run_id: Option<Uuid>,
+    office_client: &impl OfficeArtifactClient,
+) -> Result<ToolInvocationRecord, String> {
+    let (request, spec) = agent_office_create_tool_request(action, access_mode, run_id)?;
+    action.target = Some(spec.path);
+    let executor = OfficeCreateAgentToolExecutor {
+        client: office_client,
+    };
+    let invocation = execute_agent_tool_with_executor(store, request, &executor)?;
+    apply_tool_invocation_to_agent_action(action, &invocation);
+    Ok(invocation)
+}
+
+fn dispatch_agent_office_create_tool_with_store_mutex(
+    store_mutex: &Mutex<EventStore>,
+    access_mode: AccessMode,
+    action: &mut AgentChatActionProposal,
+    run_id: Option<Uuid>,
+    office_client: &impl OfficeArtifactClient,
+) -> Result<ToolInvocationRecord, String> {
+    let (request, spec) = agent_office_create_tool_request(action, access_mode, run_id)?;
+    action.target = Some(spec.path);
+    let authorization = {
+        let store = store_mutex.lock().map_err(|_| lock_error())?;
+        authorize_agent_tool_execution(&store, request)?
+    };
+    let invocation = match authorization {
+        AgentToolAuthorization::Finished(invocation) => invocation,
+        AgentToolAuthorization::Ready(authorized) => {
+            let executor = OfficeCreateAgentToolExecutor {
+                client: office_client,
+            };
+            let invocation = run_authorized_agent_tool_execution(authorized, &executor);
+            let store = store_mutex.lock().map_err(|_| lock_error())?;
+            record_completed_agent_tool_execution(&store, &invocation)?;
+            invocation
+        }
+    };
+    apply_tool_invocation_to_agent_action(action, &invocation);
+    Ok(invocation)
+}
+
+fn agent_office_open_tool_request(
+    action: &AgentChatActionProposal,
+    access_mode: AccessMode,
+    run_id: Option<Uuid>,
+) -> Result<(ToolExecutionRequest, String), String> {
+    if action.action_type != "office_open" {
+        return Err(format!(
+            "unsupported office open action `{}`",
+            action.action_type
+        ));
+    }
+    let target = action
+        .target
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "office_open target is required before dispatch".to_string())?;
+    let target = apply_agent_action_target_location(target, action.target_location.as_deref());
+    let preferred_app = infer_agent_action_office_app(action)
+        .or_else(|| OfficeApp::from_path(&target))
+        .ok_or_else(|| "office_open target must be a .docx, .xlsx, or .pptx file".to_string())?;
+    if OfficeApp::from_path(&target) != Some(preferred_app) {
+        return Err("office_open target extension must match the preferred Office app".to_string());
+    }
+    let target = target.replace('\\', "/");
+    Ok((
+        ToolExecutionRequest {
+            tool_id: OFFICE_OPEN_TOOL_ID.to_string(),
+            input: serde_json::json!({
+                "path": target,
+                "preferred_app": preferred_app,
+            }),
+            access_mode,
+            run_id,
+        },
+        target,
+    ))
+}
+
+fn dispatch_agent_office_open_tool_with_executor(
+    store: &EventStore,
+    access_mode: AccessMode,
+    action: &mut AgentChatActionProposal,
+    run_id: Option<Uuid>,
+    office_client: &impl OfficeOpenClient,
+) -> Result<ToolInvocationRecord, String> {
+    let (request, target) = agent_office_open_tool_request(action, access_mode, run_id)?;
+    action.target = Some(target);
+    let executor = OfficeOpenAgentToolExecutor {
+        client: office_client,
+    };
+    let invocation = execute_agent_tool_with_executor(store, request, &executor)?;
+    apply_tool_invocation_to_agent_action(action, &invocation);
+    Ok(invocation)
+}
+
+fn dispatch_agent_office_open_tool_with_store_mutex(
+    store_mutex: &Mutex<EventStore>,
+    access_mode: AccessMode,
+    action: &mut AgentChatActionProposal,
+    run_id: Option<Uuid>,
+    office_client: &impl OfficeOpenClient,
+) -> Result<ToolInvocationRecord, String> {
+    let (request, target) = agent_office_open_tool_request(action, access_mode, run_id)?;
+    action.target = Some(target);
+    let authorization = {
+        let store = store_mutex.lock().map_err(|_| lock_error())?;
+        authorize_agent_tool_execution(&store, request)?
+    };
+    let invocation = match authorization {
+        AgentToolAuthorization::Finished(invocation) => invocation,
+        AgentToolAuthorization::Ready(authorized) => {
+            let executor = OfficeOpenAgentToolExecutor {
+                client: office_client,
+            };
+            let invocation = run_authorized_agent_tool_execution(authorized, &executor);
+            let store = store_mutex.lock().map_err(|_| lock_error())?;
+            record_completed_agent_tool_execution(&store, &invocation)?;
+            invocation
+        }
+    };
+    apply_tool_invocation_to_agent_action(action, &invocation);
+    Ok(invocation)
+}
+
+fn agent_office_update_tool_request(
+    action: &AgentChatActionProposal,
+    access_mode: AccessMode,
+    run_id: Option<Uuid>,
+) -> Result<(ToolExecutionRequest, OfficeUpdateSpec), String> {
+    if action.action_type != "office_update" {
+        return Err(format!(
+            "unsupported office update action `{}`",
+            action.action_type
+        ));
+    }
+    let spec = office_update_spec_from_action(
+        &action.action_type,
+        action.target.as_deref(),
+        action.target_location.as_deref(),
+        action.title.as_deref(),
+        action.reason.as_deref(),
+        action.content.as_deref(),
+    )?;
+    let input = serde_json::to_value(&spec).map_err(event_store_error)?;
+    Ok((
+        ToolExecutionRequest {
+            tool_id: OFFICE_UPDATE_TOOL_ID.to_string(),
+            input,
+            access_mode,
+            run_id,
+        },
+        spec,
+    ))
+}
+
+fn dispatch_agent_office_update_tool_with_executor(
+    store: &EventStore,
+    access_mode: AccessMode,
+    action: &mut AgentChatActionProposal,
+    run_id: Option<Uuid>,
+    office_client: &impl OfficeUpdateClient,
+) -> Result<ToolInvocationRecord, String> {
+    let (request, spec) = agent_office_update_tool_request(action, access_mode, run_id)?;
+    action.target = Some(spec.path);
+    let executor = OfficeUpdateAgentToolExecutor {
+        client: office_client,
+    };
+    let invocation = execute_agent_tool_with_executor(store, request, &executor)?;
+    apply_tool_invocation_to_agent_action(action, &invocation);
+    Ok(invocation)
+}
+
+fn dispatch_agent_office_update_tool_with_store_mutex(
+    store_mutex: &Mutex<EventStore>,
+    access_mode: AccessMode,
+    action: &mut AgentChatActionProposal,
+    run_id: Option<Uuid>,
+    office_client: &impl OfficeUpdateClient,
+) -> Result<ToolInvocationRecord, String> {
+    let (request, spec) = agent_office_update_tool_request(action, access_mode, run_id)?;
+    action.target = Some(spec.path);
+    let authorization = {
+        let store = store_mutex.lock().map_err(|_| lock_error())?;
+        authorize_agent_tool_execution(&store, request)?
+    };
+    let invocation = match authorization {
+        AgentToolAuthorization::Finished(invocation) => invocation,
+        AgentToolAuthorization::Ready(authorized) => {
+            let executor = OfficeUpdateAgentToolExecutor {
+                client: office_client,
+            };
+            let invocation = run_authorized_agent_tool_execution(authorized, &executor);
+            let store = store_mutex.lock().map_err(|_| lock_error())?;
+            record_completed_agent_tool_execution(&store, &invocation)?;
+            invocation
+        }
+    };
+    apply_tool_invocation_to_agent_action(action, &invocation);
+    Ok(invocation)
+}
+
+fn dispatch_agent_file_write_tool_with_executor(
+    store: &EventStore,
+    access_mode: AccessMode,
+    action: &mut AgentChatActionProposal,
+    run_id: Option<Uuid>,
+    file_write_client: &impl FileWriteClient,
+) -> Result<ToolInvocationRecord, String> {
+    let request = agent_file_write_tool_request(action, access_mode, run_id)?;
+    let executor = FileWriteAgentToolExecutor {
+        client: file_write_client,
+    };
+    let invocation = execute_agent_tool_with_executor(store, request, &executor)?;
+    apply_tool_invocation_to_agent_action(action, &invocation);
+    Ok(invocation)
+}
+
+fn dispatch_agent_file_write_tool_with_store_mutex(
+    store_mutex: &Mutex<EventStore>,
+    access_mode: AccessMode,
+    action: &mut AgentChatActionProposal,
+    run_id: Option<Uuid>,
+    file_write_client: &impl FileWriteClient,
+) -> Result<ToolInvocationRecord, String> {
+    let request = agent_file_write_tool_request(action, access_mode, run_id)?;
+    let authorization = {
+        let store = store_mutex.lock().map_err(|_| lock_error())?;
+        authorize_agent_tool_execution(&store, request)?
+    };
+    let invocation = match authorization {
+        AgentToolAuthorization::Finished(invocation) => invocation,
+        AgentToolAuthorization::Ready(authorized) => {
+            let executor = FileWriteAgentToolExecutor {
+                client: file_write_client,
+            };
+            let invocation = run_authorized_agent_tool_execution(authorized, &executor);
+            let store = store_mutex.lock().map_err(|_| lock_error())?;
+            record_completed_agent_tool_execution(&store, &invocation)?;
+            invocation
+        }
+    };
+    apply_tool_invocation_to_agent_action(action, &invocation);
+    Ok(invocation)
+}
+
+fn agent_filesystem_mutation_tool_request(
+    action: &AgentChatActionProposal,
+    access_mode: AccessMode,
+    run_id: Option<Uuid>,
+) -> Result<ToolExecutionRequest, String> {
+    let operation = agent_filesystem_mutation_operation(&action.action_type).ok_or_else(|| {
+        format!(
+            "unsupported filesystem mutation action `{}`",
+            action.action_type
+        )
+    })?;
+    let path = action
+        .target
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "filesystem mutation target is required before dispatch".to_string())?;
+    let destination = if matches!(
+        operation,
+        FileSystemMutationOperation::RenameFile | FileSystemMutationOperation::RenameDirectory
+    ) {
+        Some(agent_action_destination(action).ok_or_else(|| {
+            "filesystem rename destination is required before dispatch".to_string()
+        })?)
+    } else {
+        None
+    };
+    let content = if matches!(
+        operation,
+        FileSystemMutationOperation::CreateFile | FileSystemMutationOperation::UpdateFile
+    ) {
+        Some(
+            action
+                .content
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| "filesystem file content is required before dispatch".to_string())?
+                .to_string(),
+        )
+    } else {
+        None
+    };
+    let summary = action
+        .reason
+        .as_deref()
+        .or(action.title.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Local filesystem mutation proposed by DeepSeek");
+
+    Ok(ToolExecutionRequest {
+        tool_id: FILESYSTEM_MUTATE_TOOL_ID.to_string(),
+        input: serde_json::json!({
+            "operation": filesystem_mutation_tool_name(operation),
+            "path": path,
+            "destination": destination,
+            "content": content,
+            "summary": summary,
+        }),
+        access_mode,
+        run_id,
+    })
+}
+
+fn dispatch_agent_filesystem_mutation_tool_with_executor(
+    store: &EventStore,
+    access_mode: AccessMode,
+    action: &mut AgentChatActionProposal,
+    run_id: Option<Uuid>,
+    client: &impl FileSystemMutationClient,
+) -> Result<ToolInvocationRecord, String> {
+    let request = agent_filesystem_mutation_tool_request(action, access_mode, run_id)?;
+    let executor = FileSystemMutationAgentToolExecutor { client };
+    let invocation = execute_agent_tool_with_executor(store, request, &executor)?;
+    apply_tool_invocation_to_agent_action(action, &invocation);
+    Ok(invocation)
+}
+
+fn dispatch_agent_filesystem_mutation_tool_with_store_mutex(
+    store_mutex: &Mutex<EventStore>,
+    access_mode: AccessMode,
+    action: &mut AgentChatActionProposal,
+    run_id: Option<Uuid>,
+    client: &impl FileSystemMutationClient,
+) -> Result<ToolInvocationRecord, String> {
+    let request = agent_filesystem_mutation_tool_request(action, access_mode, run_id)?;
+    let authorization = {
+        let store = store_mutex.lock().map_err(|_| lock_error())?;
+        authorize_agent_tool_execution(&store, request)?
+    };
+    let invocation = match authorization {
+        AgentToolAuthorization::Finished(invocation) => invocation,
+        AgentToolAuthorization::Ready(authorized) => {
+            let executor = FileSystemMutationAgentToolExecutor { client };
+            let invocation = run_authorized_agent_tool_execution(authorized, &executor);
+            let store = store_mutex.lock().map_err(|_| lock_error())?;
+            record_completed_agent_tool_execution(&store, &invocation)?;
+            invocation
+        }
+    };
+    apply_tool_invocation_to_agent_action(action, &invocation);
+    Ok(invocation)
+}
+
+fn agent_terminal_read_tool_request(
+    action: &AgentChatActionProposal,
+    access_mode: AccessMode,
+    run_id: Option<Uuid>,
+    desktop_dir: Option<&Path>,
+) -> Result<ToolExecutionRequest, String> {
+    if action.action_type != "terminal_read" {
+        return Err(format!(
+            "unsupported terminal read action `{}`",
+            action.action_type
+        ));
+    }
+    let target = action
+        .target
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "terminal_read target or command is required before dispatch".to_string())?;
+    let command = agent_terminal_read_command_from_target(target, desktop_dir)?;
+    let summary = action
+        .reason
+        .as_deref()
+        .or(action.title.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Read-only terminal inspection proposed by DeepSeek");
+
+    Ok(ToolExecutionRequest {
+        tool_id: TERMINAL_READ_TOOL_ID.to_string(),
+        input: serde_json::json!({
+            "command": command,
+            "summary": summary,
+        }),
+        access_mode,
+        run_id,
+    })
+}
+
+fn dispatch_agent_terminal_read_tool_with_executor(
+    store: &EventStore,
+    access_mode: AccessMode,
+    action: &mut AgentChatActionProposal,
+    run_id: Option<Uuid>,
+    desktop_dir: Option<&Path>,
+    client: &impl TerminalReadClient,
+) -> Result<ToolInvocationRecord, String> {
+    let request = agent_terminal_read_tool_request(action, access_mode, run_id, desktop_dir)?;
+    let executor = TerminalReadAgentToolExecutor { client };
+    let invocation = execute_agent_tool_with_executor(store, request, &executor)?;
+    apply_tool_invocation_to_agent_action(action, &invocation);
+    Ok(invocation)
+}
+
+fn dispatch_agent_terminal_read_tool_with_store_mutex(
+    store_mutex: &Mutex<EventStore>,
+    access_mode: AccessMode,
+    action: &mut AgentChatActionProposal,
+    run_id: Option<Uuid>,
+    desktop_dir: Option<&Path>,
+    client: &impl TerminalReadClient,
+) -> Result<ToolInvocationRecord, String> {
+    let request = agent_terminal_read_tool_request(action, access_mode, run_id, desktop_dir)?;
+    let authorization = {
+        let store = store_mutex.lock().map_err(|_| lock_error())?;
+        authorize_agent_tool_execution(&store, request)?
+    };
+    let invocation = match authorization {
+        AgentToolAuthorization::Finished(invocation) => invocation,
+        AgentToolAuthorization::Ready(authorized) => {
+            let executor = TerminalReadAgentToolExecutor { client };
+            let invocation = run_authorized_agent_tool_execution(authorized, &executor);
+            let store = store_mutex.lock().map_err(|_| lock_error())?;
+            record_completed_agent_tool_execution(&store, &invocation)?;
+            invocation
+        }
+    };
+    apply_tool_invocation_to_agent_action(action, &invocation);
+    Ok(invocation)
+}
+
+fn agent_tool_run_id_for_action(
+    store: &EventStore,
+    action: &AgentChatActionProposal,
+) -> Result<Option<Uuid>, String> {
+    let Some(invocation_id) = action.capability_invocation_id else {
+        return Ok(None);
+    };
+    let invocation = store
+        .list_tool_invocations()
+        .map_err(event_store_error)?
+        .into_iter()
+        .find(|invocation| invocation.id == invocation_id);
+    Ok(invocation.and_then(|invocation| invocation.run_id))
+}
+
+fn block_agent_run_after_action_resolution(
+    store: &EventStore,
+    action: &AgentChatActionProposal,
+    reason: String,
+) -> Result<Option<AgentRunRecord>, String> {
+    let Some(run_id) = agent_tool_run_id_for_action(store, action)? else {
+        return Ok(None);
+    };
+    let record = read_agent_run_record(store, run_id)?;
+    if record.cancel_requested
+        || matches!(
+            record.status,
+            AgentRunStatus::Completed | AgentRunStatus::Failed | AgentRunStatus::Cancelled
+        )
+    {
+        return Ok(Some(record));
+    }
+    let transition = AgentRunTransition::new(
+        run_id,
+        AgentRunStatus::Blocked,
+        reason,
+        action.capability_invocation_id,
+    )
+    .map_err(event_store_error)?;
+    store
+        .append_agent_run_transition(&transition)
+        .map_err(event_store_error)?;
+    read_agent_run_record(store, run_id).map(Some)
+}
+
+fn block_agent_tool_action_after_approval_resolution(
+    store: &EventStore,
+    action: &mut AgentChatActionProposal,
+    reason: &str,
+    note: &str,
+) -> Result<(), String> {
+    action.execution_state = "blocked".to_string();
+    action.blocked_reason = Some(reason.to_string());
+    action.dispatch_note = Some(note.to_string());
+    block_agent_run_after_action_resolution(store, action, reason.to_string())?;
+    Ok(())
+}
+
+fn finish_agent_run_after_resumed_tool(
+    store: &EventStore,
+    invocation: &ToolInvocationRecord,
+) -> Result<Option<AgentRunRecord>, String> {
+    let Some(run_id) = invocation.run_id else {
+        return Ok(None);
+    };
+    let record = read_agent_run_record(store, run_id)?;
+    let finish = if record.cancel_requested {
+        Some(
+            AgentRunFinish::new(
+                run_id,
+                AgentRunStatus::Cancelled,
+                Some("Agent run cancelled while the approved tool was executing.".to_string()),
+                None,
+            )
+            .map_err(event_store_error)?,
+        )
+    } else {
+        match invocation.status {
+            ToolExecutionStatus::Succeeded => {
+                let continuation = AgentRunContinuationQueued::new(
+                    run_id,
+                    invocation.id,
+                    format!(
+                        "Approved tool `{}` succeeded with verified evidence; queued the same run for DeepSeek continuation.",
+                        invocation.tool_id
+                    ),
+                )
+                .map_err(event_store_error)?;
+                store
+                    .append_agent_run_continuation_queued(&continuation)
+                    .map_err(event_store_error)?;
+                None
+            }
+            ToolExecutionStatus::Failed => Some(
+                AgentRunFinish::new(
+                    run_id,
+                    AgentRunStatus::Failed,
+                    None,
+                    Some(
+                        invocation
+                            .error
+                            .clone()
+                            .unwrap_or_else(|| invocation.verification.summary.clone()),
+                    ),
+                )
+                .map_err(event_store_error)?,
+            ),
+            ToolExecutionStatus::WaitingForConfirmation
+            | ToolExecutionStatus::Running
+            | ToolExecutionStatus::Blocked => None,
+        }
+    };
+    if let Some(finish) = finish {
+        store
+            .append_agent_run_finish(&finish)
+            .map_err(event_store_error)?;
+    }
+    read_agent_run_record(store, run_id).map(Some)
+}
+
+fn apply_tool_invocation_to_agent_action(
+    action: &mut AgentChatActionProposal,
+    invocation: &ToolInvocationRecord,
+) {
+    action.capability = Some(invocation.capability);
+    action.policy_decision = Some(invocation.policy_decision);
+    action.permission_request_id = invocation.approval_request_id;
+    action.capability_invocation_id = Some(invocation.id);
+    action.execution_state = match invocation.status {
+        ToolExecutionStatus::WaitingForConfirmation => "needs_confirmation",
+        ToolExecutionStatus::Running => "proposed",
+        ToolExecutionStatus::Succeeded => "succeeded",
+        ToolExecutionStatus::Failed => "failed",
+        ToolExecutionStatus::Blocked => "blocked",
+    }
+    .to_string();
+    action.blocked_reason = invocation.error.clone();
+    action.dispatch_note = Some(tool_invocation_dispatch_note(invocation));
+
+    if action.action_type == "app_update_download" {
+        if let Some(installer_path) = invocation
+            .output
+            .as_ref()
+            .and_then(|output| output.get("installer_path"))
+            .and_then(serde_json::Value::as_str)
+        {
+            action.target = Some(installer_path.to_string());
+        }
+    }
+    if matches!(
+        action.action_type.as_str(),
+        "office_create" | "office_open" | "office_update"
+    ) {
+        if let Some(path) = invocation
+            .output
+            .as_ref()
+            .and_then(|output| output.get("path"))
+            .and_then(serde_json::Value::as_str)
+        {
+            action.target = Some(path.to_string());
+        }
+    }
+}
+
+fn tool_invocation_dispatch_note(invocation: &ToolInvocationRecord) -> String {
+    let mut parts = vec![invocation.verification.summary.clone()];
+    if let Some(evidence) = invocation.evidence.first() {
+        parts.push(format!("evidence={}", evidence.reference));
+    }
+    if let Some(output) = &invocation.output {
+        parts.push(format!(
+            "output={}",
+            serde_json::to_string(output).unwrap_or_else(|_| "unavailable".to_string())
+        ));
+    }
+    if let Some(error) = &invocation.error {
+        parts.push(format!("error={error}"));
+    }
+    parts.join("; ")
+}
+
+fn dispatch_agent_app_update_action_with_executor(
+    store: &EventStore,
+    access_mode: AccessMode,
+    action: &mut AgentChatActionProposal,
+    executor: &impl AgentToolExecutor,
+) -> Result<(), String> {
+    let request = agent_app_update_tool_request(action, access_mode, None)?;
+    let invocation = execute_agent_tool_with_executor(store, request, executor)?;
+    apply_tool_invocation_to_agent_action(action, &invocation);
+    Ok(())
+}
+
+fn dispatch_agent_app_update_action_with_store_mutex(
+    store_mutex: &Mutex<EventStore>,
+    access_mode: AccessMode,
+    action: &mut AgentChatActionProposal,
+    run_id: Option<Uuid>,
+    executor: &impl AgentToolExecutor,
+) -> Result<(), String> {
+    let request = agent_app_update_tool_request(action, access_mode, run_id)?;
+    let authorization = {
+        let store = store_mutex.lock().map_err(|_| lock_error())?;
+        authorize_agent_tool_execution(&store, request)?
+    };
+    let invocation = match authorization {
+        AgentToolAuthorization::Finished(invocation) => invocation,
+        AgentToolAuthorization::Ready(authorized) => {
+            let invocation = run_authorized_agent_tool_execution(authorized, executor);
+            let store = store_mutex.lock().map_err(|_| lock_error())?;
+            record_completed_agent_tool_execution(&store, &invocation)?;
+            invocation
+        }
+    };
+    apply_tool_invocation_to_agent_action(action, &invocation);
+    Ok(())
 }
 
 fn current_work_package_tool_readiness(
@@ -1243,17 +4483,6 @@ fn operations_briefing_template_seed_dir(
         .as_ref()
         .map(|settings| PathBuf::from(&settings.evidence_dir))
         .unwrap_or_else(|| app_data_dir.join("operations-briefing-evidence"))
-}
-
-fn file_write_workspace_base_dir(
-    app_data_dir: &Path,
-    directory_state: &LocalDirectoryState,
-) -> PathBuf {
-    directory_state
-        .settings
-        .as_ref()
-        .map(|settings| PathBuf::from(&settings.workspace_dir))
-        .unwrap_or_else(|| app_data_dir.join("workspace"))
 }
 
 fn agent_file_write_client(
@@ -1804,6 +5033,9 @@ fn normalize_agent_action_type(action_type: &str) -> String {
 }
 
 fn normalize_agent_action_alias(action: &mut AgentChatActionProposal) {
+    if normalize_agent_app_update_alias(action) {
+        return;
+    }
     if normalize_agent_filesystem_mutation_alias(action) {
         return;
     }
@@ -1870,6 +5102,25 @@ fn normalize_agent_action_alias(action: &mut AgentChatActionProposal) {
             action.requires_confirmation = false;
         }
     }
+}
+
+fn normalize_agent_app_update_alias(action: &mut AgentChatActionProposal) -> bool {
+    let (action_type, risk, requires_confirmation) = match action.action_type.as_str() {
+        "app_update_check" | "check_app_update" | "check_for_updates" => {
+            ("app_update_check", "low", false)
+        }
+        "app_update_download" | "download_app_update" | "download_update" => {
+            ("app_update_download", "high", true)
+        }
+        "app_update_install" | "install_app_update" | "install_update" => {
+            ("app_update_install", "critical", true)
+        }
+        _ => return false,
+    };
+    action.action_type = action_type.to_string();
+    action.risk = Some(risk.to_string());
+    action.requires_confirmation = requires_confirmation;
+    true
 }
 
 fn normalize_agent_filesystem_mutation_alias(action: &mut AgentChatActionProposal) -> bool {
@@ -2201,6 +5452,10 @@ fn agent_action_capability(action_type: &str) -> Option<CapabilityKind> {
     match action_type {
         "browser_open" => Some(CapabilityKind::BrowserBrowse),
         "browser_browse" => Some(CapabilityKind::BrowserBrowse),
+        "app_update_check" => Some(CapabilityKind::AppUpdateCheck),
+        "app_update_download" => Some(CapabilityKind::AppUpdateDownload),
+        "app_update_install" => Some(CapabilityKind::AppUpdateInstall),
+        "skill_activate" => Some(CapabilityKind::SkillUse),
         "computer_control" => Some(CapabilityKind::ComputerControl),
         "computer_screenshot" => Some(CapabilityKind::ComputerScreenshot),
         "drive_read" => Some(CapabilityKind::DriveRead),
@@ -2224,16 +5479,15 @@ fn agent_action_capability(action_type: &str) -> Option<CapabilityKind> {
 fn is_supported_agent_action_type(action_type: &str) -> bool {
     matches!(
         action_type,
-        "browser_open"
+        "app_update_check"
+            | "app_update_download"
+            | "app_update_install"
+            | "browser_open"
             | "browser_browse"
             | "computer_control"
             | "computer_screenshot"
             | "create_report"
             | "deepseek_key_setup"
-            | "drive_read"
-            | "drive_write"
-            | "email_draft"
-            | "email_send"
             | "file_read"
             | "file_write"
             | "file_create"
@@ -2250,9 +5504,8 @@ fn is_supported_agent_action_type(action_type: &str) -> bool {
             | "office_update"
             | "operations_briefing"
             | "search_setup"
+            | "skill_activate"
             | "terminal_read"
-            | "terminal_write"
-            | "work_package_export"
             | "workspace_setup"
     )
 }
@@ -2277,7 +5530,8 @@ fn build_agent_chat_protocol_user_prompt(
         .unwrap_or_else(|| "none".to_string());
     let soul_profile = build_agent_soul_profile_prompt(runtime_context.soul_profile.as_ref());
     let memory_context = build_agent_memory_context_prompt(&runtime_context.memory_context);
-    let runtime_memory_sections = [soul_profile, memory_context]
+    let skill_catalog = build_agent_skill_catalog_prompt(&runtime_context.skill_catalog);
+    let runtime_memory_sections = [soul_profile, memory_context, skill_catalog]
         .into_iter()
         .filter(|section| !section.is_empty())
         .collect::<Vec<_>>()
@@ -2306,13 +5560,15 @@ fn build_agent_chat_protocol_user_prompt(
 	         - completion_advice: when a result is complete or partially complete, end with at most one short next-better suggestion grounded in the task. Keep it secondary and do not imply extra work already ran.\n\
 	         - Return exactly one structured agent envelope as JSON.\n\
 	         - Required JSON fields: protocol_version, reply_to_user, agent_actions, missing_prerequisites.\n\
-         - Supported agent_actions action_type values are browser_open, browser_browse, computer_control, computer_screenshot, file_read, file_write, file_create, file_update, file_delete, file_rename, directory_create, directory_rename, directory_delete, create_report, office_create, office_update, office_open, network_search, operations_briefing, terminal_read, terminal_write, workspace_setup, deepseek_key_setup, and search_setup.\n\
+         - Supported agent_actions action_type values are app_update_check, app_update_download, app_update_install, browser_open, browser_browse, computer_control, computer_screenshot, file_read, file_write, file_create, file_update, file_delete, file_rename, directory_create, directory_rename, directory_delete, create_report, office_create, office_update, office_open, network_search, operations_briefing, skill_activate, terminal_read, workspace_setup, deepseek_key_setup, and search_setup.\n\
+         - For DS Agent self-update requests, use app_update_check first. Propose app_update_download only when verified release status reports an update. Propose app_update_install only with target set to the exact installer_path returned by the verified download tool. Download and install require local approval; install is critical and can never be self-approved by the model.\n\
          - Do not use run_shell. For opening a website in the user's browser, use action_type browser_open with target set to the exact http:// or https:// URL. For reading or inspecting a web page as evidence, use browser_browse. If the user asked to log in, open the site only and ask the user to enter credentials manually.\n\
          - For local directory listing requests, use exactly one terminal_read action with target set to the exact local folder path. DS Agent will run a bounded non-recursive directory listing without executing arbitrary shell. Do not add a second action to read terminal output.\n\
          - For Windows local filesystem create, update, delete, or rename requests, use file_create, file_update, file_delete, file_rename, directory_create, directory_rename, or directory_delete with exact absolute local paths. Use content for file_create and file_update. Use destination for file_rename and directory_rename. Do not use run_shell for Windows file or directory mutation.\n\
          - browser_open may include preferred_browser=chrome only when the user explicitly asks for Chrome. DS Agent will fall back to the system default browser if Chrome is unavailable.\n\
          - For Word, Excel, and PowerPoint creation requests, prefer the built-in Office control plugin path: use action_type office_create and let DS Agent generate a real .docx, .xlsx, or .pptx before using desktop UI control. If the user asks for the Desktop, set target_location=\"desktop\" and target to the file name or desktop-relative path. If the user asks for the DS Agent workspace, set target_location=\"workspace\" or omit it. Do not infer or hide the location: express the user's location intent in target_location. Set content to either plain body text or JSON with app=word|excel|powerpoint, title, body, rows, slides, and optional target_location. Use office_create for tasks like creating a Word document containing requested text, creating a simple Excel workbook, or creating a PowerPoint deck. For updating an existing Office file, use action_type office_update with target set to the existing file and content as plain body text or JSON with app=word|excel|powerpoint, body, rows, and slides. DS Agent can append Word paragraphs, Excel rows, and PowerPoint slides deterministically. If the user asks to open the created or existing Office file, add a separate office_open action with the same target and target_location; DS Agent will prefer the matching Microsoft Office app and fall back to the system default app if it is unavailable.\n\
          - For desktop UI automation, use computer_screenshot to inspect the current desktop before planning screen-dependent clicks. Use computer_control only for one validated structured input action at a time. Set target to the app or window, set risk=critical, set requires_confirmation=true, and set content to exactly one of: click:x,y[,button], move:x,y, type:text, press:key, hotkey:key+key, or scroll:delta[,axis]. For multi-step desktop tasks such as editing an already open Word document, do not claim completion until DS Agent has actually completed the required local actions.\n\
+         - To use an installed declarative Skill listed in the runtime catalog, propose skill_activate with target set to the exact skill UUID and content set to the current user task context. Skill activation only loads hash-verified instructions as evidence; every later file, network, browser, Office, terminal, or Computer Use action remains separately validated by DS Agent.\n\
          - Each agent_actions item may include action_type, title, reason, risk, requires_confirmation, target, destination, target_location, preferred_browser, and content.\n\
          - For file_write or create_report, target must be a relative workspace path and content must be the exact UTF-8 text DS Agent should write after local validation. For office_create, office_update, or office_open, target must be a .docx, .xlsx, or .pptx path when supplied; use target_location=\"desktop\" only when the user explicitly asks for the Desktop.\n\
          - reply_to_user must describe the intended plan, not local completion. Do not say a file was created, opened, edited, or saved until DS Agent returns execution evidence.\n\
@@ -3429,6 +6685,23 @@ fn preferred_memory_candidate_conflict_target(record: &MemoryCandidateRecord) ->
         })
 }
 
+fn apply_memory_candidate_update_if_current(
+    store: &EventStore,
+    candidate_id: Uuid,
+    target_memory_id: Uuid,
+    note: String,
+) -> Result<bool, String> {
+    match store.update_memory_candidate_conflict(candidate_id, target_memory_id, note) {
+        Ok(_) => Ok(true),
+        Err(EventStoreError::InvalidState(message))
+            if message.contains("is not a current candidate conflict") =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(event_store_error(error)),
+    }
+}
+
 fn memory_background_maintenance_summary_default() -> MemoryBackgroundMaintenanceSummary {
     MemoryBackgroundMaintenanceSummary {
         retrieval_reviews_marked: 0,
@@ -3540,13 +6813,14 @@ fn apply_pending_memory_candidate_background_decision(
             let Some(target_memory_id) = preferred_memory_candidate_conflict_target(record) else {
                 return Ok(false);
             };
-            store
-                .update_memory_candidate_conflict(
-                    record.candidate.id,
-                    target_memory_id,
-                    note.clone(),
-                )
-                .map_err(event_store_error)?;
+            if !apply_memory_candidate_update_if_current(
+                store,
+                record.candidate.id,
+                target_memory_id,
+                note.clone(),
+            )? {
+                return Ok(false);
+            }
             summary.auto_updates_applied += 1;
             push_memory_background_action(
                 summary,
@@ -3698,8 +6972,16 @@ fn apply_pending_memory_candidate_background_decisions(
         .into_iter()
         .filter(|record| record.effective_status == MemoryCandidateStatus::Pending)
         .collect::<Vec<_>>();
-    for record in pending_candidates {
-        apply_pending_memory_candidate_background_decision(store, &record, summary)?;
+    for pending_candidate in pending_candidates {
+        let Some(current_record) = store
+            .list_memory_candidate_records()
+            .map_err(event_store_error)?
+            .into_iter()
+            .find(|record| record.candidate.id == pending_candidate.candidate.id)
+        else {
+            continue;
+        };
+        apply_pending_memory_candidate_background_decision(store, &current_record, summary)?;
     }
     Ok(())
 }
@@ -3843,19 +7125,34 @@ fn run_memory_background_maintenance_core(
                 .into_iter()
                 .find(|candidate| {
                     candidate.effective_status == MemoryCandidateStatus::Pending
+                        && candidate.candidate.source_id == Some(review.memory.id)
+                        && candidate.candidate.suggested_action
+                            == MemoryCandidateSuggestedAction::Update
                         && candidate.conflicting_memory_ids.contains(&review.memory.id)
                 });
             if let Some(candidate) = existing_pending_candidate {
                 let audit_note =
                     "Background maintenance automatically applied pending update candidate."
                         .to_string();
-                store
-                    .update_memory_candidate_conflict(
-                        candidate.candidate.id,
-                        review.memory.id,
-                        audit_note.clone(),
-                    )
-                    .map_err(event_store_error)?;
+                if !apply_memory_candidate_update_if_current(
+                    store,
+                    candidate.candidate.id,
+                    review.memory.id,
+                    audit_note.clone(),
+                )? {
+                    push_memory_background_action(
+                        &mut summary,
+                        Some(review.memory.id),
+                        review.memory.title.clone(),
+                        "update_candidate_deferred",
+                        "deferred",
+                        "Candidate conflict projection changed before maintenance could apply it.",
+                        latest_review_feedback_kind(&review),
+                        memory_candidate_model_used(&candidate.candidate),
+                        "Background maintenance deferred a stale candidate conflict.".to_string(),
+                    );
+                    continue;
+                }
                 summary.auto_candidate_decisions_applied += 1;
                 summary.auto_updates_applied += 1;
                 push_memory_background_action(
@@ -3890,13 +7187,25 @@ fn run_memory_background_maintenance_core(
             let audit_note =
                 "Background maintenance automatically applied update candidate from feedback."
                     .to_string();
-            store
-                .update_memory_candidate_conflict(
-                    candidate.candidate.id,
-                    review.memory.id,
-                    audit_note.clone(),
-                )
-                .map_err(event_store_error)?;
+            if !apply_memory_candidate_update_if_current(
+                store,
+                candidate.candidate.id,
+                review.memory.id,
+                audit_note.clone(),
+            )? {
+                push_memory_background_action(
+                    &mut summary,
+                    Some(review.memory.id),
+                    review.memory.title.clone(),
+                    "update_candidate_deferred",
+                    "deferred",
+                    "Candidate conflict projection changed before maintenance could apply it.",
+                    latest_review_feedback_kind(&review),
+                    model_used,
+                    "Background maintenance deferred a stale candidate conflict.".to_string(),
+                );
+                continue;
+            }
             summary.auto_candidate_decisions_applied += 1;
             summary.auto_updates_applied += 1;
             push_memory_background_action(
@@ -3927,6 +7236,56 @@ fn load_agent_memory_runtime_context(
     Ok(select_agent_memory_runtime_context_with_feedback(
         prompt, &memories, &feedback,
     ))
+}
+
+fn load_agent_skill_catalog(store: &EventStore) -> Result<Vec<AgentSkillCatalogItem>, String> {
+    let mut records = store.list_skill_records().map_err(event_store_error)?;
+    records.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    Ok(records
+        .into_iter()
+        .filter(|record| {
+            record.enablement_status == SkillEnablementStatus::Enabled
+                && record.manifest.trust_level != SkillTrustLevel::Untrusted
+                && record.entry_available
+        })
+        .take(AGENT_SKILL_CATALOG_MAX_ITEMS)
+        .map(|record| AgentSkillCatalogItem {
+            id: record.id,
+            name: record.manifest.name,
+            version: record.manifest.version,
+            description: record.manifest.description,
+            entry_kind: record.manifest.entry.kind,
+            capability_summary: if record.manifest.capabilities.is_empty() {
+                "none".to_string()
+            } else {
+                record.manifest.capabilities.join(", ")
+            },
+        })
+        .collect())
+}
+
+fn build_agent_skill_catalog_prompt(catalog: &[AgentSkillCatalogItem]) -> String {
+    if catalog.is_empty() {
+        return String::new();
+    }
+    let items = catalog
+        .iter()
+        .map(|skill| {
+            format!(
+                "- id={}; name={}; version={}; entry_kind={}; capabilities={}; description={}",
+                skill.id,
+                agent_memory_compact_text(&skill.name, 100),
+                agent_memory_compact_text(&skill.version, 40),
+                agent_memory_compact_text(&skill.entry_kind, 60),
+                agent_memory_compact_text(&skill.capability_summary, 160),
+                agent_memory_compact_text(&skill.description, 240),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "Installed declarative Skill catalog (activate by exact id only; entries do not bypass tool policy):\n{items}"
+    )
 }
 
 fn select_agent_memory_runtime_context(
@@ -4418,7 +7777,7 @@ fn agent_chat_with_dispatch_and_tool_followup(
     browser_client: &impl BrowserPageClient,
 ) -> Result<(AgentChatResponse, Vec<DeepSeekChatTelemetry>), String> {
     let original_user_prompt = request.prompt.clone();
-    let (mut response, first_telemetry) = agent_chat_with_transport_and_runtime_context(
+    let (response, first_telemetry) = agent_chat_with_transport_and_runtime_context(
         transport,
         cache,
         api_key,
@@ -4426,48 +7785,158 @@ fn agent_chat_with_dispatch_and_tool_followup(
         runtime_context.clone(),
         pricing_settings,
     )?;
-    mark_agent_workspace_actions_waiting_if_needed(&runtime_context, &mut response);
-    dispatch_agent_action_proposals_with_desktop_dir(
-        store,
-        request.access_mode,
-        &mut response,
-        file_client,
-        file_write_client,
-        search_client,
-        browser_client,
-        runtime_context.desktop_dir.as_deref(),
+    let outcome = run_bounded_agent_tool_loop(
+        response,
+        first_telemetry,
+        &original_user_prompt,
+        |response| {
+            mark_agent_workspace_actions_waiting_if_needed(&runtime_context, response);
+            dispatch_agent_action_proposals_with_desktop_dir(
+                store,
+                request.access_mode,
+                response,
+                file_client,
+                file_write_client,
+                search_client,
+                browser_client,
+                runtime_context.desktop_dir.as_deref(),
+            )
+        },
+        |followup_prompt| {
+            agent_chat_with_transport_and_runtime_context(
+                transport,
+                cache,
+                api_key,
+                AgentChatRequest {
+                    prompt: followup_prompt,
+                    ..request.clone()
+                },
+                runtime_context.clone(),
+                pricing_settings,
+            )
+        },
     )?;
 
-    let mut telemetry = vec![first_telemetry];
-    let Some(followup_prompt) =
-        build_agent_tool_evidence_followup_prompt(&original_user_prompt, &response)
-    else {
-        apply_agent_local_completion_summary(&mut response);
-        return Ok((response, telemetry));
-    };
+    Ok((outcome.response, outcome.telemetry))
+}
 
-    let followup_result = agent_chat_with_transport_and_runtime_context(
-        transport,
-        cache,
-        api_key,
-        AgentChatRequest {
-            prompt: followup_prompt,
-            ..request
-        },
-        runtime_context,
-        pricing_settings,
-    );
-    match followup_result {
-        Ok((followup_response, followup_telemetry)) => {
-            telemetry.push(followup_telemetry);
-            response = merge_agent_chat_followup_response(response, followup_response);
+struct AgentToolLoopOutcome {
+    response: AgentChatResponse,
+    telemetry: Vec<DeepSeekChatTelemetry>,
+    tool_rounds: usize,
+    limit_reached: bool,
+}
+
+fn run_bounded_agent_tool_loop(
+    initial_response: AgentChatResponse,
+    initial_telemetry: DeepSeekChatTelemetry,
+    original_user_prompt: &str,
+    mut dispatch: impl FnMut(&mut AgentChatResponse) -> Result<(), String>,
+    mut request_followup: impl FnMut(
+        String,
+    ) -> Result<(AgentChatResponse, DeepSeekChatTelemetry), String>,
+) -> Result<AgentToolLoopOutcome, String> {
+    let mut telemetry = vec![initial_telemetry];
+    let mut accumulated_response: Option<AgentChatResponse> = None;
+    let mut current_response = initial_response;
+    let mut tool_rounds = 0;
+
+    loop {
+        if current_response.proposed_actions.is_empty() {
+            let response = match accumulated_response {
+                Some(accumulated) => {
+                    merge_agent_chat_followup_response(accumulated, current_response)
+                }
+                None => current_response,
+            };
+            return Ok(AgentToolLoopOutcome {
+                response,
+                telemetry,
+                tool_rounds,
+                limit_reached: false,
+            });
         }
-        Err(error) => {
-            response.content = agent_chat_completed_actions_followup_failed_message(&error);
+
+        tool_rounds += 1;
+        dispatch(&mut current_response)?;
+        let current_round_has_evidence =
+            build_agent_tool_evidence_followup_prompt(original_user_prompt, &current_response)
+                .is_some();
+        let mut response = accumulated_response
+            .take()
+            .map(|accumulated| {
+                merge_agent_chat_followup_response(accumulated, current_response.clone())
+            })
+            .unwrap_or_else(|| current_response.clone());
+
+        if !current_round_has_evidence {
+            apply_agent_local_completion_summary(&mut response);
+            return Ok(AgentToolLoopOutcome {
+                response,
+                telemetry,
+                tool_rounds,
+                limit_reached: false,
+            });
         }
+
+        let followup_prompt =
+            build_agent_tool_evidence_followup_prompt(original_user_prompt, &response).ok_or_else(
+                || "agent tool evidence follow-up prompt was not produced".to_string(),
+            )?;
+        let (mut followup_response, followup_telemetry) = match request_followup(followup_prompt) {
+            Ok(result) => result,
+            Err(error) => {
+                response.content = agent_chat_completed_actions_followup_failed_message(&error);
+                return Ok(AgentToolLoopOutcome {
+                    response,
+                    telemetry,
+                    tool_rounds,
+                    limit_reached: false,
+                });
+            }
+        };
+        telemetry.push(followup_telemetry);
+
+        if followup_response.proposed_actions.is_empty() {
+            return Ok(AgentToolLoopOutcome {
+                response: merge_agent_chat_followup_response(response, followup_response),
+                telemetry,
+                tool_rounds,
+                limit_reached: false,
+            });
+        }
+
+        if tool_rounds >= AGENT_TOOL_LOOP_MAX_ROUNDS {
+            block_agent_actions_at_tool_loop_limit(&mut followup_response);
+            return Ok(AgentToolLoopOutcome {
+                response: merge_agent_chat_followup_response(response, followup_response),
+                telemetry,
+                tool_rounds,
+                limit_reached: true,
+            });
+        }
+
+        accumulated_response = Some(response);
+        current_response = followup_response;
     }
+}
 
-    Ok((response, telemetry))
+fn block_agent_actions_at_tool_loop_limit(response: &mut AgentChatResponse) {
+    let reason = format!(
+        "agent loop stopped after {} tool rounds; start a new task or provide guidance before continuing",
+        AGENT_TOOL_LOOP_MAX_ROUNDS
+    );
+    for action in &mut response.proposed_actions {
+        action.execution_state = "blocked".to_string();
+        action.blocked_reason = Some(reason.clone());
+        action.dispatch_note = Some(reason.clone());
+        action.permission_request_id = None;
+        action.capability_invocation_id = None;
+    }
+    response.content = format!(
+        "DS Agent 已达到 {} 轮工具执行上限，最新动作未执行。请检查已完成证据后追加指引或开始新任务。",
+        AGENT_TOOL_LOOP_MAX_ROUNDS
+    );
 }
 
 fn agent_chat_with_transport_and_runtime_context_with_api_key_fallback(
@@ -4540,14 +8009,51 @@ fn run_agent_chat_with_clients_and_api_keys(
     search_client: &impl NetworkSearchClient,
     browser_client: &impl BrowserPageClient,
 ) -> Result<AgentChatResponse, String> {
-    let original_user_prompt = request.prompt.clone();
-    let memory_context = {
+    run_agent_chat_with_clients_and_api_keys_and_computer_use(
+        store,
+        transport,
+        cache,
+        api_keys,
+        request,
+        runtime_context,
+        pricing_settings,
+        file_client,
+        file_write_client,
+        search_client,
+        browser_client,
+        &UnavailableAgentComputerUseClient,
+    )
+}
+
+fn run_agent_chat_with_clients_and_api_keys_and_computer_use(
+    store: &Mutex<EventStore>,
+    transport: &impl DeepSeekChatCompletionTransport,
+    cache: &DeepSeekMemoryChatCompletionCache,
+    api_keys: &[String],
+    request: AgentChatRequest,
+    runtime_context: AgentChatRuntimeContext,
+    pricing_settings: Option<&DeepSeekPricingSettings>,
+    file_client: &impl FileContentClient,
+    file_write_client: &impl AgentWritableArtifactClient,
+    search_client: &impl NetworkSearchClient,
+    browser_client: &impl BrowserPageClient,
+    computer_use_client: &(impl ComputerScreenshotClient + ComputerControlClient),
+) -> Result<AgentChatResponse, String> {
+    let mut request = request;
+    let (memory_context, initial_guidance, skill_catalog) = {
         let store = store.lock().map_err(|_| lock_error())?;
-        load_agent_memory_runtime_context(&store, &original_user_prompt)?
+        (
+            load_agent_memory_runtime_context(&store, &request.prompt)?,
+            load_agent_run_guidance_batch(&store, runtime_context.active_run_id)?,
+            load_agent_skill_catalog(&store)?,
+        )
     };
+    request.prompt = agent_prompt_with_run_guidance(request.prompt, &initial_guidance);
+    let original_user_prompt = request.prompt.clone();
     let mut runtime_context = runtime_context;
     runtime_context.memory_context = memory_context;
-    let (mut response, first_telemetry, followup_api_key) =
+    runtime_context.skill_catalog = skill_catalog;
+    let (response, first_telemetry, followup_api_key) =
         agent_chat_with_transport_and_runtime_context_with_api_key_fallback(
             transport,
             cache,
@@ -4556,50 +8062,73 @@ fn run_agent_chat_with_clients_and_api_keys(
             runtime_context.clone(),
             pricing_settings,
         )?;
-    mark_agent_workspace_actions_waiting_if_needed(&runtime_context, &mut response);
-
-    {
-        dispatch_agent_action_proposals_with_store_mutex(
-            store,
-            request.access_mode,
-            &mut response,
-            file_client,
-            file_write_client,
-            search_client,
-            browser_client,
-            runtime_context.desktop_dir.as_deref(),
-        )?;
-    }
-
-    let mut telemetry = vec![first_telemetry];
+    record_agent_run_guidance_batch_applied(
+        store,
+        runtime_context.active_run_id,
+        &initial_guidance,
+    )?;
     let model_route_context = serialize_agent_chat_context_value(&request.model_route);
     let thinking_level_context = serialize_agent_chat_context_value(&request.thinking_level);
     let access_mode_context = serialize_agent_chat_context_value(&request.access_mode);
-    if let Some(followup_prompt) =
-        build_agent_tool_evidence_followup_prompt(&original_user_prompt, &response)
-    {
-        let followup_result = agent_chat_with_transport_and_runtime_context(
-            transport,
-            cache,
-            &followup_api_key,
-            AgentChatRequest {
-                prompt: followup_prompt,
-                ..request
-            },
-            runtime_context.clone(),
-            pricing_settings,
-        );
-        match followup_result {
-            Ok((followup_response, followup_telemetry)) => {
-                telemetry.push(followup_telemetry);
-                response = merge_agent_chat_followup_response(response, followup_response);
+    let loop_outcome = run_bounded_agent_tool_loop(
+        response,
+        first_telemetry,
+        &original_user_prompt,
+        |response| {
+            mark_agent_workspace_actions_waiting_if_needed(&runtime_context, response);
+            if let Some(run_id) = runtime_context.active_run_id {
+                if agent_run_cancel_requested(store, run_id)? {
+                    mark_agent_actions_cancel_requested(response);
+                    return Ok(());
+                }
             }
-            Err(error) => {
-                response.content = agent_chat_completed_actions_followup_failed_message(&error);
+            dispatch_agent_action_proposals_with_store_mutex(
+                store,
+                request.access_mode,
+                response,
+                file_client,
+                file_write_client,
+                search_client,
+                browser_client,
+                computer_use_client,
+                runtime_context.desktop_dir.as_deref(),
+                runtime_context.active_run_id,
+            )
+        },
+        |followup_prompt| {
+            let guidance = {
+                let store = store.lock().map_err(|_| lock_error())?;
+                load_agent_run_guidance_batch(&store, runtime_context.active_run_id)?
+            };
+            let followup_prompt = agent_prompt_with_run_guidance(followup_prompt, &guidance);
+            let result = agent_chat_with_transport_and_runtime_context(
+                transport,
+                cache,
+                &followup_api_key,
+                AgentChatRequest {
+                    prompt: followup_prompt,
+                    ..request.clone()
+                },
+                runtime_context.clone(),
+                pricing_settings,
+            );
+            if result.is_ok() {
+                record_agent_run_guidance_batch_applied(
+                    store,
+                    runtime_context.active_run_id,
+                    &guidance,
+                )?;
             }
+            result
+        },
+    )?;
+    let mut response = loop_outcome.response;
+    let telemetry = loop_outcome.telemetry;
+
+    if loop_outcome.limit_reached {
+        if let Some(run_id) = runtime_context.active_run_id {
+            record_agent_tool_loop_limit_step(store, run_id, loop_outcome.tool_rounds)?;
         }
-    } else {
-        apply_agent_local_completion_summary(&mut response);
     }
 
     {
@@ -4625,6 +8154,136 @@ fn run_agent_chat_with_clients_and_api_keys(
     }
 
     Ok(response)
+}
+
+fn mark_agent_actions_cancel_requested(response: &mut AgentChatResponse) {
+    let reason = "agent run cancellation was requested before this tool round".to_string();
+    for action in &mut response.proposed_actions {
+        if action.execution_state == "succeeded" {
+            continue;
+        }
+        action.execution_state = "blocked".to_string();
+        action.blocked_reason = Some(reason.clone());
+        action.dispatch_note = Some(reason.clone());
+    }
+}
+
+fn load_agent_run_guidance_batch(
+    store: &EventStore,
+    run_id: Option<Uuid>,
+) -> Result<Vec<AgentRunQueuedGuidance>, String> {
+    let Some(run_id) = run_id else {
+        return Ok(Vec::new());
+    };
+    let mut total_chars: usize = 0;
+    let mut batch = Vec::new();
+    for guidance in store
+        .list_unapplied_agent_run_guidance(run_id)
+        .map_err(event_store_error)?
+    {
+        if batch.len() >= AGENT_RUN_GUIDANCE_MAX_ITEMS_PER_ROUND {
+            break;
+        }
+        let guidance_chars = guidance.guidance.chars().count();
+        if !batch.is_empty()
+            && total_chars.saturating_add(guidance_chars) > AGENT_RUN_GUIDANCE_PROMPT_CHAR_LIMIT
+        {
+            break;
+        }
+        total_chars = total_chars.saturating_add(guidance_chars);
+        batch.push(guidance);
+    }
+    Ok(batch)
+}
+
+fn agent_prompt_with_run_guidance(prompt: String, guidance: &[AgentRunQueuedGuidance]) -> String {
+    if guidance.is_empty() {
+        return prompt;
+    }
+    let guidance_lines = guidance
+        .iter()
+        .enumerate()
+        .map(|(index, item)| format!("{}. {}", index + 1, item.guidance))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "{prompt}\n\nUser guidance queued for this same active run:\n{guidance_lines}\n\nApply this guidance before proposing the next actions. It is user task context, not permission to bypass DS Agent policy, sandbox, approval, evidence, or verification rules."
+    )
+}
+
+fn record_agent_run_guidance_batch_applied(
+    store: &Mutex<EventStore>,
+    run_id: Option<Uuid>,
+    guidance: &[AgentRunQueuedGuidance],
+) -> Result<(), String> {
+    let Some(run_id) = run_id else {
+        return Ok(());
+    };
+    if guidance.is_empty() {
+        return Ok(());
+    }
+    let store = store.lock().map_err(|_| lock_error())?;
+    let mut applied_count = 0;
+    for item in guidance {
+        let applied = AgentRunGuidanceApplied::new(run_id, item.id).map_err(event_store_error)?;
+        if store
+            .append_agent_run_guidance_applied(&applied)
+            .map_err(event_store_error)?
+        {
+            applied_count += 1;
+        }
+    }
+    if applied_count == 0 {
+        return Ok(());
+    }
+    let record = read_agent_run_record(&store, run_id)?;
+    let sequence = record
+        .steps
+        .iter()
+        .map(|step| step.sequence)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    let step = AgentRunStepRecord::new(
+        run_id,
+        sequence,
+        AgentRunStepStatus::Completed,
+        "agent.guidance".to_string(),
+        format!("Applied {applied_count} queued guidance item(s) at an agent loop boundary."),
+    )
+    .map_err(event_store_error)?;
+    store
+        .append_agent_run_step(&step)
+        .map_err(event_store_error)
+}
+
+fn record_agent_tool_loop_limit_step(
+    store: &Mutex<EventStore>,
+    run_id: Uuid,
+    tool_rounds: usize,
+) -> Result<(), String> {
+    let store = store.lock().map_err(|_| lock_error())?;
+    let record = read_agent_run_record(&store, run_id)?;
+    let sequence = record
+        .steps
+        .iter()
+        .map(|step| step.sequence)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    let step = AgentRunStepRecord::new(
+        run_id,
+        sequence,
+        AgentRunStepStatus::Failed,
+        "agent.loop".to_string(),
+        format!(
+            "Bounded agent loop stopped after {tool_rounds} tool rounds before executing newly proposed actions."
+        ),
+    )
+    .map_err(event_store_error)?;
+    store
+        .append_agent_run_step(&step)
+        .map_err(event_store_error)
 }
 
 fn run_next_queued_agent_chat_with_clients_and_api_keys(
@@ -4681,16 +8340,70 @@ fn run_queued_agent_chat_with_clients_and_api_keys(
     search_client: &impl NetworkSearchClient,
     browser_client: &impl BrowserPageClient,
 ) -> Result<Option<AgentRunWorkerResult>, String> {
+    run_queued_agent_chat_with_clients_and_api_keys_and_computer_use(
+        store,
+        transport,
+        cache,
+        api_keys,
+        run_id,
+        execution_prompt,
+        worker_id,
+        model_route,
+        thinking_level,
+        access_mode,
+        runtime_context,
+        pricing_settings,
+        file_client,
+        file_write_client,
+        search_client,
+        browser_client,
+        &UnavailableAgentComputerUseClient,
+    )
+}
+
+fn run_queued_agent_chat_with_clients_and_api_keys_and_computer_use(
+    store: &Mutex<EventStore>,
+    transport: &impl DeepSeekChatCompletionTransport,
+    cache: &DeepSeekMemoryChatCompletionCache,
+    api_keys: &[String],
+    run_id: Option<Uuid>,
+    execution_prompt: Option<String>,
+    worker_id: String,
+    model_route: ModelRoute,
+    thinking_level: ThinkingLevel,
+    access_mode: AccessMode,
+    runtime_context: AgentChatRuntimeContext,
+    pricing_settings: Option<&DeepSeekPricingSettings>,
+    file_client: &impl FileContentClient,
+    file_write_client: &impl AgentWritableArtifactClient,
+    search_client: &impl NetworkSearchClient,
+    browser_client: &impl BrowserPageClient,
+    computer_use_client: &(impl ComputerScreenshotClient + ComputerControlClient),
+) -> Result<Option<AgentRunWorkerResult>, String> {
+    if let (Some(run_id), Some(execution_prompt)) = (run_id, execution_prompt.as_ref()) {
+        let execution_prompt = execution_prompt.trim();
+        if !execution_prompt.is_empty() {
+            let store = store.lock().map_err(|_| lock_error())?;
+            let record = read_agent_run_record(&store, run_id)?;
+            if record.execution_prompt.as_deref() != Some(execution_prompt) {
+                let context = AgentRunExecutionContext::new(run_id, execution_prompt.to_string())
+                    .map_err(event_store_error)?;
+                store
+                    .append_agent_run_execution_context(&context)
+                    .map_err(event_store_error)?;
+            }
+        }
+    }
     let Some(claimed) = ({
         let store = store.lock().map_err(|_| lock_error())?;
         match run_id {
             Some(run_id) => Some(
                 store
-                    .claim_agent_run(run_id, worker_id, AGENT_RUN_WORKER_LEASE_SECONDS)
+                    .claim_agent_run(run_id, worker_id.clone(), AGENT_RUN_WORKER_LEASE_SECONDS)
                     .map_err(event_store_error)?,
             ),
             None => store
-                .claim_next_agent_run(worker_id, AGENT_RUN_WORKER_LEASE_SECONDS)
+                .claim_next_agent_run(worker_id.clone(), AGENT_RUN_WORKER_LEASE_SECONDS)
                 .map_err(event_store_error)?,
         }
     }) else {
@@ -4700,7 +8413,10 @@ fn run_queued_agent_chat_with_clients_and_api_keys(
     let prompt = execution_prompt
         .map(|prompt| prompt.trim().to_string())
         .filter(|prompt| !prompt.is_empty())
+        .or_else(|| claimed.execution_prompt.clone())
         .unwrap_or_else(|| claimed.prompt.clone());
+    let mut runtime_context = runtime_context;
+    runtime_context.active_run_id = Some(run_id);
 
     record_agent_run_worker_step(
         store,
@@ -4711,24 +8427,41 @@ fn run_queued_agent_chat_with_clients_and_api_keys(
         "Background worker claimed the queued run and started DeepSeek execution.",
     )?;
 
-    let response_result = run_agent_chat_with_clients_and_api_keys(
+    let (response_result, heartbeat_result) = run_with_agent_run_lease_heartbeat(
         store,
-        transport,
-        cache,
-        api_keys,
-        AgentChatRequest {
-            prompt,
-            model_route,
-            thinking_level,
-            access_mode,
+        run_id,
+        &worker_id,
+        AGENT_RUN_WORKER_LEASE_SECONDS,
+        StdDuration::from_secs(AGENT_RUN_WORKER_HEARTBEAT_SECONDS),
+        || {
+            run_agent_chat_with_clients_and_api_keys_and_computer_use(
+                store,
+                transport,
+                cache,
+                api_keys,
+                AgentChatRequest {
+                    prompt,
+                    model_route,
+                    thinking_level,
+                    access_mode,
+                },
+                runtime_context,
+                pricing_settings,
+                file_client,
+                file_write_client,
+                search_client,
+                browser_client,
+                computer_use_client,
+            )
         },
-        runtime_context,
-        pricing_settings,
-        file_client,
-        file_write_client,
-        search_client,
-        browser_client,
     );
+    let response_result = match (response_result, heartbeat_result) {
+        (response_result, Ok(())) => response_result,
+        (Ok(_), Err(heartbeat_error)) => Err(heartbeat_error),
+        (Err(error), Err(heartbeat_error)) => Err(format!(
+            "{error}; additionally failed to renew the agent run lease: {heartbeat_error}"
+        )),
+    };
 
     match response_result {
         Ok(response) => {
@@ -4741,15 +8474,29 @@ fn run_queued_agent_chat_with_clients_and_api_keys(
                 "DeepSeek execution completed and the response was recorded.",
             )?;
             let cancel_requested = agent_run_cancel_requested(store, run_id)?;
-            let (status, summary) = if cancel_requested {
-                (
+            let record = if cancel_requested {
+                finish_agent_run_from_worker(
+                    store,
+                    run_id,
                     AgentRunStatus::Cancelled,
-                    "Agent run cancelled before committing the completed response.".to_string(),
-                )
+                    Some(
+                        "Agent run cancelled before committing the completed response.".to_string(),
+                    ),
+                    None,
+                )?
+            } else if let Some((status, reason, tool_invocation_id)) =
+                agent_run_waiting_outcome_from_response(&response)
+            {
+                transition_agent_run_from_worker(store, run_id, status, reason, tool_invocation_id)?
             } else {
-                (AgentRunStatus::Completed, response.content.clone())
+                finish_agent_run_from_worker(
+                    store,
+                    run_id,
+                    AgentRunStatus::Completed,
+                    Some(response.content.clone()),
+                    None,
+                )?
             };
-            let record = finish_agent_run_from_worker(store, run_id, status, Some(summary), None)?;
             Ok(Some(AgentRunWorkerResult { record, response }))
         }
         Err(error) => {
@@ -4781,9 +8528,118 @@ fn run_queued_agent_chat_with_clients_and_api_keys(
     }
 }
 
+fn run_with_agent_run_lease_heartbeat<T>(
+    store: &Mutex<EventStore>,
+    run_id: Uuid,
+    worker_id: &str,
+    lease_seconds: i64,
+    heartbeat_interval: StdDuration,
+    operation: impl FnOnce() -> T,
+) -> (T, Result<(), String>) {
+    std::thread::scope(|scope| {
+        let (stop_tx, stop_rx) = std::sync::mpsc::sync_channel(1);
+        let heartbeat = scope.spawn(move || loop {
+            match stop_rx.recv_timeout(heartbeat_interval) {
+                Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    let event_store = store.lock().map_err(|_| lock_error())?;
+                    event_store
+                        .heartbeat_agent_run_lease(run_id, worker_id.to_string(), lease_seconds)
+                        .map_err(event_store_error)?;
+                }
+            }
+        });
+        let output = operation();
+        let _ = stop_tx.send(());
+        let heartbeat_result = heartbeat
+            .join()
+            .map_err(|_| "agent run lease heartbeat thread panicked".to_string())
+            .and_then(|result| result);
+        (output, heartbeat_result)
+    })
+}
+
 fn agent_run_cancel_requested(store: &Mutex<EventStore>, run_id: Uuid) -> Result<bool, String> {
     let store = store.lock().map_err(|_| lock_error())?;
     Ok(read_agent_run_record(&store, run_id)?.cancel_requested)
+}
+
+fn agent_run_waiting_outcome_from_response(
+    response: &AgentChatResponse,
+) -> Option<(AgentRunStatus, String, Option<Uuid>)> {
+    if !response.missing_prerequisites.is_empty()
+        || response
+            .proposed_actions
+            .iter()
+            .any(|action| action.execution_state == "waiting_prerequisite")
+    {
+        let detail = response
+            .missing_prerequisites
+            .iter()
+            .map(|prerequisite| prerequisite.message.trim())
+            .filter(|message| !message.is_empty())
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Some((
+            AgentRunStatus::WaitingForPrerequisite,
+            if detail.is_empty() {
+                "Agent run is waiting for a local prerequisite.".to_string()
+            } else {
+                format!("Agent run is waiting for prerequisites: {detail}")
+            },
+            response
+                .proposed_actions
+                .iter()
+                .find_map(|action| action.capability_invocation_id),
+        ));
+    }
+
+    if let Some(action) = response
+        .proposed_actions
+        .iter()
+        .find(|action| action.execution_state == "needs_confirmation")
+    {
+        return Some((
+            AgentRunStatus::WaitingForConfirmation,
+            action
+                .dispatch_note
+                .clone()
+                .unwrap_or_else(|| "Agent run is waiting for local confirmation.".to_string()),
+            action.capability_invocation_id,
+        ));
+    }
+
+    response
+        .proposed_actions
+        .iter()
+        .find(|action| matches!(action.execution_state.as_str(), "blocked" | "failed"))
+        .map(|action| {
+            (
+                AgentRunStatus::Blocked,
+                action
+                    .blocked_reason
+                    .clone()
+                    .or_else(|| action.dispatch_note.clone())
+                    .unwrap_or_else(|| "Agent run was blocked by local policy.".to_string()),
+                action.capability_invocation_id,
+            )
+        })
+}
+
+fn transition_agent_run_from_worker(
+    store: &Mutex<EventStore>,
+    run_id: Uuid,
+    status: AgentRunStatus,
+    reason: String,
+    tool_invocation_id: Option<Uuid>,
+) -> Result<AgentRunRecord, String> {
+    let transition = AgentRunTransition::new(run_id, status, reason, tool_invocation_id)
+        .map_err(event_store_error)?;
+    let store = store.lock().map_err(|_| lock_error())?;
+    store
+        .append_agent_run_transition(&transition)
+        .map_err(event_store_error)?;
+    read_agent_run_record(&store, run_id)
 }
 
 fn record_agent_run_worker_step(
@@ -5226,15 +9082,22 @@ fn agent_action_needs_model_evidence_followup(action: &AgentChatActionProposal) 
             | "file_write"
             | "network_search"
             | "operations_briefing"
+            | "skill_activate"
             | "terminal_read"
     )
 }
 
 fn merge_agent_chat_followup_response(
-    initial_response: AgentChatResponse,
+    mut initial_response: AgentChatResponse,
     mut followup_response: AgentChatResponse,
 ) -> AgentChatResponse {
+    initial_response
+        .proposed_actions
+        .append(&mut followup_response.proposed_actions);
     followup_response.proposed_actions = initial_response.proposed_actions;
+    initial_response
+        .missing_prerequisites
+        .append(&mut followup_response.missing_prerequisites);
     followup_response.missing_prerequisites = initial_response.missing_prerequisites;
     followup_response
         .memory_candidates
@@ -5597,7 +9460,7 @@ fn dispatch_agent_action_proposals(
     search_client: &impl NetworkSearchClient,
     browser_client: &impl BrowserPageClient,
 ) -> Result<(), String> {
-    dispatch_agent_action_proposals_with_desktop_dir(
+    dispatch_agent_action_proposals_with_desktop_dir_and_computer_use(
         store,
         access_mode,
         response,
@@ -5605,6 +9468,7 @@ fn dispatch_agent_action_proposals(
         file_write_client,
         search_client,
         browser_client,
+        &UnavailableAgentComputerUseClient,
         None,
     )
 }
@@ -5617,6 +9481,30 @@ fn dispatch_agent_action_proposals_with_desktop_dir(
     file_write_client: &impl AgentWritableArtifactClient,
     search_client: &impl NetworkSearchClient,
     browser_client: &impl BrowserPageClient,
+    desktop_dir: Option<&Path>,
+) -> Result<(), String> {
+    dispatch_agent_action_proposals_with_desktop_dir_and_computer_use(
+        store,
+        access_mode,
+        response,
+        file_client,
+        file_write_client,
+        search_client,
+        browser_client,
+        &UnavailableAgentComputerUseClient,
+        desktop_dir,
+    )
+}
+
+fn dispatch_agent_action_proposals_with_desktop_dir_and_computer_use(
+    store: &EventStore,
+    access_mode: AccessMode,
+    response: &mut AgentChatResponse,
+    file_client: &impl FileContentClient,
+    file_write_client: &impl AgentWritableArtifactClient,
+    search_client: &impl NetworkSearchClient,
+    browser_client: &impl BrowserPageClient,
+    computer_use_client: &(impl ComputerScreenshotClient + ComputerControlClient),
     desktop_dir: Option<&Path>,
 ) -> Result<(), String> {
     if !response.missing_prerequisites.is_empty() {
@@ -5637,7 +9525,370 @@ fn dispatch_agent_action_proposals_with_desktop_dir(
             continue;
         }
 
+        if is_agent_app_update_action(&action.action_type) {
+            if action.action_type == "app_update_install" {
+                action.execution_state = "needs_confirmation".to_string();
+                action.dispatch_note = Some(
+                    "verified installer execution must resume from the local approval card"
+                        .to_string(),
+                );
+            } else {
+                dispatch_agent_app_update_action_with_executor(
+                    store,
+                    access_mode,
+                    action,
+                    &BuiltinAgentToolExecutor,
+                )?;
+            }
+            continue;
+        }
+
+        if action.action_type == "skill_activate" {
+            let run_id = agent_tool_run_id_for_action(store, action)?;
+            let invocation = dispatch_agent_skill_activate_tool_with_executor(
+                store,
+                access_mode,
+                action,
+                run_id,
+            )?;
+            finish_agent_run_after_resumed_tool(store, &invocation)?;
+            continue;
+        }
+
+        if action.action_type == "office_create" {
+            let run_id = agent_tool_run_id_for_action(store, action)?;
+            let invocation = dispatch_agent_office_create_tool_with_executor(
+                store,
+                access_mode,
+                action,
+                run_id,
+                file_write_client,
+            )?;
+            finish_agent_run_after_resumed_tool(store, &invocation)?;
+            continue;
+        }
+
+        if action.action_type == "office_update" {
+            let run_id = agent_tool_run_id_for_action(store, action)?;
+            let invocation = dispatch_agent_office_update_tool_with_executor(
+                store,
+                access_mode,
+                action,
+                run_id,
+                file_write_client,
+            )?;
+            finish_agent_run_after_resumed_tool(store, &invocation)?;
+            continue;
+        }
+
+        if action.action_type == "office_open" {
+            let run_id = agent_tool_run_id_for_action(store, action)?;
+            let invocation = dispatch_agent_office_open_tool_with_executor(
+                store,
+                access_mode,
+                action,
+                run_id,
+                file_write_client,
+            )?;
+            finish_agent_run_after_resumed_tool(store, &invocation)?;
+            continue;
+        }
+
+        if action.action_type == "browser_open" {
+            let run_id = agent_tool_run_id_for_action(store, action)?;
+            let invocation = dispatch_agent_browser_open_tool_with_executor(
+                store,
+                access_mode,
+                action,
+                run_id,
+                &SystemBrowserUrlOpener,
+            )?;
+            finish_agent_run_after_resumed_tool(store, &invocation)?;
+            continue;
+        }
+
+        if action.action_type == "operations_briefing" {
+            let run_id = agent_tool_run_id_for_action(store, action)?;
+            let client = LocalEvidenceFolderClient::new(20, 512 * 1024);
+            let invocation = dispatch_agent_operations_briefing_tool_with_executor(
+                store,
+                access_mode,
+                action,
+                run_id,
+                &client,
+            )?;
+            finish_agent_run_after_resumed_tool(store, &invocation)?;
+            continue;
+        }
+
         let approval_state = agent_action_approval_state(store, action)?;
+
+        if action.action_type == "file_read" {
+            match approval_state {
+                AgentActionApprovalState::Rejected => {
+                    block_agent_tool_action_after_approval_resolution(
+                        store,
+                        action,
+                        "local permission request was rejected before file read dispatch",
+                        "local permission was rejected; file read tool was not executed",
+                    )?;
+                }
+                AgentActionApprovalState::Unavailable => {
+                    block_agent_tool_action_after_approval_resolution(
+                        store,
+                        action,
+                        "approved local permission is no longer available",
+                        "permission grant is unavailable; file read tool was not executed",
+                    )?;
+                }
+                _ => {
+                    let run_id = agent_tool_run_id_for_action(store, action)?;
+                    let invocation = dispatch_agent_file_read_tool_with_executor(
+                        store,
+                        access_mode,
+                        action,
+                        run_id,
+                        file_client,
+                    )?;
+                    finish_agent_run_after_resumed_tool(store, &invocation)?;
+                }
+            }
+            continue;
+        }
+
+        if is_agent_file_write_tool_action(&action.action_type) {
+            match approval_state {
+                AgentActionApprovalState::Rejected => {
+                    block_agent_tool_action_after_approval_resolution(
+                        store,
+                        action,
+                        "local permission request was rejected before file write dispatch",
+                        "local permission was rejected; file write tool was not executed",
+                    )?;
+                }
+                AgentActionApprovalState::Unavailable => {
+                    block_agent_tool_action_after_approval_resolution(
+                        store,
+                        action,
+                        "approved local permission is no longer available",
+                        "permission grant is unavailable; file write tool was not executed",
+                    )?;
+                }
+                _ => {
+                    let run_id = agent_tool_run_id_for_action(store, action)?;
+                    let invocation = dispatch_agent_file_write_tool_with_executor(
+                        store,
+                        access_mode,
+                        action,
+                        run_id,
+                        file_write_client,
+                    )?;
+                    finish_agent_run_after_resumed_tool(store, &invocation)?;
+                }
+            }
+            continue;
+        }
+
+        if is_agent_filesystem_mutation_action(&action.action_type) {
+            match approval_state {
+                AgentActionApprovalState::Rejected => {
+                    block_agent_tool_action_after_approval_resolution(
+                        store,
+                        action,
+                        "local permission request was rejected before filesystem mutation dispatch",
+                        "local permission was rejected; filesystem mutation tool was not executed",
+                    )?;
+                }
+                AgentActionApprovalState::Unavailable => {
+                    block_agent_tool_action_after_approval_resolution(
+                        store,
+                        action,
+                        "approved local permission is no longer available",
+                        "permission grant is unavailable; filesystem mutation tool was not executed",
+                    )?;
+                }
+                _ => {
+                    let run_id = agent_tool_run_id_for_action(store, action)?;
+                    let client = LocalFileSystemMutationClient;
+                    let invocation = dispatch_agent_filesystem_mutation_tool_with_executor(
+                        store,
+                        access_mode,
+                        action,
+                        run_id,
+                        &client,
+                    )?;
+                    finish_agent_run_after_resumed_tool(store, &invocation)?;
+                }
+            }
+            continue;
+        }
+
+        if action.action_type == "terminal_read" {
+            match approval_state {
+                AgentActionApprovalState::Rejected => {
+                    block_agent_tool_action_after_approval_resolution(
+                        store,
+                        action,
+                        "local permission request was rejected before terminal read dispatch",
+                        "local permission was rejected; terminal read tool was not executed",
+                    )?;
+                }
+                AgentActionApprovalState::Unavailable => {
+                    block_agent_tool_action_after_approval_resolution(
+                        store,
+                        action,
+                        "approved local permission is no longer available",
+                        "permission grant is unavailable; terminal read tool was not executed",
+                    )?;
+                }
+                _ => {
+                    let run_id = agent_tool_run_id_for_action(store, action)?;
+                    let client = agent_terminal_read_client()?;
+                    let invocation = dispatch_agent_terminal_read_tool_with_executor(
+                        store,
+                        access_mode,
+                        action,
+                        run_id,
+                        desktop_dir,
+                        &client,
+                    )?;
+                    finish_agent_run_after_resumed_tool(store, &invocation)?;
+                }
+            }
+            continue;
+        }
+
+        if action.action_type == "network_search" {
+            match approval_state {
+                AgentActionApprovalState::Rejected => {
+                    block_agent_tool_action_after_approval_resolution(
+                        store,
+                        action,
+                        "local permission request was rejected before network search dispatch",
+                        "local permission was rejected; network search tool was not executed",
+                    )?;
+                }
+                AgentActionApprovalState::Unavailable => {
+                    block_agent_tool_action_after_approval_resolution(
+                        store,
+                        action,
+                        "approved local permission is no longer available",
+                        "permission grant is unavailable; network search tool was not executed",
+                    )?;
+                }
+                _ => {
+                    let run_id = agent_tool_run_id_for_action(store, action)?;
+                    let invocation = dispatch_agent_network_search_tool_with_executor(
+                        store,
+                        access_mode,
+                        action,
+                        run_id,
+                        search_client,
+                    )?;
+                    finish_agent_run_after_resumed_tool(store, &invocation)?;
+                }
+            }
+            continue;
+        }
+
+        if action.action_type == "browser_browse" {
+            match approval_state {
+                AgentActionApprovalState::Rejected => {
+                    block_agent_tool_action_after_approval_resolution(
+                        store,
+                        action,
+                        "local permission request was rejected before browser browse dispatch",
+                        "local permission was rejected; browser browse tool was not executed",
+                    )?;
+                }
+                AgentActionApprovalState::Unavailable => {
+                    block_agent_tool_action_after_approval_resolution(
+                        store,
+                        action,
+                        "approved local permission is no longer available",
+                        "permission grant is unavailable; browser browse tool was not executed",
+                    )?;
+                }
+                _ => {
+                    let run_id = agent_tool_run_id_for_action(store, action)?;
+                    let invocation = dispatch_agent_browser_browse_tool_with_executor(
+                        store,
+                        access_mode,
+                        action,
+                        run_id,
+                        browser_client,
+                    )?;
+                    finish_agent_run_after_resumed_tool(store, &invocation)?;
+                }
+            }
+            continue;
+        }
+
+        if action.action_type == "computer_screenshot" {
+            match approval_state {
+                AgentActionApprovalState::Rejected => {
+                    block_agent_tool_action_after_approval_resolution(
+                        store,
+                        action,
+                        "local permission request was rejected before screen inspection",
+                        "local permission was rejected; screenshot tool was not executed",
+                    )?;
+                }
+                AgentActionApprovalState::Unavailable => {
+                    block_agent_tool_action_after_approval_resolution(
+                        store,
+                        action,
+                        "approved local permission is no longer available",
+                        "permission grant is unavailable; screenshot tool was not executed",
+                    )?;
+                }
+                _ => {
+                    let run_id = agent_tool_run_id_for_action(store, action)?;
+                    let invocation = dispatch_agent_computer_screenshot_tool_with_executor(
+                        store,
+                        access_mode,
+                        action,
+                        run_id,
+                        computer_use_client,
+                    )?;
+                    finish_agent_run_after_resumed_tool(store, &invocation)?;
+                }
+            }
+            continue;
+        }
+
+        if action.action_type == "computer_control" {
+            match approval_state {
+                AgentActionApprovalState::Rejected => {
+                    block_agent_tool_action_after_approval_resolution(
+                        store,
+                        action,
+                        "local permission request was rejected before computer control dispatch",
+                        "local permission was rejected; computer control tool was not executed",
+                    )?;
+                }
+                AgentActionApprovalState::Unavailable => {
+                    block_agent_tool_action_after_approval_resolution(
+                        store,
+                        action,
+                        "approved local permission is no longer available",
+                        "permission grant is unavailable; computer control tool was not executed",
+                    )?;
+                }
+                _ => {
+                    let run_id = agent_tool_run_id_for_action(store, action)?;
+                    let invocation = dispatch_agent_computer_control_tool_with_executor(
+                        store,
+                        access_mode,
+                        action,
+                        run_id,
+                        computer_use_client,
+                    )?;
+                    finish_agent_run_after_resumed_tool(store, &invocation)?;
+                }
+            }
+            continue;
+        }
 
         if action.action_type == "operations_briefing" {
             match approval_state {
@@ -5709,14 +9960,11 @@ fn dispatch_agent_action_proposals_with_desktop_dir(
                         Some(approval_request_id),
                     )?;
                 } else {
-                    dispatch_agent_file_read_action(
-                        store,
-                        access_mode,
-                        action,
-                        file_client,
-                        true,
-                        Some(approval_request_id),
-                    )?;
+                    action.execution_state = "blocked".to_string();
+                    action.blocked_reason = Some(
+                        "file read action has no registered generic tool contract".to_string(),
+                    );
+                    action.dispatch_note = action.blocked_reason.clone();
                 }
             }
             (
@@ -5742,8 +9990,32 @@ fn dispatch_agent_action_proposals_with_desktop_dir(
                         true,
                         Some(approval_request_id),
                     )?;
-                } else if is_agent_filesystem_mutation_action(&action.action_type) {
-                    dispatch_agent_filesystem_mutation_action(
+                } else {
+                    action.execution_state = "blocked".to_string();
+                    action.blocked_reason = Some(
+                        "file write action has no registered generic tool contract".to_string(),
+                    );
+                    action.dispatch_note = action.blocked_reason.clone();
+                }
+            }
+            (
+                Some(CapabilityKind::NetworkSearch),
+                Some(PolicyDecision::Ask),
+                AgentActionApprovalState::Approved(_),
+            ) => {
+                action.execution_state = "blocked".to_string();
+                action.blocked_reason = Some(
+                    "network search action has no registered generic tool contract".to_string(),
+                );
+                action.dispatch_note = action.blocked_reason.clone();
+            }
+            (
+                Some(CapabilityKind::BrowserBrowse),
+                Some(PolicyDecision::Ask),
+                AgentActionApprovalState::Approved(approval_request_id),
+            ) => {
+                if action.action_type == "browser_open" {
+                    dispatch_agent_browser_open_action(
                         store,
                         access_mode,
                         action,
@@ -5751,57 +10023,12 @@ fn dispatch_agent_action_proposals_with_desktop_dir(
                         Some(approval_request_id),
                     )?;
                 } else {
-                    dispatch_agent_file_write_action(
-                        store,
-                        access_mode,
-                        action,
-                        file_write_client,
-                        true,
-                        Some(approval_request_id),
-                    )?;
+                    action.execution_state = "blocked".to_string();
+                    action.blocked_reason = Some(
+                        "browser browse action has no registered generic tool contract".to_string(),
+                    );
+                    action.dispatch_note = action.blocked_reason.clone();
                 }
-            }
-            (
-                Some(CapabilityKind::NetworkSearch),
-                Some(PolicyDecision::Ask),
-                AgentActionApprovalState::Approved(approval_request_id),
-            ) => {
-                dispatch_agent_network_search_action(
-                    store,
-                    access_mode,
-                    action,
-                    search_client,
-                    true,
-                    Some(approval_request_id),
-                )?;
-            }
-            (
-                Some(CapabilityKind::TerminalRead),
-                Some(PolicyDecision::Ask),
-                AgentActionApprovalState::Approved(approval_request_id),
-            ) => {
-                dispatch_agent_terminal_read_action(
-                    store,
-                    access_mode,
-                    action,
-                    true,
-                    Some(approval_request_id),
-                    desktop_dir,
-                )?;
-            }
-            (
-                Some(CapabilityKind::BrowserBrowse),
-                Some(PolicyDecision::Ask),
-                AgentActionApprovalState::Approved(approval_request_id),
-            ) => {
-                dispatch_agent_browser_action(
-                    store,
-                    access_mode,
-                    action,
-                    browser_client,
-                    true,
-                    Some(approval_request_id),
-                )?;
             }
             (Some(_), Some(PolicyDecision::Ask), AgentActionApprovalState::Approved(_)) => {
                 action.dispatch_note =
@@ -5821,14 +10048,11 @@ fn dispatch_agent_action_proposals_with_desktop_dir(
                         None,
                     )?;
                 } else {
-                    dispatch_agent_file_read_action(
-                        store,
-                        access_mode,
-                        action,
-                        file_client,
-                        false,
-                        None,
-                    )?;
+                    action.execution_state = "blocked".to_string();
+                    action.blocked_reason = Some(
+                        "file read action has no registered generic tool contract".to_string(),
+                    );
+                    action.dispatch_note = action.blocked_reason.clone();
                 }
             }
             (Some(CapabilityKind::FileWrite), Some(PolicyDecision::Allow), _) => {
@@ -5850,54 +10074,31 @@ fn dispatch_agent_action_proposals_with_desktop_dir(
                         false,
                         None,
                     )?;
-                } else if is_agent_filesystem_mutation_action(&action.action_type) {
-                    dispatch_agent_filesystem_mutation_action(
-                        store,
-                        access_mode,
-                        action,
-                        false,
-                        None,
-                    )?;
                 } else {
-                    dispatch_agent_file_write_action(
-                        store,
-                        access_mode,
-                        action,
-                        file_write_client,
-                        false,
-                        None,
-                    )?;
+                    action.execution_state = "blocked".to_string();
+                    action.blocked_reason = Some(
+                        "file write action has no registered generic tool contract".to_string(),
+                    );
+                    action.dispatch_note = action.blocked_reason.clone();
                 }
             }
             (Some(CapabilityKind::NetworkSearch), Some(PolicyDecision::Allow), _) => {
-                dispatch_agent_network_search_action(
-                    store,
-                    access_mode,
-                    action,
-                    search_client,
-                    false,
-                    None,
-                )?;
-            }
-            (Some(CapabilityKind::TerminalRead), Some(PolicyDecision::Allow), _) => {
-                dispatch_agent_terminal_read_action(
-                    store,
-                    access_mode,
-                    action,
-                    false,
-                    None,
-                    desktop_dir,
-                )?;
+                action.execution_state = "blocked".to_string();
+                action.blocked_reason = Some(
+                    "network search action has no registered generic tool contract".to_string(),
+                );
+                action.dispatch_note = action.blocked_reason.clone();
             }
             (Some(CapabilityKind::BrowserBrowse), Some(PolicyDecision::Allow), _) => {
-                dispatch_agent_browser_action(
-                    store,
-                    access_mode,
-                    action,
-                    browser_client,
-                    false,
-                    None,
-                )?;
+                if action.action_type == "browser_open" {
+                    dispatch_agent_browser_open_action(store, access_mode, action, false, None)?;
+                } else {
+                    action.execution_state = "blocked".to_string();
+                    action.blocked_reason = Some(
+                        "browser browse action has no registered generic tool contract".to_string(),
+                    );
+                    action.dispatch_note = action.blocked_reason.clone();
+                }
             }
             (Some(_), Some(PolicyDecision::Allow), _) => {
                 action.dispatch_note = Some(
@@ -5920,7 +10121,9 @@ fn dispatch_agent_action_proposals_with_store_mutex(
     file_write_client: &impl AgentWritableArtifactClient,
     search_client: &impl NetworkSearchClient,
     browser_client: &impl BrowserPageClient,
+    computer_use_client: &(impl ComputerScreenshotClient + ComputerControlClient),
     desktop_dir: Option<&Path>,
+    active_run_id: Option<Uuid>,
 ) -> Result<(), String> {
     if !response.missing_prerequisites.is_empty() {
         mark_agent_actions_waiting_for_prerequisites(response);
@@ -5940,10 +10143,354 @@ fn dispatch_agent_action_proposals_with_store_mutex(
             continue;
         }
 
+        if is_agent_app_update_action(&action.action_type) {
+            dispatch_agent_app_update_action_with_store_mutex(
+                store_mutex,
+                access_mode,
+                action,
+                active_run_id,
+                &BuiltinAgentToolExecutor,
+            )?;
+            continue;
+        }
+
+        if action.action_type == "skill_activate" {
+            dispatch_agent_skill_activate_tool_with_store_mutex(
+                store_mutex,
+                access_mode,
+                action,
+                active_run_id,
+            )?;
+            continue;
+        }
+
+        if action.action_type == "office_create" {
+            dispatch_agent_office_create_tool_with_store_mutex(
+                store_mutex,
+                access_mode,
+                action,
+                active_run_id,
+                file_write_client,
+            )?;
+            continue;
+        }
+
+        if action.action_type == "office_update" {
+            dispatch_agent_office_update_tool_with_store_mutex(
+                store_mutex,
+                access_mode,
+                action,
+                active_run_id,
+                file_write_client,
+            )?;
+            continue;
+        }
+
+        if action.action_type == "office_open" {
+            dispatch_agent_office_open_tool_with_store_mutex(
+                store_mutex,
+                access_mode,
+                action,
+                active_run_id,
+                file_write_client,
+            )?;
+            continue;
+        }
+
+        if action.action_type == "browser_open" {
+            dispatch_agent_browser_open_tool_with_store_mutex(
+                store_mutex,
+                access_mode,
+                action,
+                active_run_id,
+                &SystemBrowserUrlOpener,
+            )?;
+            continue;
+        }
+
+        if action.action_type == "operations_briefing" {
+            let client = LocalEvidenceFolderClient::new(20, 512 * 1024);
+            dispatch_agent_operations_briefing_tool_with_store_mutex(
+                store_mutex,
+                access_mode,
+                action,
+                active_run_id,
+                &client,
+            )?;
+            continue;
+        }
+
         let approval_state = {
             let store = store_mutex.lock().map_err(|_| lock_error())?;
             agent_action_approval_state(&store, action)?
         };
+
+        if action.action_type == "file_read" {
+            match approval_state {
+                AgentActionApprovalState::Rejected => {
+                    let store = store_mutex.lock().map_err(|_| lock_error())?;
+                    block_agent_tool_action_after_approval_resolution(
+                        &store,
+                        action,
+                        "local permission request was rejected before file read dispatch",
+                        "local permission was rejected; file read tool was not executed",
+                    )?;
+                }
+                AgentActionApprovalState::Unavailable => {
+                    let store = store_mutex.lock().map_err(|_| lock_error())?;
+                    block_agent_tool_action_after_approval_resolution(
+                        &store,
+                        action,
+                        "approved local permission is no longer available",
+                        "permission grant is unavailable; file read tool was not executed",
+                    )?;
+                }
+                _ => {
+                    dispatch_agent_file_read_tool_with_store_mutex(
+                        store_mutex,
+                        access_mode,
+                        action,
+                        active_run_id,
+                        file_client,
+                    )?;
+                }
+            }
+            continue;
+        }
+
+        if is_agent_file_write_tool_action(&action.action_type) {
+            match approval_state {
+                AgentActionApprovalState::Rejected => {
+                    let store = store_mutex.lock().map_err(|_| lock_error())?;
+                    block_agent_tool_action_after_approval_resolution(
+                        &store,
+                        action,
+                        "local permission request was rejected before file write dispatch",
+                        "local permission was rejected; file write tool was not executed",
+                    )?;
+                }
+                AgentActionApprovalState::Unavailable => {
+                    let store = store_mutex.lock().map_err(|_| lock_error())?;
+                    block_agent_tool_action_after_approval_resolution(
+                        &store,
+                        action,
+                        "approved local permission is no longer available",
+                        "permission grant is unavailable; file write tool was not executed",
+                    )?;
+                }
+                _ => {
+                    dispatch_agent_file_write_tool_with_store_mutex(
+                        store_mutex,
+                        access_mode,
+                        action,
+                        active_run_id,
+                        file_write_client,
+                    )?;
+                }
+            }
+            continue;
+        }
+
+        if is_agent_filesystem_mutation_action(&action.action_type) {
+            match approval_state {
+                AgentActionApprovalState::Rejected => {
+                    let store = store_mutex.lock().map_err(|_| lock_error())?;
+                    block_agent_tool_action_after_approval_resolution(
+                        &store,
+                        action,
+                        "local permission request was rejected before filesystem mutation dispatch",
+                        "local permission was rejected; filesystem mutation tool was not executed",
+                    )?;
+                }
+                AgentActionApprovalState::Unavailable => {
+                    let store = store_mutex.lock().map_err(|_| lock_error())?;
+                    block_agent_tool_action_after_approval_resolution(
+                        &store,
+                        action,
+                        "approved local permission is no longer available",
+                        "permission grant is unavailable; filesystem mutation tool was not executed",
+                    )?;
+                }
+                _ => {
+                    let client = LocalFileSystemMutationClient;
+                    dispatch_agent_filesystem_mutation_tool_with_store_mutex(
+                        store_mutex,
+                        access_mode,
+                        action,
+                        active_run_id,
+                        &client,
+                    )?;
+                }
+            }
+            continue;
+        }
+
+        if action.action_type == "terminal_read" {
+            match approval_state {
+                AgentActionApprovalState::Rejected => {
+                    let store = store_mutex.lock().map_err(|_| lock_error())?;
+                    block_agent_tool_action_after_approval_resolution(
+                        &store,
+                        action,
+                        "local permission request was rejected before terminal read dispatch",
+                        "local permission was rejected; terminal read tool was not executed",
+                    )?;
+                }
+                AgentActionApprovalState::Unavailable => {
+                    let store = store_mutex.lock().map_err(|_| lock_error())?;
+                    block_agent_tool_action_after_approval_resolution(
+                        &store,
+                        action,
+                        "approved local permission is no longer available",
+                        "permission grant is unavailable; terminal read tool was not executed",
+                    )?;
+                }
+                _ => {
+                    let client = agent_terminal_read_client()?;
+                    dispatch_agent_terminal_read_tool_with_store_mutex(
+                        store_mutex,
+                        access_mode,
+                        action,
+                        active_run_id,
+                        desktop_dir,
+                        &client,
+                    )?;
+                }
+            }
+            continue;
+        }
+
+        if action.action_type == "network_search" {
+            match approval_state {
+                AgentActionApprovalState::Rejected => {
+                    let store = store_mutex.lock().map_err(|_| lock_error())?;
+                    block_agent_tool_action_after_approval_resolution(
+                        &store,
+                        action,
+                        "local permission request was rejected before network search dispatch",
+                        "local permission was rejected; network search tool was not executed",
+                    )?;
+                }
+                AgentActionApprovalState::Unavailable => {
+                    let store = store_mutex.lock().map_err(|_| lock_error())?;
+                    block_agent_tool_action_after_approval_resolution(
+                        &store,
+                        action,
+                        "approved local permission is no longer available",
+                        "permission grant is unavailable; network search tool was not executed",
+                    )?;
+                }
+                _ => {
+                    dispatch_agent_network_search_tool_with_store_mutex(
+                        store_mutex,
+                        access_mode,
+                        action,
+                        active_run_id,
+                        search_client,
+                    )?;
+                }
+            }
+            continue;
+        }
+
+        if action.action_type == "browser_browse" {
+            match approval_state {
+                AgentActionApprovalState::Rejected => {
+                    let store = store_mutex.lock().map_err(|_| lock_error())?;
+                    block_agent_tool_action_after_approval_resolution(
+                        &store,
+                        action,
+                        "local permission request was rejected before browser browse dispatch",
+                        "local permission was rejected; browser browse tool was not executed",
+                    )?;
+                }
+                AgentActionApprovalState::Unavailable => {
+                    let store = store_mutex.lock().map_err(|_| lock_error())?;
+                    block_agent_tool_action_after_approval_resolution(
+                        &store,
+                        action,
+                        "approved local permission is no longer available",
+                        "permission grant is unavailable; browser browse tool was not executed",
+                    )?;
+                }
+                _ => {
+                    dispatch_agent_browser_browse_tool_with_store_mutex(
+                        store_mutex,
+                        access_mode,
+                        action,
+                        active_run_id,
+                        browser_client,
+                    )?;
+                }
+            }
+            continue;
+        }
+
+        if action.action_type == "computer_screenshot" {
+            match approval_state {
+                AgentActionApprovalState::Rejected => {
+                    let store = store_mutex.lock().map_err(|_| lock_error())?;
+                    block_agent_tool_action_after_approval_resolution(
+                        &store,
+                        action,
+                        "local permission request was rejected before screen inspection",
+                        "local permission was rejected; screenshot tool was not executed",
+                    )?;
+                }
+                AgentActionApprovalState::Unavailable => {
+                    let store = store_mutex.lock().map_err(|_| lock_error())?;
+                    block_agent_tool_action_after_approval_resolution(
+                        &store,
+                        action,
+                        "approved local permission is no longer available",
+                        "permission grant is unavailable; screenshot tool was not executed",
+                    )?;
+                }
+                _ => {
+                    dispatch_agent_computer_screenshot_tool_with_store_mutex(
+                        store_mutex,
+                        access_mode,
+                        action,
+                        active_run_id,
+                        computer_use_client,
+                    )?;
+                }
+            }
+            continue;
+        }
+
+        if action.action_type == "computer_control" {
+            match approval_state {
+                AgentActionApprovalState::Rejected => {
+                    let store = store_mutex.lock().map_err(|_| lock_error())?;
+                    block_agent_tool_action_after_approval_resolution(
+                        &store,
+                        action,
+                        "local permission request was rejected before computer control dispatch",
+                        "local permission was rejected; computer control tool was not executed",
+                    )?;
+                }
+                AgentActionApprovalState::Unavailable => {
+                    let store = store_mutex.lock().map_err(|_| lock_error())?;
+                    block_agent_tool_action_after_approval_resolution(
+                        &store,
+                        action,
+                        "approved local permission is no longer available",
+                        "permission grant is unavailable; computer control tool was not executed",
+                    )?;
+                }
+                _ => {
+                    dispatch_agent_computer_control_tool_with_store_mutex(
+                        store_mutex,
+                        access_mode,
+                        action,
+                        active_run_id,
+                        computer_use_client,
+                    )?;
+                }
+            }
+            continue;
+        }
 
         match (action.capability, action.policy_decision, approval_state) {
             (Some(CapabilityKind::FileRead), Some(PolicyDecision::Allow), _) => {
@@ -5958,14 +10505,11 @@ fn dispatch_agent_action_proposals_with_store_mutex(
                         None,
                     )?;
                 } else {
-                    dispatch_agent_file_read_action_with_store_mutex(
-                        store_mutex,
-                        access_mode,
-                        action,
-                        file_client,
-                        false,
-                        None,
-                    )?;
+                    action.execution_state = "blocked".to_string();
+                    action.blocked_reason = Some(
+                        "file read action has no registered generic tool contract".to_string(),
+                    );
+                    action.dispatch_note = action.blocked_reason.clone();
                 }
             }
             (
@@ -5984,39 +10528,12 @@ fn dispatch_agent_action_proposals_with_store_mutex(
                         Some(approval_request_id),
                     )?;
                 } else {
-                    dispatch_agent_file_read_action_with_store_mutex(
-                        store_mutex,
-                        access_mode,
-                        action,
-                        file_client,
-                        true,
-                        Some(approval_request_id),
-                    )?;
+                    action.execution_state = "blocked".to_string();
+                    action.blocked_reason = Some(
+                        "file read action has no registered generic tool contract".to_string(),
+                    );
+                    action.dispatch_note = action.blocked_reason.clone();
                 }
-            }
-            (Some(CapabilityKind::TerminalRead), Some(PolicyDecision::Allow), _) => {
-                dispatch_agent_terminal_read_action_with_store_mutex(
-                    store_mutex,
-                    access_mode,
-                    action,
-                    false,
-                    None,
-                    desktop_dir,
-                )?;
-            }
-            (
-                Some(CapabilityKind::TerminalRead),
-                Some(PolicyDecision::Ask),
-                AgentActionApprovalState::Approved(approval_request_id),
-            ) => {
-                dispatch_agent_terminal_read_action_with_store_mutex(
-                    store_mutex,
-                    access_mode,
-                    action,
-                    true,
-                    Some(approval_request_id),
-                    desktop_dir,
-                )?;
             }
             _ => {
                 let mut single_response = AgentChatResponse {
@@ -6069,6 +10586,30 @@ fn resume_agent_chat_action_with_clients(
     browser_client: &impl BrowserPageClient,
     desktop_dir: Option<&Path>,
 ) -> Result<AgentChatActionProposal, String> {
+    resume_agent_chat_action_with_clients_and_computer_use(
+        store,
+        access_mode,
+        action,
+        file_client,
+        file_write_client,
+        search_client,
+        browser_client,
+        &UnavailableAgentComputerUseClient,
+        desktop_dir,
+    )
+}
+
+fn resume_agent_chat_action_with_clients_and_computer_use(
+    store: &EventStore,
+    access_mode: AccessMode,
+    action: AgentChatActionProposal,
+    file_client: &impl FileContentClient,
+    file_write_client: &impl AgentWritableArtifactClient,
+    search_client: &impl NetworkSearchClient,
+    browser_client: &impl BrowserPageClient,
+    computer_use_client: &(impl ComputerScreenshotClient + ComputerControlClient),
+    desktop_dir: Option<&Path>,
+) -> Result<AgentChatActionProposal, String> {
     let mut response = AgentChatResponse {
         id: Uuid::new_v4(),
         role: "assistant".to_string(),
@@ -6086,7 +10627,7 @@ fn resume_agent_chat_action_with_clients(
         estimated_cost_micro_usd: None,
         created_at: Utc::now(),
     };
-    dispatch_agent_action_proposals_with_desktop_dir(
+    dispatch_agent_action_proposals_with_desktop_dir_and_computer_use(
         store,
         access_mode,
         &mut response,
@@ -6094,6 +10635,7 @@ fn resume_agent_chat_action_with_clients(
         file_write_client,
         search_client,
         browser_client,
+        computer_use_client,
         desktop_dir,
     )?;
     response
@@ -6176,7 +10718,7 @@ fn mark_office_open_actions_waiting_for_pending_create(response: &mut AgentChatR
         .filter(|action| {
             matches!(
                 action.execution_state.as_str(),
-                "needs_confirmation" | "waiting_prerequisite" | "blocked" | "failed"
+                "proposed" | "needs_confirmation" | "waiting_prerequisite" | "blocked" | "failed"
             )
         })
         .filter_map(|action| normalized_agent_action_target(action))
@@ -6307,109 +10849,12 @@ fn record_agent_action_permission_request(
     Ok(())
 }
 
-fn dispatch_agent_file_read_action(
-    store: &EventStore,
-    access_mode: AccessMode,
-    action: &mut AgentChatActionProposal,
-    file_client: &impl FileContentClient,
-    approval_granted: bool,
-    approval_request_id: Option<Uuid>,
-) -> Result<(), String> {
-    let Some(target) = action
-        .target
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        action.execution_state = "blocked".to_string();
-        action.blocked_reason = Some("file_read target is required before dispatch".to_string());
-        return Ok(());
-    };
-
-    let outcome = run_file_read(
-        FileReadRequest {
-            access_mode,
-            path: target.to_string(),
-            approval_granted,
-        },
-        file_client,
-    )?;
-    let mut invocation = outcome.invocation;
-    invocation.approval_request_id = approval_request_id;
-    let entry = PermissionAuditEntry::evaluate(access_mode, CapabilityKind::FileRead);
-    if !approval_granted || outcome.access_request.decision == PolicyDecision::Allow {
-        store
-            .append_capability_access_request(&outcome.access_request)
-            .map_err(event_store_error)?;
-    }
-    store
-        .append_permission_audit_entry(&entry)
-        .map_err(event_store_error)?;
-    store
-        .append_capability_invocation(&invocation)
-        .map_err(event_store_error)?;
-
-    action.capability_invocation_id = Some(invocation.id);
-    action.execution_state = agent_action_state_from_invocation(invocation.status);
-    action.dispatch_note = agent_action_dispatch_note(&invocation);
-    Ok(())
-}
-
-fn dispatch_agent_file_read_action_with_store_mutex(
-    store_mutex: &Mutex<EventStore>,
-    access_mode: AccessMode,
-    action: &mut AgentChatActionProposal,
-    file_client: &impl FileContentClient,
-    approval_granted: bool,
-    approval_request_id: Option<Uuid>,
-) -> Result<(), String> {
-    let Some(target) = action
-        .target
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        action.execution_state = "blocked".to_string();
-        action.blocked_reason = Some("file_read target is required before dispatch".to_string());
-        return Ok(());
-    };
-
-    let outcome = run_file_read(
-        FileReadRequest {
-            access_mode,
-            path: target.to_string(),
-            approval_granted,
-        },
-        file_client,
-    )?;
-    let mut invocation = outcome.invocation;
-    invocation.approval_request_id = approval_request_id;
-    let entry = PermissionAuditEntry::evaluate(access_mode, CapabilityKind::FileRead);
-
-    {
-        let store = store_mutex.lock().map_err(|_| lock_error())?;
-        if !approval_granted || outcome.access_request.decision == PolicyDecision::Allow {
-            store
-                .append_capability_access_request(&outcome.access_request)
-                .map_err(event_store_error)?;
-        }
-        store
-            .append_permission_audit_entry(&entry)
-            .map_err(event_store_error)?;
-        store
-            .append_capability_invocation(&invocation)
-            .map_err(event_store_error)?;
-    }
-
-    action.capability_invocation_id = Some(invocation.id);
-    action.execution_state = agent_action_state_from_invocation(invocation.status);
-    action.dispatch_note = agent_action_dispatch_note(&invocation);
-    Ok(())
-}
-
 fn agent_terminal_read_client() -> Result<LocalTerminalReadClient, String> {
     let working_dir = std::env::current_dir().map_err(event_store_error)?;
-    Ok(LocalTerminalReadClient::new(working_dir, 4_000))
+    Ok(LocalTerminalReadClient::new(
+        working_dir,
+        TERMINAL_READ_OUTPUT_CHAR_LIMIT,
+    ))
 }
 
 fn agent_terminal_read_command_from_target(
@@ -6448,146 +10893,6 @@ fn agent_terminal_read_command_from_target(
     }
 
     Ok(trimmed.to_string())
-}
-
-fn dispatch_agent_terminal_read_action(
-    store: &EventStore,
-    access_mode: AccessMode,
-    action: &mut AgentChatActionProposal,
-    approval_granted: bool,
-    approval_request_id: Option<Uuid>,
-    desktop_dir: Option<&Path>,
-) -> Result<(), String> {
-    let Some(command) = action
-        .target
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        action.execution_state = "blocked".to_string();
-        action.blocked_reason =
-            Some("terminal_read target or command is required before dispatch".to_string());
-        return Ok(());
-    };
-
-    let command = match agent_terminal_read_command_from_target(command, desktop_dir) {
-        Ok(command) => command,
-        Err(error) => {
-            action.execution_state = "blocked".to_string();
-            action.blocked_reason = Some(error.clone());
-            action.dispatch_note = Some(error);
-            return Ok(());
-        }
-    };
-
-    let client = agent_terminal_read_client()?;
-    let outcome = match run_terminal_read_capability(
-        TerminalReadRequest {
-            access_mode,
-            command,
-            approval_granted,
-        },
-        &client,
-    ) {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            action.execution_state = "failed".to_string();
-            action.blocked_reason = Some(error.clone());
-            action.dispatch_note = Some(error);
-            return Ok(());
-        }
-    };
-    let mut invocation = outcome.invocation;
-    invocation.approval_request_id = approval_request_id;
-    let entry = PermissionAuditEntry::evaluate(access_mode, CapabilityKind::TerminalRead);
-    if !approval_granted || outcome.access_request.decision == PolicyDecision::Allow {
-        store
-            .append_capability_access_request(&outcome.access_request)
-            .map_err(event_store_error)?;
-    }
-    store
-        .append_permission_audit_entry(&entry)
-        .map_err(event_store_error)?;
-    store
-        .append_capability_invocation(&invocation)
-        .map_err(event_store_error)?;
-
-    action.capability_invocation_id = Some(invocation.id);
-    action.execution_state = agent_action_state_from_invocation(invocation.status);
-    action.dispatch_note = agent_action_dispatch_note(&invocation);
-    Ok(())
-}
-
-fn dispatch_agent_terminal_read_action_with_store_mutex(
-    store_mutex: &Mutex<EventStore>,
-    access_mode: AccessMode,
-    action: &mut AgentChatActionProposal,
-    approval_granted: bool,
-    approval_request_id: Option<Uuid>,
-    desktop_dir: Option<&Path>,
-) -> Result<(), String> {
-    let Some(command) = action
-        .target
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        action.execution_state = "blocked".to_string();
-        action.blocked_reason =
-            Some("terminal_read target or command is required before dispatch".to_string());
-        return Ok(());
-    };
-
-    let command = match agent_terminal_read_command_from_target(command, desktop_dir) {
-        Ok(command) => command,
-        Err(error) => {
-            action.execution_state = "blocked".to_string();
-            action.blocked_reason = Some(error.clone());
-            action.dispatch_note = Some(error);
-            return Ok(());
-        }
-    };
-
-    let client = agent_terminal_read_client()?;
-    let outcome = match run_terminal_read_capability(
-        TerminalReadRequest {
-            access_mode,
-            command,
-            approval_granted,
-        },
-        &client,
-    ) {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            action.execution_state = "failed".to_string();
-            action.blocked_reason = Some(error.clone());
-            action.dispatch_note = Some(error);
-            return Ok(());
-        }
-    };
-    let mut invocation = outcome.invocation;
-    invocation.approval_request_id = approval_request_id;
-    let entry = PermissionAuditEntry::evaluate(access_mode, CapabilityKind::TerminalRead);
-
-    {
-        let store = store_mutex.lock().map_err(|_| lock_error())?;
-        if !approval_granted || outcome.access_request.decision == PolicyDecision::Allow {
-            store
-                .append_capability_access_request(&outcome.access_request)
-                .map_err(event_store_error)?;
-        }
-        store
-            .append_permission_audit_entry(&entry)
-            .map_err(event_store_error)?;
-        store
-            .append_capability_invocation(&invocation)
-            .map_err(event_store_error)?;
-    }
-
-    action.capability_invocation_id = Some(invocation.id);
-    action.execution_state = agent_action_state_from_invocation(invocation.status);
-    action.dispatch_note = agent_action_dispatch_note(&invocation);
-    Ok(())
 }
 
 fn dispatch_agent_operations_briefing_action(
@@ -7019,72 +11324,6 @@ fn compact_agent_tool_evidence_text(text: &str, limit: usize) -> Option<String> 
     Some(truncated)
 }
 
-fn dispatch_agent_file_write_action(
-    store: &EventStore,
-    access_mode: AccessMode,
-    action: &mut AgentChatActionProposal,
-    file_write_client: &impl FileWriteClient,
-    approval_granted: bool,
-    approval_request_id: Option<Uuid>,
-) -> Result<(), String> {
-    let Some(target) = action
-        .target
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        action.execution_state = "blocked".to_string();
-        action.blocked_reason = Some("file_write target is required before dispatch".to_string());
-        return Ok(());
-    };
-    let Some(content) = action
-        .content
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-    else {
-        action.execution_state = "blocked".to_string();
-        action.blocked_reason = Some("file_write content is required before dispatch".to_string());
-        return Ok(());
-    };
-    let summary = action
-        .reason
-        .as_deref()
-        .or(action.title.as_deref())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("Write file proposed by DeepSeek");
-
-    let outcome = run_file_write_boundary(
-        FileWriteRequest {
-            access_mode,
-            path: target.to_string(),
-            summary: summary.to_string(),
-            content: content.to_string(),
-            approval_granted,
-        },
-        file_write_client,
-    )?;
-    let mut invocation = outcome.invocation;
-    invocation.approval_request_id = approval_request_id;
-    let entry = PermissionAuditEntry::evaluate(access_mode, CapabilityKind::FileWrite);
-    if !approval_granted || outcome.access_request.decision == PolicyDecision::Allow {
-        store
-            .append_capability_access_request(&outcome.access_request)
-            .map_err(event_store_error)?;
-    }
-    store
-        .append_permission_audit_entry(&entry)
-        .map_err(event_store_error)?;
-    store
-        .append_capability_invocation(&invocation)
-        .map_err(event_store_error)?;
-
-    action.capability_invocation_id = Some(invocation.id);
-    action.execution_state = agent_action_state_from_invocation(invocation.status);
-    action.dispatch_note = agent_action_dispatch_note(&invocation);
-    Ok(())
-}
-
 fn agent_action_destination(action: &AgentChatActionProposal) -> Option<String> {
     let direct = action.destination.as_deref();
     let content_fallback = action
@@ -7097,152 +11336,6 @@ fn agent_action_destination(action: &AgentChatActionProposal) -> Option<String> 
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
-}
-
-fn dispatch_agent_filesystem_mutation_action(
-    store: &EventStore,
-    access_mode: AccessMode,
-    action: &mut AgentChatActionProposal,
-    approval_granted: bool,
-    approval_request_id: Option<Uuid>,
-) -> Result<(), String> {
-    let Some(operation) = agent_filesystem_mutation_operation(&action.action_type) else {
-        action.execution_state = "blocked".to_string();
-        action.blocked_reason =
-            Some("filesystem mutation action_type is required before dispatch".to_string());
-        return Ok(());
-    };
-    let Some(target) = action
-        .target
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
-    else {
-        action.execution_state = "blocked".to_string();
-        action.blocked_reason =
-            Some("filesystem mutation target is required before dispatch".to_string());
-        return Ok(());
-    };
-    let destination = if matches!(
-        operation,
-        FileSystemMutationOperation::RenameFile | FileSystemMutationOperation::RenameDirectory
-    ) {
-        let Some(destination) = agent_action_destination(action) else {
-            action.execution_state = "blocked".to_string();
-            action.blocked_reason =
-                Some("filesystem rename destination is required before dispatch".to_string());
-            return Ok(());
-        };
-        Some(destination)
-    } else {
-        None
-    };
-    let content = if matches!(
-        operation,
-        FileSystemMutationOperation::CreateFile | FileSystemMutationOperation::UpdateFile
-    ) {
-        let Some(content) = action.content.clone() else {
-            action.execution_state = "blocked".to_string();
-            action.blocked_reason =
-                Some("filesystem file content is required before dispatch".to_string());
-            return Ok(());
-        };
-        Some(content)
-    } else {
-        None
-    };
-
-    let client = LocalFileSystemMutationClient;
-    let outcome = match run_filesystem_mutation_boundary(
-        FileSystemMutationRequest {
-            access_mode,
-            operation,
-            path: target,
-            destination,
-            content,
-            approval_granted,
-        },
-        &client,
-    ) {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            action.execution_state = "blocked".to_string();
-            action.blocked_reason = Some(error.clone());
-            action.dispatch_note = Some(error);
-            return Ok(());
-        }
-    };
-    let mut invocation = outcome.invocation;
-    invocation.approval_request_id = approval_request_id;
-    let entry = PermissionAuditEntry::evaluate(access_mode, CapabilityKind::FileWrite);
-    if !approval_granted || outcome.access_request.decision == PolicyDecision::Allow {
-        store
-            .append_capability_access_request(&outcome.access_request)
-            .map_err(event_store_error)?;
-    }
-    store
-        .append_permission_audit_entry(&entry)
-        .map_err(event_store_error)?;
-    store
-        .append_capability_invocation(&invocation)
-        .map_err(event_store_error)?;
-
-    action.capability_invocation_id = Some(invocation.id);
-    action.execution_state = agent_action_state_from_invocation(invocation.status);
-    action.dispatch_note = agent_action_dispatch_note(&invocation);
-    Ok(())
-}
-
-fn dispatch_agent_network_search_action(
-    store: &EventStore,
-    access_mode: AccessMode,
-    action: &mut AgentChatActionProposal,
-    search_client: &impl NetworkSearchClient,
-    approval_granted: bool,
-    approval_request_id: Option<Uuid>,
-) -> Result<(), String> {
-    let Some(query) = action
-        .target
-        .as_deref()
-        .or(action.reason.as_deref())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        action.execution_state = "blocked".to_string();
-        action.blocked_reason =
-            Some("network_search target or reason is required before dispatch".to_string());
-        return Ok(());
-    };
-
-    let outcome = run_network_search_boundary(
-        NetworkSearchRequest {
-            access_mode,
-            query: query.to_string(),
-            scope: "public web".to_string(),
-            approval_granted,
-        },
-        search_client,
-    )?;
-    let mut invocation = outcome.invocation;
-    invocation.approval_request_id = approval_request_id;
-    let entry = PermissionAuditEntry::evaluate(access_mode, CapabilityKind::NetworkSearch);
-    if !approval_granted || outcome.access_request.decision == PolicyDecision::Allow {
-        store
-            .append_capability_access_request(&outcome.access_request)
-            .map_err(event_store_error)?;
-    }
-    store
-        .append_permission_audit_entry(&entry)
-        .map_err(event_store_error)?;
-    store
-        .append_capability_invocation(&invocation)
-        .map_err(event_store_error)?;
-
-    action.capability_invocation_id = Some(invocation.id);
-    action.execution_state = agent_action_state_from_invocation(invocation.status);
-    action.dispatch_note = agent_action_dispatch_note(&invocation);
-    Ok(())
 }
 
 fn agent_computer_control_target(action: &AgentChatActionProposal) -> Option<String> {
@@ -7273,116 +11366,6 @@ fn agent_computer_control_action_contract(action: &AgentChatActionProposal) -> O
         )
     })
     .map(ToString::to_string)
-}
-
-fn dispatch_agent_computer_control_action(
-    store: &EventStore,
-    access_mode: AccessMode,
-    action: &mut AgentChatActionProposal,
-    computer_control_client: &impl ComputerControlClient,
-    approval_granted: bool,
-    approval_request_id: Option<Uuid>,
-) -> Result<(), String> {
-    let Some(target) = agent_computer_control_target(action) else {
-        action.execution_state = "blocked".to_string();
-        action.blocked_reason =
-            Some("computer_control target window or app is required before dispatch".to_string());
-        action.dispatch_note = Some("computer control action was not executed".to_string());
-        return Ok(());
-    };
-    let Some(control_action) = agent_computer_control_action_contract(action) else {
-        action.execution_state = "blocked".to_string();
-        action.blocked_reason = Some(
-            "computer_control content must be one structured action: click:x,y[,button], move:x,y, type:text, press:key, hotkey:key+key, or scroll:delta[,axis]"
-                .to_string(),
-        );
-        action.dispatch_note = Some("computer control action was not executed".to_string());
-        return Ok(());
-    };
-
-    let outcome = match run_computer_control_boundary(
-        ComputerControlRequest {
-            access_mode,
-            target,
-            action: control_action,
-            approval_granted,
-        },
-        computer_control_client,
-    ) {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            action.execution_state = "blocked".to_string();
-            action.blocked_reason = Some(error);
-            action.dispatch_note = Some("computer control action was not executed".to_string());
-            return Ok(());
-        }
-    };
-
-    let mut invocation = outcome.invocation;
-    let should_record_access_request =
-        !approval_granted || outcome.access_request.decision == PolicyDecision::Allow;
-    invocation.approval_request_id = approval_request_id
-        .or_else(|| should_record_access_request.then_some(outcome.access_request.id));
-    let entry = PermissionAuditEntry::evaluate(access_mode, CapabilityKind::ComputerControl);
-
-    if should_record_access_request {
-        store
-            .append_capability_access_request(&outcome.access_request)
-            .map_err(event_store_error)?;
-    }
-    store
-        .append_permission_audit_entry(&entry)
-        .map_err(event_store_error)?;
-    store
-        .append_capability_invocation(&invocation)
-        .map_err(event_store_error)?;
-
-    if action.permission_request_id.is_none()
-        && outcome.access_request.decision == PolicyDecision::Ask
-    {
-        action.permission_request_id = Some(outcome.access_request.id);
-    }
-    action.capability_invocation_id = Some(invocation.id);
-    action.execution_state = agent_action_state_from_invocation(invocation.status);
-    action.blocked_reason = if invocation.status == CapabilityInvocationStatus::Failed {
-        invocation
-            .warnings
-            .first()
-            .cloned()
-            .or_else(|| invocation.excerpt.clone())
-    } else {
-        None
-    };
-    action.dispatch_note = agent_action_dispatch_note(&invocation);
-    Ok(())
-}
-
-fn dispatch_agent_browser_action(
-    store: &EventStore,
-    access_mode: AccessMode,
-    action: &mut AgentChatActionProposal,
-    browser_client: &impl BrowserPageClient,
-    approval_granted: bool,
-    approval_request_id: Option<Uuid>,
-) -> Result<(), String> {
-    if action.action_type == "browser_open" {
-        dispatch_agent_browser_open_action(
-            store,
-            access_mode,
-            action,
-            approval_granted,
-            approval_request_id,
-        )
-    } else {
-        dispatch_agent_browser_browse_action(
-            store,
-            access_mode,
-            action,
-            browser_client,
-            approval_granted,
-            approval_request_id,
-        )
-    }
 }
 
 fn dispatch_agent_browser_open_action(
@@ -7652,55 +11635,6 @@ fn open_url_in_default_browser(url: &str) -> Result<(), String> {
         .map_err(|error| format!("default browser URL could not be opened: {error}"))
 }
 
-fn dispatch_agent_browser_browse_action(
-    store: &EventStore,
-    access_mode: AccessMode,
-    action: &mut AgentChatActionProposal,
-    browser_client: &impl BrowserPageClient,
-    approval_granted: bool,
-    approval_request_id: Option<Uuid>,
-) -> Result<(), String> {
-    let Some(url) = action
-        .target
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        action.execution_state = "blocked".to_string();
-        action.blocked_reason =
-            Some("browser_browse target URL is required before dispatch".to_string());
-        return Ok(());
-    };
-
-    let outcome = run_browser_browse(
-        BrowserBrowseRequest {
-            access_mode,
-            url: url.to_string(),
-            approval_granted,
-        },
-        browser_client,
-    )?;
-    let mut invocation = outcome.invocation;
-    invocation.approval_request_id = approval_request_id;
-    let entry = PermissionAuditEntry::evaluate(access_mode, CapabilityKind::BrowserBrowse);
-    if !approval_granted || outcome.access_request.decision == PolicyDecision::Allow {
-        store
-            .append_capability_access_request(&outcome.access_request)
-            .map_err(event_store_error)?;
-    }
-    store
-        .append_permission_audit_entry(&entry)
-        .map_err(event_store_error)?;
-    store
-        .append_capability_invocation(&invocation)
-        .map_err(event_store_error)?;
-
-    action.capability_invocation_id = Some(invocation.id);
-    action.execution_state = agent_action_state_from_invocation(invocation.status);
-    action.dispatch_note = agent_action_dispatch_note(&invocation);
-    Ok(())
-}
-
 fn agent_action_state_from_invocation(status: CapabilityInvocationStatus) -> String {
     match status {
         CapabilityInvocationStatus::Succeeded => "succeeded",
@@ -7887,6 +11821,7 @@ fn agent_chat_runtime_context(
     };
 
     AgentChatRuntimeContext {
+        active_run_id: None,
         workspace_ready,
         workspace_note,
         network_search_ready,
@@ -7894,6 +11829,7 @@ fn agent_chat_runtime_context(
         network_search_source_model: tool_strategy.network_search_source_model,
         soul_profile,
         memory_context: AgentMemoryRuntimeContext::default(),
+        skill_catalog: Vec::new(),
         desktop_dir: app.path().desktop_dir().ok(),
     }
 }
@@ -7907,6 +11843,240 @@ pub fn get_foundation_state() -> FoundationState {
 pub fn check_app_update() -> Result<AppUpdateStatus, String> {
     fetch_github_releases()
         .map(|releases| update_status_from_releases(releases, app_update_current_version()))
+}
+
+struct BuiltinAgentToolExecutor;
+
+impl AgentToolExecutor for BuiltinAgentToolExecutor {
+    fn execute(&self, plan: &ToolExecutionPlan) -> Result<ToolExecutionOutput, String> {
+        match plan.contract.id.as_str() {
+            APP_UPDATE_CHECK_TOOL_ID => {
+                let status = check_app_update()?;
+                if status.current_version.trim().is_empty() {
+                    return Err("app update check returned an empty current version".to_string());
+                }
+                let evidence_reference = status
+                    .release_url
+                    .clone()
+                    .unwrap_or_else(|| APP_UPDATE_RELEASES_API_URL.to_string());
+                Ok(ToolExecutionOutput {
+                    output: serde_json::to_value(&status).map_err(event_store_error)?,
+                    evidence: vec![ToolEvidence {
+                        kind: "release_status".to_string(),
+                        reference: evidence_reference,
+                        summary:
+                            "Trusted release metadata was compared with the installed version."
+                                .to_string(),
+                    }],
+                    verification: ToolVerificationResult::passed(
+                        "release status contains the installed version and parsed update state",
+                    ),
+                })
+            }
+            APP_UPDATE_DOWNLOAD_TOOL_ID => {
+                let result = download_app_update()?;
+                let verified_path =
+                    validate_downloaded_update_installer_path(&result.installer_path)?;
+                Ok(ToolExecutionOutput {
+                    output: serde_json::to_value(&result).map_err(event_store_error)?,
+                    evidence: vec![ToolEvidence {
+                        kind: "downloaded_installer".to_string(),
+                        reference: verified_path.display().to_string(),
+                        summary: "Installer source, filename, and isolated update path were verified."
+                            .to_string(),
+                    }],
+                    verification: ToolVerificationResult::passed(
+                        "downloaded installer is a trusted Windows asset inside the update directory",
+                    ),
+                })
+            }
+            APP_UPDATE_INSTALL_TOOL_ID => {
+                let installer_path = plan.request.input["installer_path"]
+                    .as_str()
+                    .ok_or_else(|| "app update install requires installer_path".to_string())?;
+                let result = schedule_app_update_install(installer_path)?;
+                Ok(ToolExecutionOutput {
+                    output: serde_json::to_value(&result).map_err(event_store_error)?,
+                    evidence: vec![ToolEvidence {
+                        kind: "install_schedule".to_string(),
+                        reference: result.installer_path.clone(),
+                        summary: "Verified installer launch and DS Agent restart were scheduled."
+                            .to_string(),
+                    }],
+                    verification: ToolVerificationResult::passed(
+                        "verified installer and restart handoff were scheduled successfully",
+                    ),
+                })
+            }
+            tool_id => Err(format!(
+                "no built-in executor is registered for `{tool_id}`"
+            )),
+        }
+    }
+}
+
+#[tauri::command]
+pub fn list_agent_tool_contracts() -> Vec<crate::kernel::tool_runtime::ToolContract> {
+    builtin_tool_catalog()
+}
+
+#[tauri::command]
+pub fn list_agent_tool_invocations(
+    state: State<'_, AppState>,
+) -> Result<Vec<ToolInvocationRecord>, String> {
+    let store = state.event_store.lock().map_err(|_| lock_error())?;
+    store.list_tool_invocations().map_err(event_store_error)
+}
+
+#[tauri::command]
+pub fn execute_agent_tool(
+    app: AppHandle,
+    request: ToolExecutionRequest,
+    state: State<'_, AppState>,
+) -> Result<ToolInvocationRecord, String> {
+    let tool_id = request.tool_id.trim();
+    if tool_id == COMPUTER_CONTROL_TOOL_ID {
+        let approval_available = {
+            let store = state.event_store.lock().map_err(|_| lock_error())?;
+            store
+                .available_capability_grant_request_id(CapabilityKind::ComputerControl)
+                .map_err(event_store_error)?
+        };
+        if approval_available.is_some() {
+            let unlock_state = state
+                .computer_control_unlock
+                .lock()
+                .map_err(|_| computer_control_unlock_lock_error())?;
+            if !unlock_state.is_unlocked(Utc::now()) {
+                return Err("computer control requires local unlock before execution".to_string());
+            }
+        }
+    }
+    let file_write_client = if request.tool_id.trim() == FILE_WRITE_TOOL_ID {
+        let app_data_dir = app.path().app_data_dir().map_err(event_store_error)?;
+        let directory_state =
+            load_local_directory_state(&app_data_dir).map_err(event_store_error)?;
+        Some(agent_file_write_client(
+            &directory_state,
+            app.path().desktop_dir().ok(),
+        )?)
+    } else {
+        None
+    };
+    let terminal_read_client = if request.tool_id.trim() == TERMINAL_READ_TOOL_ID {
+        Some(agent_terminal_read_client()?)
+    } else {
+        None
+    };
+    let browser_client = if request.tool_id.trim() == BROWSER_BROWSE_TOOL_ID {
+        Some(HttpBrowserPageClient::new()?)
+    } else {
+        None
+    };
+    let network_search_client = if request.tool_id.trim() == NETWORK_SEARCH_TOOL_ID {
+        Some(HttpNetworkSearchClient::new(
+            NetworkSearchSourceModel::FreeWebSource,
+        )?)
+    } else {
+        None
+    };
+    let computer_use_client = if matches!(
+        request.tool_id.trim(),
+        COMPUTER_SCREENSHOT_TOOL_ID | COMPUTER_CONTROL_TOOL_ID
+    ) {
+        let app_data_dir = app.path().app_data_dir().map_err(event_store_error)?;
+        let directory_state =
+            load_local_directory_state(&app_data_dir).map_err(event_store_error)?;
+        let strategy = computer_tool_strategy_for_command(LargeModelProvider::DeepSeek, None);
+        Some(agent_computer_use_client(
+            &strategy,
+            computer_screenshot_evidence_base_dir(&app_data_dir, &directory_state),
+        ))
+    } else {
+        None
+    };
+    let authorization = {
+        let store = state.event_store.lock().map_err(|_| lock_error())?;
+        authorize_agent_tool_execution(&store, request)?
+    };
+    let authorized = match authorization {
+        AgentToolAuthorization::Ready(authorized) => authorized,
+        AgentToolAuthorization::Finished(invocation) => return Ok(invocation),
+    };
+    let should_exit_after_success = authorized.plan.contract.id == APP_UPDATE_INSTALL_TOOL_ID;
+    let skill_activation = if authorized.plan.contract.id == SKILL_ACTIVATE_TOOL_ID {
+        let store = state.event_store.lock().map_err(|_| lock_error())?;
+        Some(skill_activation_for_plan(&store, &authorized.plan))
+    } else {
+        None
+    };
+    let invocation = if authorized.plan.contract.id == FILE_READ_TOOL_ID {
+        let client = LocalFileContentClient::new(512 * 1024);
+        let executor = FileReadAgentToolExecutor { client: &client };
+        run_authorized_agent_tool_execution(authorized, &executor)
+    } else if authorized.plan.contract.id == FILE_WRITE_TOOL_ID {
+        let executor = FileWriteAgentToolExecutor {
+            client: file_write_client
+                .as_ref()
+                .ok_or_else(|| "file.write executor is unavailable".to_string())?,
+        };
+        run_authorized_agent_tool_execution(authorized, &executor)
+    } else if authorized.plan.contract.id == FILESYSTEM_MUTATE_TOOL_ID {
+        let client = LocalFileSystemMutationClient;
+        let executor = FileSystemMutationAgentToolExecutor { client: &client };
+        run_authorized_agent_tool_execution(authorized, &executor)
+    } else if authorized.plan.contract.id == TERMINAL_READ_TOOL_ID {
+        let executor = TerminalReadAgentToolExecutor {
+            client: terminal_read_client
+                .as_ref()
+                .ok_or_else(|| "terminal.read executor is unavailable".to_string())?,
+        };
+        run_authorized_agent_tool_execution(authorized, &executor)
+    } else if authorized.plan.contract.id == BROWSER_BROWSE_TOOL_ID {
+        let executor = BrowserBrowseAgentToolExecutor {
+            client: browser_client
+                .as_ref()
+                .ok_or_else(|| "browser.browse executor is unavailable".to_string())?,
+        };
+        run_authorized_agent_tool_execution(authorized, &executor)
+    } else if authorized.plan.contract.id == NETWORK_SEARCH_TOOL_ID {
+        let executor = NetworkSearchAgentToolExecutor {
+            client: network_search_client
+                .as_ref()
+                .ok_or_else(|| "network.search executor is unavailable".to_string())?,
+        };
+        run_authorized_agent_tool_execution(authorized, &executor)
+    } else if authorized.plan.contract.id == COMPUTER_SCREENSHOT_TOOL_ID {
+        let executor = ComputerScreenshotAgentToolExecutor {
+            client: computer_use_client
+                .as_ref()
+                .ok_or_else(|| "computer.screenshot executor is unavailable".to_string())?,
+        };
+        run_authorized_agent_tool_execution(authorized, &executor)
+    } else if authorized.plan.contract.id == COMPUTER_CONTROL_TOOL_ID {
+        let executor = ComputerControlAgentToolExecutor {
+            client: computer_use_client
+                .as_ref()
+                .ok_or_else(|| "computer.control executor is unavailable".to_string())?,
+        };
+        run_authorized_agent_tool_execution(authorized, &executor)
+    } else if authorized.plan.contract.id == SKILL_ACTIVATE_TOOL_ID {
+        let executor = SkillActivateAgentToolExecutor {
+            activation: skill_activation
+                .ok_or_else(|| "skill.activate executor is unavailable".to_string())?,
+        };
+        run_authorized_agent_tool_execution(authorized, &executor)
+    } else {
+        run_authorized_agent_tool_execution(authorized, &BuiltinAgentToolExecutor)
+    };
+    {
+        let store = state.event_store.lock().map_err(|_| lock_error())?;
+        record_completed_agent_tool_execution(&store, &invocation)?;
+    }
+    if should_exit_after_success && invocation.status == ToolExecutionStatus::Succeeded {
+        app.exit(0);
+    }
+    Ok(invocation)
 }
 
 #[tauri::command]
@@ -7931,14 +12101,18 @@ pub fn install_app_update(
     app: AppHandle,
     installer_path: String,
 ) -> Result<AppUpdateInstallResult, String> {
-    let installer_path = validate_downloaded_update_installer_path(&installer_path)?;
-    spawn_silent_update_runner(&installer_path)?;
-    let result = AppUpdateInstallResult {
-        installer_path: installer_path.display().to_string(),
-        restart_scheduled: true,
-    };
+    let result = schedule_app_update_install(&installer_path)?;
     app.exit(0);
     Ok(result)
+}
+
+fn schedule_app_update_install(installer_path: &str) -> Result<AppUpdateInstallResult, String> {
+    let installer_path = validate_downloaded_update_installer_path(installer_path)?;
+    spawn_silent_update_runner(&installer_path)?;
+    Ok(AppUpdateInstallResult {
+        installer_path: installer_path.display().to_string(),
+        restart_scheduled: true,
+    })
 }
 
 #[tauri::command]
@@ -7998,7 +12172,13 @@ pub fn run_agent_chat(
     let browser_client = HttpBrowserPageClient::new()?;
     let search_client =
         agent_network_search_client(large_model_provider, network_search_source_model);
-    run_agent_chat_with_clients_and_api_keys(
+    let computer_strategy =
+        computer_tool_strategy_for_command(large_model_provider, network_search_source_model);
+    let computer_use_client = agent_computer_use_client(
+        &computer_strategy,
+        computer_screenshot_evidence_base_dir(&app_data_dir, &directory_state),
+    );
+    run_agent_chat_with_clients_and_api_keys_and_computer_use(
         &state.event_store,
         &transport,
         &state.deepseek_chat_cache,
@@ -8015,6 +12195,7 @@ pub fn run_agent_chat(
         &file_write_client,
         &search_client,
         &browser_client,
+        &computer_use_client,
     )
 }
 
@@ -8063,8 +12244,14 @@ pub fn run_next_queued_agent_chat_worker(
     let browser_client = HttpBrowserPageClient::new()?;
     let search_client =
         agent_network_search_client(large_model_provider, network_search_source_model);
+    let computer_strategy =
+        computer_tool_strategy_for_command(large_model_provider, network_search_source_model);
+    let computer_use_client = agent_computer_use_client(
+        &computer_strategy,
+        computer_screenshot_evidence_base_dir(&app_data_dir, &directory_state),
+    );
 
-    run_queued_agent_chat_with_clients_and_api_keys(
+    run_queued_agent_chat_with_clients_and_api_keys_and_computer_use(
         &state.event_store,
         &transport,
         &state.deepseek_chat_cache,
@@ -8081,6 +12268,7 @@ pub fn run_next_queued_agent_chat_worker(
         &file_write_client,
         &search_client,
         &browser_client,
+        &computer_use_client,
     )
 }
 
@@ -8126,94 +12314,120 @@ pub fn resume_agent_chat_action(
     let directory_state = load_local_directory_state(&app_data_dir).map_err(event_store_error)?;
     let desktop_dir = app.path().desktop_dir().ok();
     let normalized_action = normalize_agent_action_proposal(action, access_mode);
-    if normalized_action.action_type == "computer_control" {
-        let mut computer_action = normalized_action;
-        let approval_state = {
+    if is_agent_app_update_action(&normalized_action.action_type) {
+        let mut app_update_action = normalized_action;
+        let (approval_state, linked_run_id) = {
             let store = state.event_store.lock().map_err(|_| lock_error())?;
-            agent_action_approval_state(&store, &computer_action)?
+            (
+                agent_action_approval_state(&store, &app_update_action)?,
+                agent_tool_run_id_for_action(&store, &app_update_action)?,
+            )
         };
-
         match approval_state {
-            AgentActionApprovalState::Approved(approval_request_id) => {
-                let unlock_state = state
-                    .computer_control_unlock
-                    .lock()
-                    .map_err(|_| computer_control_unlock_lock_error())?;
-                if !unlock_state.is_unlocked(Utc::now()) {
-                    computer_action.execution_state = "needs_confirmation".to_string();
-                    computer_action.blocked_reason =
-                        Some("computer control requires local unlock before execution".to_string());
-                    computer_action.dispatch_note = Some(
-                        "approve the Computer control unlock challenge, then continue this action"
-                            .to_string(),
-                    );
-                    return Ok(computer_action);
-                }
-                drop(unlock_state);
-
-                let strategy = computer_tool_strategy_for_command(
-                    large_model_provider,
-                    network_search_source_model,
-                );
-                match strategy.computer_control_backend {
-                    ComputerControlBackend::LocalWindowsInputControl
-                    | ComputerControlBackend::LocalMacosInputControl => {
-                        let client = LocalComputerControlClient::new();
-                        let store = state.event_store.lock().map_err(|_| lock_error())?;
-                        dispatch_agent_computer_control_action(
-                            &store,
-                            access_mode,
-                            &mut computer_action,
-                            &client,
-                            true,
-                            Some(approval_request_id),
-                        )?;
-                    }
-                    ComputerControlBackend::CodexBridgeInputControl
-                    | ComputerControlBackend::CodexStyleInputControl => {
-                        let client = CodexBridgeComputerControlClient::from_env();
-                        let store = state.event_store.lock().map_err(|_| lock_error())?;
-                        dispatch_agent_computer_control_action(
-                            &store,
-                            access_mode,
-                            &mut computer_action,
-                            &client,
-                            true,
-                            Some(approval_request_id),
-                        )?;
-                    }
-                }
-            }
             AgentActionApprovalState::Rejected => {
-                computer_action.execution_state = "blocked".to_string();
-                computer_action.blocked_reason =
+                app_update_action.execution_state = "blocked".to_string();
+                app_update_action.blocked_reason =
                     Some("local permission request was rejected before dispatch".to_string());
-                computer_action.dispatch_note =
-                    Some("local permission was rejected; action was not executed".to_string());
+                app_update_action.dispatch_note =
+                    Some("local permission was rejected; update tool was not executed".to_string());
+                {
+                    let store = state.event_store.lock().map_err(|_| lock_error())?;
+                    block_agent_run_after_action_resolution(
+                        &store,
+                        &app_update_action,
+                        "Local permission was rejected before update tool dispatch.".to_string(),
+                    )?;
+                }
+                return Ok(app_update_action);
             }
             AgentActionApprovalState::Unavailable => {
-                computer_action.execution_state = "blocked".to_string();
-                computer_action.blocked_reason =
+                app_update_action.execution_state = "blocked".to_string();
+                app_update_action.blocked_reason =
                     Some("approved local permission is no longer available".to_string());
-                computer_action.dispatch_note =
-                    Some("permission grant is unavailable; action was not executed".to_string());
+                app_update_action.dispatch_note = Some(
+                    "permission grant is unavailable; update tool was not executed".to_string(),
+                );
+                {
+                    let store = state.event_store.lock().map_err(|_| lock_error())?;
+                    block_agent_run_after_action_resolution(
+                        &store,
+                        &app_update_action,
+                        "Approved local permission is no longer available.".to_string(),
+                    )?;
+                }
+                return Ok(app_update_action);
             }
-            _ => {
-                let store = state.event_store.lock().map_err(|_| lock_error())?;
-                record_agent_action_permission_request(&store, access_mode, &mut computer_action)?;
-            }
+            _ => {}
         }
 
-        return Ok(computer_action);
+        let request =
+            agent_app_update_tool_request(&app_update_action, access_mode, linked_run_id)?;
+        let authorization = {
+            let store = state.event_store.lock().map_err(|_| lock_error())?;
+            authorize_agent_tool_execution(&store, request)?
+        };
+        let (invocation, should_exit_after_success) = match authorization {
+            AgentToolAuthorization::Finished(invocation) => (invocation, false),
+            AgentToolAuthorization::Ready(authorized) => {
+                let should_exit_after_success =
+                    authorized.plan.contract.id == APP_UPDATE_INSTALL_TOOL_ID;
+                let invocation =
+                    run_authorized_agent_tool_execution(authorized, &BuiltinAgentToolExecutor);
+                {
+                    let store = state.event_store.lock().map_err(|_| lock_error())?;
+                    record_completed_agent_tool_execution(&store, &invocation)?;
+                }
+                (invocation, should_exit_after_success)
+            }
+        };
+        apply_tool_invocation_to_agent_action(&mut app_update_action, &invocation);
+        {
+            let store = state.event_store.lock().map_err(|_| lock_error())?;
+            finish_agent_run_after_resumed_tool(&store, &invocation)?;
+        }
+        if should_exit_after_success && invocation.status == ToolExecutionStatus::Succeeded {
+            app.exit(0);
+        }
+        return Ok(app_update_action);
     }
     let file_client = LocalFileContentClient::new(512 * 1024);
     let file_write_client = agent_file_write_client(&directory_state, desktop_dir.clone())?;
     let browser_client = HttpBrowserPageClient::new()?;
     let search_client =
         agent_network_search_client(large_model_provider, network_search_source_model);
+    let computer_strategy =
+        computer_tool_strategy_for_command(large_model_provider, network_search_source_model);
+    let computer_use_client = agent_computer_use_client(
+        &computer_strategy,
+        computer_screenshot_evidence_base_dir(&app_data_dir, &directory_state),
+    );
+
+    if normalized_action.action_type == "computer_control" {
+        let approval_state = {
+            let store = state.event_store.lock().map_err(|_| lock_error())?;
+            agent_action_approval_state(&store, &normalized_action)?
+        };
+        if matches!(approval_state, AgentActionApprovalState::Approved(_)) {
+            let unlock_state = state
+                .computer_control_unlock
+                .lock()
+                .map_err(|_| computer_control_unlock_lock_error())?;
+            if !unlock_state.is_unlocked(Utc::now()) {
+                let mut computer_action = normalized_action;
+                computer_action.execution_state = "needs_confirmation".to_string();
+                computer_action.blocked_reason =
+                    Some("computer control requires local unlock before execution".to_string());
+                computer_action.dispatch_note = Some(
+                    "approve the Computer control unlock challenge, then continue this action"
+                        .to_string(),
+                );
+                return Ok(computer_action);
+            }
+        }
+    }
     let store = state.event_store.lock().map_err(|_| lock_error())?;
 
-    resume_agent_chat_action_with_clients(
+    resume_agent_chat_action_with_clients_and_computer_use(
         &store,
         access_mode,
         normalized_action,
@@ -8221,6 +12435,7 @@ pub fn resume_agent_chat_action(
         &file_write_client,
         &search_client,
         &browser_client,
+        &computer_use_client,
         desktop_dir.as_deref(),
     )
 }
@@ -8425,6 +12640,7 @@ pub fn enqueue_agent_run_record(
     conversation_id: String,
     prompt: String,
     attachment_count: usize,
+    execution_prompt: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<AgentRunRecord, String> {
     let start = AgentRunStart::queued(conversation_id, prompt, attachment_count)
@@ -8433,6 +12649,16 @@ pub fn enqueue_agent_run_record(
     store
         .append_agent_run_start(&start)
         .map_err(event_store_error)?;
+    if let Some(execution_prompt) = execution_prompt
+        .map(|prompt| prompt.trim().to_string())
+        .filter(|prompt| !prompt.is_empty())
+    {
+        let context =
+            AgentRunExecutionContext::new(start.id, execution_prompt).map_err(event_store_error)?;
+        store
+            .append_agent_run_execution_context(&context)
+            .map_err(event_store_error)?;
+    }
     read_agent_run_record(&store, start.id)
 }
 
@@ -8932,16 +13158,21 @@ pub fn preview_local_skill_zip_package(
 pub fn preview_remote_skill_zip_package(
     package_url: String,
 ) -> Result<SkillPackagePreflight, String> {
+    fetch_remote_skill_package_preflight(&package_url)
+}
+
+fn fetch_remote_skill_package_preflight(
+    package_url: &str,
+) -> Result<SkillPackagePreflight, String> {
     let package_url = package_url.trim().to_string();
     validate_remote_skill_source_url(&package_url).map_err(|error| error.to_string())?;
     let client = reqwest::blocking::Client::builder()
+        .user_agent("DS-Agent-Skill-Preflight/1.0")
         .timeout(StdDuration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|error| format!("skill package HTTP client could not start: {error}"))?;
-    let response = client
-        .get(&package_url)
-        .header(reqwest::header::USER_AGENT, "DS-Agent-Skill-Preflight/1.0")
-        .send()
+    let response = send_public_get(&client, &package_url, 5)
         .map_err(|error| format!("skill package could not be downloaded: {error}"))?
         .error_for_status()
         .map_err(|error| format!("skill package source returned an error: {error}"))?;
@@ -9000,8 +13231,8 @@ pub fn install_local_skill_zip_package(
     state: State<'_, AppState>,
 ) -> Result<SkillRecord, String> {
     let preflight = preview_local_skill_zip_package(package_path.clone())?;
-    let installation = SkillInstallationRecord::new(
-        preflight.manifest,
+    let installation = SkillInstallationRecord::from_preflight(
+        preflight,
         format!("local zip package: {package_path}"),
     )
     .map_err(event_store_error)?;
@@ -9015,6 +13246,35 @@ pub fn install_local_skill_zip_package(
         .into_iter()
         .find(|record| record.id == installation.id)
         .ok_or_else(|| "installed skill record could not be read".to_string())
+}
+
+#[tauri::command]
+pub fn install_remote_skill_zip_package(
+    package_url: String,
+    state: State<'_, AppState>,
+) -> Result<SkillRecord, String> {
+    let package_url = package_url.trim().to_string();
+    let preflight = fetch_remote_skill_package_preflight(&package_url)?;
+    let installation = SkillInstallationRecord::from_preflight(
+        preflight,
+        format!("verified remote zip package: {package_url}"),
+    )
+    .map_err(event_store_error)?;
+    let store = state.event_store.lock().map_err(|_| lock_error())?;
+    store
+        .append_skill_installation(&installation)
+        .map_err(event_store_error)?;
+    store
+        .list_skill_records()
+        .map_err(event_store_error)?
+        .into_iter()
+        .find(|record| {
+            record.id == installation.id
+                || (record.manifest.name == installation.manifest.name
+                    && record.manifest.version == installation.manifest.version
+                    && record.manifest.source.url == installation.manifest.source.url)
+        })
+        .ok_or_else(|| "installed remote skill record could not be read".to_string())
 }
 
 #[tauri::command]
@@ -9163,39 +13423,31 @@ pub fn browse_url(
     url: String,
     state: State<'_, AppState>,
 ) -> Result<CapabilityInvocation, String> {
-    let approval_granted = {
-        let store = state.event_store.lock().map_err(|_| lock_error())?;
-        store
-            .has_user_approved_capability(CapabilityKind::BrowserBrowse)
-            .map_err(event_store_error)?
-    };
     let client = HttpBrowserPageClient::new()?;
-    let outcome = run_browser_browse(
-        BrowserBrowseRequest {
-            access_mode,
-            url,
-            approval_granted,
-        },
-        &client,
-    )?;
-    let should_record_access_request = !approval_granted
-        || outcome.access_request.decision == crate::kernel::policy::PolicyDecision::Allow;
-    let entry = PermissionAuditEntry::evaluate(access_mode, CapabilityKind::BrowserBrowse);
-    let store = state.event_store.lock().map_err(|_| lock_error())?;
-
-    if should_record_access_request {
-        store
-            .append_capability_access_request(&outcome.access_request)
-            .map_err(event_store_error)?;
-    }
-    store
-        .append_permission_audit_entry(&entry)
-        .map_err(event_store_error)?;
-    store
-        .append_capability_invocation(&outcome.invocation)
-        .map_err(event_store_error)?;
-
-    Ok(outcome.invocation)
+    let request = ToolExecutionRequest {
+        tool_id: BROWSER_BROWSE_TOOL_ID.to_string(),
+        input: serde_json::json!({
+            "url": url,
+            "summary": "Direct public web page read",
+        }),
+        access_mode,
+        run_id: None,
+    };
+    let authorization = {
+        let store = state.event_store.lock().map_err(|_| lock_error())?;
+        authorize_agent_tool_execution(&store, request)?
+    };
+    let invocation = match authorization {
+        AgentToolAuthorization::Finished(invocation) => invocation,
+        AgentToolAuthorization::Ready(authorized) => {
+            let executor = BrowserBrowseAgentToolExecutor { client: &client };
+            let invocation = run_authorized_agent_tool_execution(authorized, &executor);
+            let store = state.event_store.lock().map_err(|_| lock_error())?;
+            record_completed_agent_tool_execution(&store, &invocation)?;
+            invocation
+        }
+    };
+    Ok(capability_invocation_from_tool_record(&invocation))
 }
 
 #[tauri::command]
@@ -9246,54 +13498,32 @@ pub fn search_network_boundary(
     network_search_source_model: Option<NetworkSearchSourceModel>,
     state: State<'_, AppState>,
 ) -> Result<CapabilityInvocation, String> {
-    let approval_granted = {
-        let store = state.event_store.lock().map_err(|_| lock_error())?;
-        store
-            .has_user_approved_capability(CapabilityKind::NetworkSearch)
-            .map_err(event_store_error)?
-    };
-    let strategy = model_driven_tool_strategy_for_current_platform(
-        large_model_provider,
-        network_search_source_model,
-    );
-    let request = NetworkSearchRequest {
+    let client = agent_network_search_client(large_model_provider, network_search_source_model);
+    let request = ToolExecutionRequest {
+        tool_id: NETWORK_SEARCH_TOOL_ID.to_string(),
+        input: serde_json::json!({
+            "query": query,
+            "scope": scope,
+            "summary": "Direct public web search",
+        }),
         access_mode,
-        query,
-        scope,
-        approval_granted,
+        run_id: None,
     };
-    let outcome = match strategy.network_search_backend {
-        NetworkSearchBackend::NativeLargeModel => {
-            let client = CodexBridgeNetworkSearchClient::from_env(large_model_provider);
-            run_network_search_boundary(request, &client)?
-        }
-        NetworkSearchBackend::SourceBackedModel | NetworkSearchBackend::DeepSeek => {
-            let source_model = strategy.network_search_source_model.ok_or_else(|| {
-                "network search source model is required for local source-backed execution"
-                    .to_string()
-            })?;
-            let client = HttpNetworkSearchClient::new(source_model)?;
-            run_network_search_boundary(request, &client)?
+    let authorization = {
+        let store = state.event_store.lock().map_err(|_| lock_error())?;
+        authorize_agent_tool_execution(&store, request)?
+    };
+    let invocation = match authorization {
+        AgentToolAuthorization::Finished(invocation) => invocation,
+        AgentToolAuthorization::Ready(authorized) => {
+            let executor = NetworkSearchAgentToolExecutor { client: &client };
+            let invocation = run_authorized_agent_tool_execution(authorized, &executor);
+            let store = state.event_store.lock().map_err(|_| lock_error())?;
+            record_completed_agent_tool_execution(&store, &invocation)?;
+            invocation
         }
     };
-    let should_record_access_request = !approval_granted
-        || outcome.access_request.decision == crate::kernel::policy::PolicyDecision::Allow;
-    let entry = PermissionAuditEntry::evaluate(access_mode, CapabilityKind::NetworkSearch);
-    let store = state.event_store.lock().map_err(|_| lock_error())?;
-
-    if should_record_access_request {
-        store
-            .append_capability_access_request(&outcome.access_request)
-            .map_err(event_store_error)?;
-    }
-    store
-        .append_permission_audit_entry(&entry)
-        .map_err(event_store_error)?;
-    store
-        .append_capability_invocation(&outcome.invocation)
-        .map_err(event_store_error)?;
-
-    Ok(outcome.invocation)
+    Ok(capability_invocation_from_tool_record(&invocation))
 }
 
 #[tauri::command]
@@ -9302,39 +13532,31 @@ pub fn read_local_file(
     path: String,
     state: State<'_, AppState>,
 ) -> Result<CapabilityInvocation, String> {
-    let approval_granted = {
-        let store = state.event_store.lock().map_err(|_| lock_error())?;
-        store
-            .has_user_approved_capability(CapabilityKind::FileRead)
-            .map_err(event_store_error)?
-    };
     let client = LocalFileContentClient::new(512 * 1024);
-    let outcome = run_file_read(
-        FileReadRequest {
-            access_mode,
-            path,
-            approval_granted,
-        },
-        &client,
-    )?;
-    let should_record_access_request = !approval_granted
-        || outcome.access_request.decision == crate::kernel::policy::PolicyDecision::Allow;
-    let entry = PermissionAuditEntry::evaluate(access_mode, CapabilityKind::FileRead);
-    let store = state.event_store.lock().map_err(|_| lock_error())?;
-
-    if should_record_access_request {
-        store
-            .append_capability_access_request(&outcome.access_request)
-            .map_err(event_store_error)?;
-    }
-    store
-        .append_permission_audit_entry(&entry)
-        .map_err(event_store_error)?;
-    store
-        .append_capability_invocation(&outcome.invocation)
-        .map_err(event_store_error)?;
-
-    Ok(outcome.invocation)
+    let request = ToolExecutionRequest {
+        tool_id: FILE_READ_TOOL_ID.to_string(),
+        input: serde_json::json!({
+            "path": path,
+            "summary": "Direct local file read",
+        }),
+        access_mode,
+        run_id: None,
+    };
+    let authorization = {
+        let store = state.event_store.lock().map_err(|_| lock_error())?;
+        authorize_agent_tool_execution(&store, request)?
+    };
+    let invocation = match authorization {
+        AgentToolAuthorization::Finished(invocation) => invocation,
+        AgentToolAuthorization::Ready(authorized) => {
+            let executor = FileReadAgentToolExecutor { client: &client };
+            let invocation = run_authorized_agent_tool_execution(authorized, &executor);
+            let store = state.event_store.lock().map_err(|_| lock_error())?;
+            record_completed_agent_tool_execution(&store, &invocation)?;
+            invocation
+        }
+    };
+    Ok(capability_invocation_from_tool_record(&invocation))
 }
 
 #[tauri::command]
@@ -9346,45 +13568,37 @@ pub fn write_file_boundary(
     content: String,
     state: State<'_, AppState>,
 ) -> Result<CapabilityInvocation, String> {
-    let approval_granted = {
-        let store = state.event_store.lock().map_err(|_| lock_error())?;
-        store
-            .has_user_approved_capability(CapabilityKind::FileWrite)
-            .map_err(event_store_error)?
-    };
     let app_data_dir = app.path().app_data_dir().map_err(event_store_error)?;
     let directory_state = load_local_directory_state(&app_data_dir).map_err(event_store_error)?;
-    let workspace_dir = file_write_workspace_base_dir(&app_data_dir, &directory_state);
-    std::fs::create_dir_all(&workspace_dir).map_err(event_store_error)?;
-    let client = LocalWorkspaceFileWriteClient::new(workspace_dir, 512 * 1024);
-    let outcome = run_file_write_boundary(
-        FileWriteRequest {
-            access_mode,
-            path,
-            summary,
-            content,
-            approval_granted,
-        },
-        &client,
-    )?;
-    let should_record_access_request = !approval_granted
-        || outcome.access_request.decision == crate::kernel::policy::PolicyDecision::Allow;
-    let entry = PermissionAuditEntry::evaluate(access_mode, CapabilityKind::FileWrite);
-    let store = state.event_store.lock().map_err(|_| lock_error())?;
-
-    if should_record_access_request {
-        store
-            .append_capability_access_request(&outcome.access_request)
-            .map_err(event_store_error)?;
+    let client = agent_file_write_client(&directory_state, app.path().desktop_dir().ok())?;
+    if let AgentFileWriteClient::Unavailable(reason) = &client {
+        return Err(reason.clone());
     }
-    store
-        .append_permission_audit_entry(&entry)
-        .map_err(event_store_error)?;
-    store
-        .append_capability_invocation(&outcome.invocation)
-        .map_err(event_store_error)?;
-
-    Ok(outcome.invocation)
+    let request = ToolExecutionRequest {
+        tool_id: FILE_WRITE_TOOL_ID.to_string(),
+        input: serde_json::json!({
+            "path": path,
+            "summary": summary,
+            "content": content,
+        }),
+        access_mode,
+        run_id: None,
+    };
+    let authorization = {
+        let store = state.event_store.lock().map_err(|_| lock_error())?;
+        authorize_agent_tool_execution(&store, request)?
+    };
+    let invocation = match authorization {
+        AgentToolAuthorization::Finished(invocation) => invocation,
+        AgentToolAuthorization::Ready(authorized) => {
+            let executor = FileWriteAgentToolExecutor { client: &client };
+            let invocation = run_authorized_agent_tool_execution(authorized, &executor);
+            let store = state.event_store.lock().map_err(|_| lock_error())?;
+            record_completed_agent_tool_execution(&store, &invocation)?;
+            invocation
+        }
+    };
+    Ok(capability_invocation_from_tool_record(&invocation))
 }
 
 #[tauri::command]
@@ -9434,40 +13648,32 @@ pub fn run_terminal_read(
     command: String,
     state: State<'_, AppState>,
 ) -> Result<CapabilityInvocation, String> {
-    let approval_granted = {
-        let store = state.event_store.lock().map_err(|_| lock_error())?;
-        store
-            .has_user_approved_capability(CapabilityKind::TerminalRead)
-            .map_err(event_store_error)?
-    };
     let working_dir = std::env::current_dir().map_err(event_store_error)?;
-    let client = LocalTerminalReadClient::new(working_dir, 4_000);
-    let outcome = run_terminal_read_capability(
-        TerminalReadRequest {
-            access_mode,
-            command,
-            approval_granted,
-        },
-        &client,
-    )?;
-    let should_record_access_request = !approval_granted
-        || outcome.access_request.decision == crate::kernel::policy::PolicyDecision::Allow;
-    let entry = PermissionAuditEntry::evaluate(access_mode, CapabilityKind::TerminalRead);
-    let store = state.event_store.lock().map_err(|_| lock_error())?;
-
-    if should_record_access_request {
-        store
-            .append_capability_access_request(&outcome.access_request)
-            .map_err(event_store_error)?;
-    }
-    store
-        .append_permission_audit_entry(&entry)
-        .map_err(event_store_error)?;
-    store
-        .append_capability_invocation(&outcome.invocation)
-        .map_err(event_store_error)?;
-
-    Ok(outcome.invocation)
+    let client = LocalTerminalReadClient::new(working_dir, TERMINAL_READ_OUTPUT_CHAR_LIMIT);
+    let request = ToolExecutionRequest {
+        tool_id: TERMINAL_READ_TOOL_ID.to_string(),
+        input: serde_json::json!({
+            "command": command,
+            "summary": "Direct read-only terminal inspection",
+        }),
+        access_mode,
+        run_id: None,
+    };
+    let authorization = {
+        let store = state.event_store.lock().map_err(|_| lock_error())?;
+        authorize_agent_tool_execution(&store, request)?
+    };
+    let invocation = match authorization {
+        AgentToolAuthorization::Finished(invocation) => invocation,
+        AgentToolAuthorization::Ready(authorized) => {
+            let executor = TerminalReadAgentToolExecutor { client: &client };
+            let invocation = run_authorized_agent_tool_execution(authorized, &executor);
+            let store = state.event_store.lock().map_err(|_| lock_error())?;
+            record_completed_agent_tool_execution(&store, &invocation)?;
+            invocation
+        }
+    };
+    Ok(capability_invocation_from_tool_record(&invocation))
 }
 
 #[tauri::command]
@@ -9515,58 +13721,35 @@ pub fn capture_computer_screenshot(
     network_search_source_model: Option<NetworkSearchSourceModel>,
     state: State<'_, AppState>,
 ) -> Result<CapabilityInvocation, String> {
-    let approval_granted = {
-        let store = state.event_store.lock().map_err(|_| lock_error())?;
-        store
-            .has_user_approved_capability(CapabilityKind::ComputerScreenshot)
-            .map_err(event_store_error)?
-    };
     let strategy =
         computer_tool_strategy_for_command(large_model_provider, network_search_source_model);
-    let request = ComputerScreenshotRequest {
+    let app_data_dir = app.path().app_data_dir().map_err(event_store_error)?;
+    let directory_state = load_local_directory_state(&app_data_dir).map_err(event_store_error)?;
+    let client = agent_computer_use_client(
+        &strategy,
+        computer_screenshot_evidence_base_dir(&app_data_dir, &directory_state),
+    );
+    let request = ToolExecutionRequest {
+        tool_id: COMPUTER_SCREENSHOT_TOOL_ID.to_string(),
+        input: serde_json::json!({"summary": "Direct visible desktop inspection"}),
         access_mode,
-        approval_granted,
+        run_id: None,
     };
-    let outcome = match strategy.computer_screenshot_backend {
-        ComputerScreenshotBackend::LocalWindowsScreenCapture
-        | ComputerScreenshotBackend::LocalMacosScreenCapture => {
-            let app_data_dir = app.path().app_data_dir().map_err(event_store_error)?;
-            let directory_state =
-                load_local_directory_state(&app_data_dir).map_err(event_store_error)?;
-            let evidence_base_dir =
-                computer_screenshot_evidence_base_dir(&app_data_dir, &directory_state);
-            let client = LocalComputerScreenshotClient::new(evidence_base_dir);
-            run_computer_screenshot(request, &client)?
-        }
-        ComputerScreenshotBackend::CodexBridgeScreenCapture
-        | ComputerScreenshotBackend::CodexStyleScreenCapture => {
-            let app_data_dir = app.path().app_data_dir().map_err(event_store_error)?;
-            let directory_state =
-                load_local_directory_state(&app_data_dir).map_err(event_store_error)?;
-            let evidence_base_dir =
-                computer_screenshot_evidence_base_dir(&app_data_dir, &directory_state);
-            let client = CodexBridgeComputerScreenshotClient::from_env(evidence_base_dir);
-            run_computer_screenshot(request, &client)?
+    let authorization = {
+        let store = state.event_store.lock().map_err(|_| lock_error())?;
+        authorize_agent_tool_execution(&store, request)?
+    };
+    let invocation = match authorization {
+        AgentToolAuthorization::Finished(invocation) => invocation,
+        AgentToolAuthorization::Ready(authorized) => {
+            let executor = ComputerScreenshotAgentToolExecutor { client: &client };
+            let invocation = run_authorized_agent_tool_execution(authorized, &executor);
+            let store = state.event_store.lock().map_err(|_| lock_error())?;
+            record_completed_agent_tool_execution(&store, &invocation)?;
+            invocation
         }
     };
-    let should_record_access_request = !approval_granted
-        || outcome.access_request.decision == crate::kernel::policy::PolicyDecision::Allow;
-    let entry = PermissionAuditEntry::evaluate(access_mode, CapabilityKind::ComputerScreenshot);
-    let store = state.event_store.lock().map_err(|_| lock_error())?;
-
-    if should_record_access_request {
-        store
-            .append_capability_access_request(&outcome.access_request)
-            .map_err(event_store_error)?;
-    }
-    store
-        .append_permission_audit_entry(&entry)
-        .map_err(event_store_error)?;
-    store
-        .append_capability_invocation(&outcome.invocation)
-        .map_err(event_store_error)?;
-
-    Ok(outcome.invocation)
+    Ok(capability_invocation_from_tool_record(&invocation))
 }
 
 #[tauri::command]
@@ -9578,14 +13761,13 @@ pub fn control_computer_boundary(
     action: String,
     state: State<'_, AppState>,
 ) -> Result<CapabilityInvocation, String> {
-    let approval_request_id = {
+    let approval_available = {
         let store = state.event_store.lock().map_err(|_| lock_error())?;
         store
             .available_capability_grant_request_id(CapabilityKind::ComputerControl)
             .map_err(event_store_error)?
     };
-    let approval_granted = approval_request_id.is_some();
-    if should_require_computer_control_unlock(approval_granted) {
+    if should_require_computer_control_unlock(approval_available.is_some()) {
         let unlock_state = state
             .computer_control_unlock
             .lock()
@@ -9596,44 +13778,47 @@ pub fn control_computer_boundary(
     }
     let strategy =
         computer_tool_strategy_for_command(large_model_provider, network_search_source_model);
-    let request = ComputerControlRequest {
+    let request = ToolExecutionRequest {
+        tool_id: COMPUTER_CONTROL_TOOL_ID.to_string(),
+        input: serde_json::json!({
+            "target": target,
+            "action": action,
+            "summary": "Direct approved desktop input action",
+        }),
         access_mode,
-        target,
-        action,
-        approval_granted,
+        run_id: None,
     };
-    let mut outcome = match strategy.computer_control_backend {
-        ComputerControlBackend::LocalWindowsInputControl
-        | ComputerControlBackend::LocalMacosInputControl => {
-            let client = LocalComputerControlClient::new();
-            run_computer_control_boundary(request, &client)?
-        }
-        ComputerControlBackend::CodexBridgeInputControl
-        | ComputerControlBackend::CodexStyleInputControl => {
-            let client = CodexBridgeComputerControlClient::from_env();
-            run_computer_control_boundary(request, &client)?
+    let authorization = {
+        let store = state.event_store.lock().map_err(|_| lock_error())?;
+        authorize_agent_tool_execution(&store, request)?
+    };
+    let invocation = match authorization {
+        AgentToolAuthorization::Finished(invocation) => invocation,
+        AgentToolAuthorization::Ready(authorized) => {
+            let invocation = match strategy.computer_control_backend {
+                ComputerControlBackend::LocalWindowsInputControl
+                | ComputerControlBackend::LocalMacosInputControl => {
+                    let client = LocalComputerControlClient::new();
+                    run_authorized_agent_tool_execution(
+                        authorized,
+                        &ComputerControlAgentToolExecutor { client: &client },
+                    )
+                }
+                ComputerControlBackend::CodexBridgeInputControl
+                | ComputerControlBackend::CodexStyleInputControl => {
+                    let client = CodexBridgeComputerControlClient::from_env();
+                    run_authorized_agent_tool_execution(
+                        authorized,
+                        &ComputerControlAgentToolExecutor { client: &client },
+                    )
+                }
+            };
+            let store = state.event_store.lock().map_err(|_| lock_error())?;
+            record_completed_agent_tool_execution(&store, &invocation)?;
+            invocation
         }
     };
-    let should_record_access_request = !approval_granted
-        || outcome.access_request.decision == crate::kernel::policy::PolicyDecision::Allow;
-    let entry = PermissionAuditEntry::evaluate(access_mode, CapabilityKind::ComputerControl);
-    let store = state.event_store.lock().map_err(|_| lock_error())?;
-
-    if should_record_access_request {
-        store
-            .append_capability_access_request(&outcome.access_request)
-            .map_err(event_store_error)?;
-    }
-    outcome.invocation.approval_request_id = approval_request_id
-        .or_else(|| should_record_access_request.then_some(outcome.access_request.id));
-    store
-        .append_permission_audit_entry(&entry)
-        .map_err(event_store_error)?;
-    store
-        .append_capability_invocation(&outcome.invocation)
-        .map_err(event_store_error)?;
-
-    Ok(outcome.invocation)
+    Ok(capability_invocation_from_tool_record(&invocation))
 }
 
 #[tauri::command]
@@ -10270,26 +14455,48 @@ pub fn preview_work_package_import(
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_terminal_read_command_from_target, app_update_current_version, is_newer_version,
-        is_windows_installer_asset, release_asset_is_trusted, release_installable_asset,
-        silent_update_install_command, update_status_from_release, update_status_from_releases,
-        GithubRelease, GithubReleaseAsset,
+        agent_app_update_tool_request, agent_terminal_read_command_from_target,
+        agent_tool_run_id_for_action, app_update_current_version,
+        apply_tool_invocation_to_agent_action, authorize_agent_tool_execution,
+        block_agent_run_after_action_resolution, execute_agent_tool_with_executor,
+        finish_agent_run_after_resumed_tool, is_newer_version, is_windows_installer_asset,
+        record_completed_agent_tool_execution, release_asset_is_trusted, release_installable_asset,
+        run_agent_chat_with_clients_and_api_keys_and_computer_use,
+        run_authorized_agent_tool_execution,
+        run_queued_agent_chat_with_clients_and_api_keys_and_computer_use,
+        run_with_agent_run_lease_heartbeat, silent_update_install_command,
+        update_status_from_release, update_status_from_releases, AgentToolAuthorization,
+        BrowserBrowseAgentToolExecutor, ComputerControlAgentToolExecutor,
+        ComputerScreenshotAgentToolExecutor, FileReadAgentToolExecutor,
+        FileSystemMutationAgentToolExecutor, FileWriteAgentToolExecutor, GithubRelease,
+        GithubReleaseAsset, NetworkSearchAgentToolExecutor, TerminalReadAgentToolExecutor,
     };
     use crate::commands::{
         agent_chat_api_key_candidates_from_sources, agent_chat_api_key_from_sources,
         agent_chat_with_dispatch_and_tool_followup, agent_chat_with_transport,
-        computer_screenshot_evidence_base_dir, computer_tool_strategy_for_command,
-        deepseek_telemetry_with_pricing, dispatch_agent_action_proposals,
-        dispatch_agent_browser_open_action_with_opener, dispatch_agent_computer_control_action,
-        dispatch_agent_office_create_action, dispatch_agent_office_open_action,
-        dispatch_agent_office_update_action, link_existing_memory_records,
-        list_memory_maintenance_reviews_from_store,
+        apply_memory_candidate_update_if_current, computer_screenshot_evidence_base_dir,
+        computer_tool_strategy_for_command, deepseek_telemetry_with_pricing,
+        dispatch_agent_action_proposals, dispatch_agent_app_update_action_with_executor,
+        dispatch_agent_browser_open_action_with_opener,
+        dispatch_agent_browser_open_tool_with_executor,
+        dispatch_agent_browser_open_tool_with_store_mutex, dispatch_agent_office_create_action,
+        dispatch_agent_office_create_tool_with_executor,
+        dispatch_agent_office_create_tool_with_store_mutex, dispatch_agent_office_open_action,
+        dispatch_agent_office_open_tool_with_executor,
+        dispatch_agent_office_open_tool_with_store_mutex, dispatch_agent_office_update_action,
+        dispatch_agent_office_update_tool_with_executor,
+        dispatch_agent_office_update_tool_with_store_mutex,
+        dispatch_agent_operations_briefing_tool_with_executor,
+        dispatch_agent_operations_briefing_tool_with_store_mutex,
+        dispatch_agent_skill_activate_tool_with_executor, link_existing_memory_records,
+        list_memory_maintenance_reviews_from_store, normalize_agent_action_proposal,
         operations_briefing_deepseek_api_key_for_provider, operations_briefing_model_route_context,
         operations_briefing_report_export_dir, operations_briefing_template_seed_dir,
         operations_briefing_token_cache_context,
         propose_memory_update_candidate_from_feedback_in_store,
         record_agent_action_permission_requests, record_memory_maintenance_review_action_in_store,
-        resume_agent_chat_action_with_clients, run_agent_chat_with_clients,
+        resume_agent_chat_action_with_clients,
+        resume_agent_chat_action_with_clients_and_computer_use, run_agent_chat_with_clients,
         run_memory_background_maintenance_in_store,
         run_memory_background_maintenance_with_model_in_store,
         run_next_queued_agent_chat_with_clients_and_api_keys,
@@ -10299,18 +14506,23 @@ mod tests {
         COMPUTER_CONTROL_UNLOCK_TTL_MINUTES,
     };
     use crate::kernel::agent_run::{
-        AgentRunCancelRequest, AgentRunStart, AgentRunStatus, AgentRunStepStatus,
+        AgentRunCancelRequest, AgentRunExecutionContext, AgentRunQueuedGuidance,
+        AgentRunResourceAccess, AgentRunResourceClaim, AgentRunStart, AgentRunStatus,
+        AgentRunStepStatus,
     };
     use crate::kernel::capability::{
         BrowserPage, BrowserPageClient, CapabilityInvocationStatus, ComputerControlAction,
-        ComputerControlClient, ComputerControlExecution, FileContentClient, FileWriteClient,
-        FileWriteResult, LocalFileContentClient, NetworkSearchClient, NetworkSearchResult,
-        NetworkSearchResultItem,
+        ComputerControlClient, ComputerControlExecution, ComputerScreenshot,
+        ComputerScreenshotClient, EvidenceFolderClient, EvidenceFolderFile, FileContent,
+        FileContentClient, FileWriteClient, FileWriteResult, LocalEvidenceFolderClient,
+        LocalFileContentClient, LocalFileSystemMutationClient, NetworkSearchClient,
+        NetworkSearchResult, NetworkSearchResultItem, TerminalCommandOutput, TerminalReadClient,
     };
     use crate::kernel::deepseek::{
         DeepSeekChatCacheStatus, DeepSeekChatCompletionRequest, DeepSeekChatCompletionResponse,
-        DeepSeekChatCompletionTransport, DeepSeekChatTelemetry, DeepSeekMemoryChatCompletionCache,
-        HttpDeepSeekChatCompletionTransport, DEEPSEEK_API_KEY_ENV, DEEPSEEK_FLASH_MODEL,
+        DeepSeekChatCompletionTransport, DeepSeekChatRole, DeepSeekChatTelemetry,
+        DeepSeekMemoryChatCompletionCache, HttpDeepSeekChatCompletionTransport,
+        DEEPSEEK_API_KEY_ENV, DEEPSEEK_FLASH_MODEL,
     };
     use crate::kernel::deepseek_pricing::DeepSeekPricingSettings;
     use crate::kernel::event_store::EventStore;
@@ -10332,8 +14544,26 @@ mod tests {
         OfficeUpdateResult, OfficeUpdateSpec,
     };
     use crate::kernel::policy::{CapabilityKind, PolicyDecision};
+    use crate::kernel::skill::{
+        sha256_hex, SkillEnablementChange, SkillEnablementStatus, SkillInstallationRecord,
+        SkillManifest,
+    };
+    use crate::kernel::tool_runtime::{
+        AgentToolExecutor, ToolEvidence, ToolExecutionOutput, ToolExecutionPlan,
+        ToolExecutionRequest, ToolExecutionStatus, ToolVerificationResult,
+        APP_UPDATE_CHECK_TOOL_ID, APP_UPDATE_DOWNLOAD_TOOL_ID, BROWSER_BROWSE_TOOL_ID,
+        BROWSER_OPEN_TOOL_ID, COMPUTER_CONTROL_TOOL_ID, COMPUTER_SCREENSHOT_TOOL_ID,
+        FILESYSTEM_MUTATE_TOOL_ID, FILE_READ_TOOL_ID, FILE_WRITE_TOOL_ID, NETWORK_SEARCH_TOOL_ID,
+        OFFICE_CREATE_TOOL_ID, OFFICE_OPEN_TOOL_ID, OFFICE_UPDATE_TOOL_ID,
+        OPERATIONS_BRIEFING_TOOL_ID, SKILL_ACTIVATE_TOOL_ID, TERMINAL_READ_TOOL_ID,
+    };
     use chrono::{Duration, TimeZone, Utc};
+    use serde_json::json;
+    use std::cell::Cell;
+    use std::fs;
+    use std::path::Path;
     use std::sync::Mutex;
+    use std::time::Duration as StdDuration;
     use uuid::Uuid;
 
     #[test]
@@ -10345,6 +14575,2602 @@ mod tests {
         assert!(!is_newer_version("v0.1.0-rc.3", "v0.1.0"));
         assert!(!is_newer_version("v0.1.0", "0.1.0"));
         assert!(!is_newer_version("v0.0.9", "0.1.0"));
+    }
+
+    struct FakeAgentToolExecutor {
+        calls: Cell<u32>,
+    }
+
+    struct RecordingTerminalReadClient {
+        calls: Mutex<Vec<String>>,
+        exit_code: i32,
+    }
+
+    struct RecordingFileContentClient {
+        calls: Mutex<Vec<String>>,
+        text: String,
+    }
+
+    struct StaticBrowserPageClient {
+        calls: Cell<u32>,
+        page: BrowserPage,
+    }
+
+    impl BrowserPageClient for StaticBrowserPageClient {
+        fn fetch_page(&self, _url: &str) -> Result<BrowserPage, String> {
+            self.calls.set(self.calls.get() + 1);
+            Ok(self.page.clone())
+        }
+    }
+
+    struct StaticNetworkSearchClient {
+        calls: Cell<u32>,
+        result: NetworkSearchResult,
+    }
+
+    impl NetworkSearchClient for StaticNetworkSearchClient {
+        fn search(&self, _query: &str, _scope: &str) -> Result<NetworkSearchResult, String> {
+            self.calls.set(self.calls.get() + 1);
+            Ok(self.result.clone())
+        }
+    }
+
+    struct RecordingComputerScreenshotClient {
+        calls: Cell<u32>,
+        screenshot: ComputerScreenshot,
+    }
+
+    impl RecordingComputerScreenshotClient {
+        fn new(width: u32, height: u32, evidence_ref: &str) -> Self {
+            Self {
+                calls: Cell::new(0),
+                screenshot: ComputerScreenshot {
+                    display_label: "Primary display".to_string(),
+                    evidence_ref: evidence_ref.to_string(),
+                    width,
+                    height,
+                    captured_at: Utc::now(),
+                },
+            }
+        }
+    }
+
+    impl ComputerScreenshotClient for RecordingComputerScreenshotClient {
+        fn capture_screenshot(&self) -> Result<ComputerScreenshot, String> {
+            self.calls.set(self.calls.get() + 1);
+            Ok(self.screenshot.clone())
+        }
+    }
+
+    impl ComputerControlClient for RecordingComputerScreenshotClient {
+        fn execute_control(
+            &self,
+            _target: &str,
+            _action: &ComputerControlAction,
+        ) -> Result<ComputerControlExecution, String> {
+            Err("computer control was not expected in this screenshot test".to_string())
+        }
+    }
+
+    impl RecordingFileContentClient {
+        fn new(text: &str) -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                text: text.to_string(),
+            }
+        }
+
+        fn recorded_calls(&self) -> Vec<String> {
+            self.calls
+                .lock()
+                .map(|calls| calls.clone())
+                .unwrap_or_default()
+        }
+    }
+
+    impl FileContentClient for RecordingFileContentClient {
+        fn read_file(&self, path: &str) -> Result<FileContent, String> {
+            self.calls
+                .lock()
+                .map_err(|_| "file content test lock unavailable".to_string())?
+                .push(path.to_string());
+            Ok(FileContent {
+                path: path.to_string(),
+                title: Path::new(path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(path)
+                    .to_string(),
+                text: self.text.clone(),
+                bytes: self.text.len() as u64,
+                encoding: "utf-8".to_string(),
+            })
+        }
+    }
+
+    impl RecordingTerminalReadClient {
+        fn new(exit_code: i32) -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                exit_code,
+            }
+        }
+
+        fn recorded_calls(&self) -> Vec<String> {
+            self.calls
+                .lock()
+                .map(|calls| calls.clone())
+                .unwrap_or_default()
+        }
+    }
+
+    impl TerminalReadClient for RecordingTerminalReadClient {
+        fn run_readonly_command(&self, command: &str) -> Result<TerminalCommandOutput, String> {
+            self.calls
+                .lock()
+                .map_err(|_| "terminal test lock unavailable".to_string())?
+                .push(command.to_string());
+            Ok(TerminalCommandOutput {
+                command: command.to_string(),
+                stdout: if self.exit_code == 0 {
+                    "clean output".to_string()
+                } else {
+                    String::new()
+                },
+                stderr: if self.exit_code == 0 {
+                    String::new()
+                } else {
+                    "command failed".to_string()
+                },
+                exit_code: self.exit_code,
+            })
+        }
+    }
+
+    impl FakeAgentToolExecutor {
+        fn new() -> Self {
+            Self {
+                calls: Cell::new(0),
+            }
+        }
+    }
+
+    impl AgentToolExecutor for FakeAgentToolExecutor {
+        fn execute(&self, plan: &ToolExecutionPlan) -> Result<ToolExecutionOutput, String> {
+            self.calls.set(self.calls.get() + 1);
+            match plan.contract.id.as_str() {
+                APP_UPDATE_CHECK_TOOL_ID => Ok(ToolExecutionOutput {
+                    output: json!({
+                        "current_version": "0.1.2",
+                        "latest_version": "0.1.2",
+                        "update_available": false
+                    }),
+                    evidence: vec![ToolEvidence {
+                        kind: "release_status".to_string(),
+                        reference: "github:Lee-take/deepseek-agent-os/releases".to_string(),
+                        summary: "Release status was parsed.".to_string(),
+                    }],
+                    verification: ToolVerificationResult::passed("release status verified"),
+                }),
+                APP_UPDATE_DOWNLOAD_TOOL_ID => Ok(ToolExecutionOutput {
+                    output: json!({
+                        "latest_version": "0.1.3",
+                        "asset_name": "DS Agent_0.1.3_x64-setup.exe",
+                        "installer_path": "C:/Temp/ds-agent-updates/DS Agent_0.1.3_x64-setup.exe"
+                    }),
+                    evidence: vec![ToolEvidence {
+                        kind: "downloaded_installer".to_string(),
+                        reference: "C:/Temp/ds-agent-updates/DS Agent_0.1.3_x64-setup.exe"
+                            .to_string(),
+                        summary: "Trusted installer was downloaded.".to_string(),
+                    }],
+                    verification: ToolVerificationResult::passed("installer path verified"),
+                }),
+                tool_id => Err(format!("fake executor does not support {tool_id}")),
+            }
+        }
+    }
+
+    #[test]
+    fn generic_tool_executor_records_verified_update_check() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let executor = FakeAgentToolExecutor::new();
+
+        let invocation = execute_agent_tool_with_executor(
+            &store,
+            ToolExecutionRequest {
+                tool_id: APP_UPDATE_CHECK_TOOL_ID.to_string(),
+                input: json!({}),
+                access_mode: AccessMode::FullAccess,
+                run_id: None,
+            },
+            &executor,
+        )
+        .expect("tool executes");
+
+        assert_eq!(invocation.status, ToolExecutionStatus::Succeeded);
+        assert!(invocation.verification.passed);
+        assert_eq!(executor.calls.get(), 1);
+        assert_eq!(store.list_tool_invocations().expect("tool audit").len(), 1);
+        let capability_invocations = store
+            .list_capability_invocations()
+            .expect("capability audit");
+        assert_eq!(capability_invocations.len(), 1);
+        assert_eq!(
+            capability_invocations[0].capability,
+            CapabilityKind::AppUpdateCheck
+        );
+    }
+
+    #[test]
+    fn generic_tool_executor_waits_for_persisted_download_approval() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let executor = FakeAgentToolExecutor::new();
+        let request = ToolExecutionRequest {
+            tool_id: APP_UPDATE_DOWNLOAD_TOOL_ID.to_string(),
+            input: json!({}),
+            access_mode: AccessMode::AskOnRisk,
+            run_id: None,
+        };
+
+        let waiting = execute_agent_tool_with_executor(&store, request.clone(), &executor)
+            .expect("tool waits for approval");
+        assert_eq!(waiting.status, ToolExecutionStatus::WaitingForConfirmation);
+        assert_eq!(executor.calls.get(), 0);
+        let approval_request_id = waiting
+            .approval_request_id
+            .expect("approval request is persisted");
+
+        store
+            .resolve_capability_access_request(
+                approval_request_id,
+                true,
+                "Approved from the local permission surface.".to_string(),
+            )
+            .expect("approval resolves");
+
+        let succeeded = execute_agent_tool_with_executor(&store, request, &executor)
+            .expect("approved tool executes");
+        assert_eq!(succeeded.status, ToolExecutionStatus::Succeeded);
+        assert_eq!(succeeded.id, waiting.id);
+        assert_eq!(succeeded.approval_request_id, Some(approval_request_id));
+        assert_eq!(executor.calls.get(), 1);
+        assert_eq!(store.list_tool_invocations().expect("tool audit").len(), 1);
+        assert!(store
+            .list_capability_invocations()
+            .expect("capability audit")
+            .iter()
+            .any(
+                |invocation| invocation.capability == CapabilityKind::AppUpdateDownload
+                    && invocation.approval_request_id == Some(approval_request_id)
+                    && invocation.status == CapabilityInvocationStatus::Succeeded
+            ));
+    }
+
+    #[test]
+    fn generic_file_write_tool_waits_then_records_verified_run_step() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let client = RecordingFileWriteClient::new();
+        let executor = FileWriteAgentToolExecutor { client: &client };
+        let run = AgentRunStart::new(
+            "conversation-1".to_string(),
+            "Write the verified report.".to_string(),
+            0,
+        )
+        .expect("run is valid");
+        store.append_agent_run_start(&run).expect("run appends");
+        let request = ToolExecutionRequest {
+            tool_id: FILE_WRITE_TOOL_ID.to_string(),
+            input: json!({
+                "path": "reports/briefing.md",
+                "summary": "Write the verified report.",
+                "content": "Verified body"
+            }),
+            access_mode: AccessMode::AskOnRisk,
+            run_id: Some(run.id),
+        };
+
+        let waiting = execute_agent_tool_with_executor(&store, request.clone(), &executor)
+            .expect("write waits for approval");
+        assert_eq!(waiting.status, ToolExecutionStatus::WaitingForConfirmation);
+        assert!(client.recorded_calls().is_empty());
+        store
+            .resolve_capability_access_request(
+                waiting
+                    .approval_request_id
+                    .expect("approval request exists"),
+                true,
+                "Approved from the local permission surface.".to_string(),
+            )
+            .expect("approval resolves");
+
+        let succeeded = execute_agent_tool_with_executor(&store, request.clone(), &executor)
+            .expect("approved write executes");
+        let replay = execute_agent_tool_with_executor(&store, request, &executor)
+            .expect("verified same-run request is reused without replay");
+        let record = store
+            .list_agent_run_records()
+            .expect("run records load")
+            .into_iter()
+            .find(|record| record.id == run.id)
+            .expect("run record exists");
+
+        assert_eq!(succeeded.status, ToolExecutionStatus::Succeeded);
+        assert_eq!(
+            succeeded
+                .output
+                .as_ref()
+                .and_then(|value| value["bytes"].as_u64()),
+            Some(13)
+        );
+        assert_eq!(succeeded.evidence[0].kind, "written_file");
+        assert_eq!(replay.status, ToolExecutionStatus::Succeeded);
+        assert_eq!(replay.id, succeeded.id);
+        assert_eq!(
+            client.recorded_calls(),
+            vec![(
+                "reports/briefing.md".to_string(),
+                "Verified body".to_string()
+            )]
+        );
+        assert!(record.steps.iter().any(|step| {
+            step.label == FILE_WRITE_TOOL_ID && step.status == AgentRunStepStatus::Completed
+        }));
+        assert!(store
+            .list_active_agent_run_resource_claims()
+            .expect("resource claims load")
+            .is_empty());
+    }
+
+    #[test]
+    fn generic_office_create_tool_records_binary_evidence_and_run_step() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let client = RecordingFileWriteClient::new();
+        let run = AgentRunStart::new(
+            "conversation-office".to_string(),
+            "Create a verified Word artifact.".to_string(),
+            0,
+        )
+        .expect("run is valid");
+        store.append_agent_run_start(&run).expect("run appends");
+        let mut action = AgentChatActionProposal {
+            action_type: "office_create".to_string(),
+            title: Some("Verified report".to_string()),
+            reason: Some("Create the requested Word document.".to_string()),
+            risk: Some("high".to_string()),
+            requires_confirmation: false,
+            target: Some("office/verified.docx".to_string()),
+            target_location: None,
+            destination: None,
+            preferred_browser: None,
+            content: Some("Verified Office body".to_string()),
+            capability: Some(CapabilityKind::FileWrite),
+            policy_decision: Some(PolicyDecision::Allow),
+            execution_state: "proposed".to_string(),
+            dispatch_note: None,
+            permission_request_id: None,
+            capability_invocation_id: None,
+            workflow_run_id: None,
+            blocked_reason: None,
+        };
+
+        let invocation = dispatch_agent_office_create_tool_with_executor(
+            &store,
+            AccessMode::FullAccess,
+            &mut action,
+            Some(run.id),
+            &client,
+        )
+        .expect("Office artifact executes through the generic runtime");
+        let record = store
+            .list_agent_run_records()
+            .expect("run records load")
+            .into_iter()
+            .find(|record| record.id == run.id)
+            .expect("run exists");
+
+        assert_eq!(invocation.tool_id, OFFICE_CREATE_TOOL_ID);
+        assert_eq!(invocation.status, ToolExecutionStatus::Succeeded);
+        assert!(invocation
+            .evidence
+            .iter()
+            .any(|evidence| evidence.kind == "office_artifact"));
+        assert_eq!(action.execution_state, "succeeded");
+        assert_eq!(
+            client.recorded_calls(),
+            vec![(
+                "office/verified.docx".to_string(),
+                "office:Word".to_string()
+            )]
+        );
+        assert!(record.steps.iter().any(|step| {
+            step.label == OFFICE_CREATE_TOOL_ID && step.status == AgentRunStepStatus::Completed
+        }));
+        assert!(store
+            .list_active_agent_run_resource_claims()
+            .expect("resource claims load")
+            .is_empty());
+    }
+
+    #[test]
+    fn background_office_create_releases_event_store_lock_during_binary_write() {
+        let store = Mutex::new(EventStore::open_memory().expect("memory store opens"));
+        let run = AgentRunStart::new(
+            "conversation-office-lock".to_string(),
+            "Create an Office artifact without blocking run-state writes.".to_string(),
+            0,
+        )
+        .expect("run is valid");
+        store
+            .lock()
+            .expect("store lock")
+            .append_agent_run_start(&run)
+            .expect("run appends");
+        let client = StoreLockCheckingOfficeClient {
+            store: &store,
+            lock_available_at_write: Mutex::new(Vec::new()),
+        };
+        let mut action = AgentChatActionProposal {
+            action_type: "office_create".to_string(),
+            title: Some("Lock-safe report".to_string()),
+            reason: Some("Verify the background lock boundary.".to_string()),
+            risk: Some("high".to_string()),
+            requires_confirmation: false,
+            target: Some("office/lock-safe.docx".to_string()),
+            target_location: None,
+            destination: None,
+            preferred_browser: None,
+            content: Some("Verified body".to_string()),
+            capability: Some(CapabilityKind::FileWrite),
+            policy_decision: Some(PolicyDecision::Allow),
+            execution_state: "proposed".to_string(),
+            dispatch_note: None,
+            permission_request_id: None,
+            capability_invocation_id: None,
+            workflow_run_id: None,
+            blocked_reason: None,
+        };
+
+        let invocation = dispatch_agent_office_create_tool_with_store_mutex(
+            &store,
+            AccessMode::FullAccess,
+            &mut action,
+            Some(run.id),
+            &client,
+        )
+        .expect("background Office create executes");
+
+        assert_eq!(invocation.status, ToolExecutionStatus::Succeeded);
+        assert_eq!(client.lock_checks(), vec![true]);
+        assert_eq!(action.execution_state, "succeeded");
+    }
+
+    #[test]
+    fn generic_office_update_tool_records_binary_evidence_and_run_step() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let client = RecordingFileWriteClient::new();
+        let run = AgentRunStart::new(
+            "conversation-office-update".to_string(),
+            "Update a verified Word artifact.".to_string(),
+            0,
+        )
+        .expect("run is valid");
+        store.append_agent_run_start(&run).expect("run appends");
+        let mut action = AgentChatActionProposal {
+            action_type: "office_update".to_string(),
+            title: Some("Update verified report".to_string()),
+            reason: Some("Append the requested Word content.".to_string()),
+            risk: Some("high".to_string()),
+            requires_confirmation: false,
+            target: Some("office/verified.docx".to_string()),
+            target_location: None,
+            destination: None,
+            preferred_browser: None,
+            content: Some("Verified Office update".to_string()),
+            capability: Some(CapabilityKind::FileWrite),
+            policy_decision: Some(PolicyDecision::Allow),
+            execution_state: "proposed".to_string(),
+            dispatch_note: None,
+            permission_request_id: None,
+            capability_invocation_id: None,
+            workflow_run_id: None,
+            blocked_reason: None,
+        };
+
+        let invocation = dispatch_agent_office_update_tool_with_executor(
+            &store,
+            AccessMode::FullAccess,
+            &mut action,
+            Some(run.id),
+            &client,
+        )
+        .expect("Office update executes through the generic runtime");
+        let record = store
+            .list_agent_run_records()
+            .expect("run records load")
+            .into_iter()
+            .find(|record| record.id == run.id)
+            .expect("run exists");
+
+        assert_eq!(invocation.tool_id, OFFICE_UPDATE_TOOL_ID);
+        assert_eq!(invocation.status, ToolExecutionStatus::Succeeded);
+        assert!(invocation
+            .evidence
+            .iter()
+            .any(|evidence| evidence.kind == "office_artifact_update"));
+        assert_eq!(action.execution_state, "succeeded");
+        assert_eq!(
+            client.recorded_calls(),
+            vec![(
+                "office/verified.docx".to_string(),
+                "office-update:Word".to_string()
+            )]
+        );
+        assert!(record.steps.iter().any(|step| {
+            step.label == OFFICE_UPDATE_TOOL_ID && step.status == AgentRunStepStatus::Completed
+        }));
+        assert!(store
+            .list_active_agent_run_resource_claims()
+            .expect("resource claims load")
+            .is_empty());
+    }
+
+    #[test]
+    fn generic_office_update_waits_for_exact_approval_and_reuses_invocation() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let client = RecordingFileWriteClient::new();
+        let run = AgentRunStart::new(
+            "conversation-office-update-approval".to_string(),
+            "Update one approved Office artifact.".to_string(),
+            0,
+        )
+        .expect("run is valid");
+        store.append_agent_run_start(&run).expect("run appends");
+        let mut action = AgentChatActionProposal {
+            action_type: "office_update".to_string(),
+            title: Some("Update approved report".to_string()),
+            reason: Some("Append the approved Word content.".to_string()),
+            risk: Some("low".to_string()),
+            requires_confirmation: false,
+            target: Some("office/approved.docx".to_string()),
+            target_location: None,
+            destination: None,
+            preferred_browser: None,
+            content: Some("Approved Office update".to_string()),
+            capability: Some(CapabilityKind::FileWrite),
+            policy_decision: Some(PolicyDecision::Allow),
+            execution_state: "proposed".to_string(),
+            dispatch_note: None,
+            permission_request_id: None,
+            capability_invocation_id: None,
+            workflow_run_id: None,
+            blocked_reason: None,
+        };
+
+        let waiting = dispatch_agent_office_update_tool_with_executor(
+            &store,
+            AccessMode::AskOnRisk,
+            &mut action,
+            Some(run.id),
+            &client,
+        )
+        .expect("Office update waits for approval");
+        assert_eq!(waiting.status, ToolExecutionStatus::WaitingForConfirmation);
+        assert!(client.recorded_calls().is_empty());
+        let approval_request_id = waiting
+            .approval_request_id
+            .expect("Office update approval is persisted");
+        store
+            .resolve_capability_access_request(
+                approval_request_id,
+                true,
+                "Approved exact Office update request.".to_string(),
+            )
+            .expect("Office update approval resolves");
+
+        let succeeded = dispatch_agent_office_update_tool_with_executor(
+            &store,
+            AccessMode::AskOnRisk,
+            &mut action,
+            Some(run.id),
+            &client,
+        )
+        .expect("approved Office update executes");
+        let replay = dispatch_agent_office_update_tool_with_executor(
+            &store,
+            AccessMode::AskOnRisk,
+            &mut action,
+            Some(run.id),
+            &client,
+        )
+        .expect("verified Office update is reused");
+
+        assert_eq!(succeeded.status, ToolExecutionStatus::Succeeded);
+        assert_eq!(succeeded.id, waiting.id);
+        assert_eq!(replay.id, succeeded.id);
+        assert_eq!(
+            client.recorded_calls(),
+            vec![(
+                "office/approved.docx".to_string(),
+                "office-update:Word".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn background_office_update_releases_event_store_lock_during_binary_write() {
+        let store = Mutex::new(EventStore::open_memory().expect("memory store opens"));
+        let run = AgentRunStart::new(
+            "conversation-office-update-lock".to_string(),
+            "Update an Office artifact without blocking run-state writes.".to_string(),
+            0,
+        )
+        .expect("run is valid");
+        store
+            .lock()
+            .expect("store lock")
+            .append_agent_run_start(&run)
+            .expect("run appends");
+        let client = StoreLockCheckingOfficeClient {
+            store: &store,
+            lock_available_at_write: Mutex::new(Vec::new()),
+        };
+        let mut action = AgentChatActionProposal {
+            action_type: "office_update".to_string(),
+            title: Some("Update lock-safe report".to_string()),
+            reason: Some("Verify the background update lock boundary.".to_string()),
+            risk: Some("high".to_string()),
+            requires_confirmation: false,
+            target: Some("office/lock-safe.docx".to_string()),
+            target_location: None,
+            destination: None,
+            preferred_browser: None,
+            content: Some("Verified update body".to_string()),
+            capability: Some(CapabilityKind::FileWrite),
+            policy_decision: Some(PolicyDecision::Allow),
+            execution_state: "proposed".to_string(),
+            dispatch_note: None,
+            permission_request_id: None,
+            capability_invocation_id: None,
+            workflow_run_id: None,
+            blocked_reason: None,
+        };
+
+        let invocation = dispatch_agent_office_update_tool_with_store_mutex(
+            &store,
+            AccessMode::FullAccess,
+            &mut action,
+            Some(run.id),
+            &client,
+        )
+        .expect("background Office update executes");
+
+        assert_eq!(invocation.status, ToolExecutionStatus::Succeeded);
+        assert_eq!(client.lock_checks(), vec![true]);
+        assert_eq!(action.execution_state, "succeeded");
+    }
+
+    #[test]
+    fn generic_office_open_tool_records_verified_launch_and_run_step() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let client = RecordingFileWriteClient::new();
+        let run = AgentRunStart::new(
+            "conversation-office-open".to_string(),
+            "Open a verified Word artifact.".to_string(),
+            0,
+        )
+        .expect("run is valid");
+        store.append_agent_run_start(&run).expect("run appends");
+        let mut action = AgentChatActionProposal {
+            action_type: "office_open".to_string(),
+            title: Some("Open verified report".to_string()),
+            reason: Some("Open the requested Word document.".to_string()),
+            risk: Some("low".to_string()),
+            requires_confirmation: false,
+            target: Some("office/verified.docx".to_string()),
+            target_location: None,
+            destination: None,
+            preferred_browser: None,
+            content: None,
+            capability: Some(CapabilityKind::FileRead),
+            policy_decision: Some(PolicyDecision::Allow),
+            execution_state: "proposed".to_string(),
+            dispatch_note: None,
+            permission_request_id: None,
+            capability_invocation_id: None,
+            workflow_run_id: None,
+            blocked_reason: None,
+        };
+
+        let invocation = dispatch_agent_office_open_tool_with_executor(
+            &store,
+            AccessMode::AskOnRisk,
+            &mut action,
+            Some(run.id),
+            &client,
+        )
+        .expect("Office launch executes through the generic runtime");
+        let record = store
+            .list_agent_run_records()
+            .expect("run records load")
+            .into_iter()
+            .find(|record| record.id == run.id)
+            .expect("run exists");
+
+        assert_eq!(invocation.tool_id, OFFICE_OPEN_TOOL_ID);
+        assert_eq!(invocation.status, ToolExecutionStatus::Succeeded);
+        assert!(invocation
+            .evidence
+            .iter()
+            .any(|evidence| evidence.kind == "office_open_receipt"));
+        assert_eq!(action.execution_state, "succeeded");
+        assert_eq!(
+            client.recorded_calls(),
+            vec![(
+                "office/verified.docx".to_string(),
+                "office-open:Some(Word)".to_string()
+            )]
+        );
+        assert!(record.steps.iter().any(|step| {
+            step.label == OFFICE_OPEN_TOOL_ID && step.status == AgentRunStepStatus::Completed
+        }));
+        assert!(store
+            .list_active_agent_run_resource_claims()
+            .expect("resource claims load")
+            .is_empty());
+    }
+
+    #[test]
+    fn generic_office_open_blocks_while_foreground_writer_is_active() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let client = RecordingFileWriteClient::new();
+        store
+            .claim_agent_run_resource(
+                AgentRunResourceClaim::new(
+                    None,
+                    Uuid::new_v4(),
+                    "computer://foreground_desktop".to_string(),
+                    AgentRunResourceAccess::Write,
+                    120,
+                )
+                .expect("foreground claim is valid"),
+            )
+            .expect("foreground writer is claimed");
+        let mut action = AgentChatActionProposal {
+            action_type: "office_open".to_string(),
+            title: Some("Open report".to_string()),
+            reason: Some("Do not race active foreground control.".to_string()),
+            risk: Some("low".to_string()),
+            requires_confirmation: false,
+            target: Some("office/conflict.docx".to_string()),
+            target_location: None,
+            destination: None,
+            preferred_browser: None,
+            content: None,
+            capability: Some(CapabilityKind::FileRead),
+            policy_decision: Some(PolicyDecision::Allow),
+            execution_state: "proposed".to_string(),
+            dispatch_note: None,
+            permission_request_id: None,
+            capability_invocation_id: None,
+            workflow_run_id: None,
+            blocked_reason: None,
+        };
+
+        let invocation = dispatch_agent_office_open_tool_with_executor(
+            &store,
+            AccessMode::AskOnRisk,
+            &mut action,
+            None,
+            &client,
+        )
+        .expect("conflicting Office launch is audited");
+
+        assert_eq!(invocation.status, ToolExecutionStatus::Blocked);
+        assert_eq!(action.execution_state, "blocked");
+        assert!(client.recorded_calls().is_empty());
+    }
+
+    #[test]
+    fn background_office_open_releases_event_store_lock_during_launch() {
+        let store = Mutex::new(EventStore::open_memory().expect("memory store opens"));
+        let run = AgentRunStart::new(
+            "conversation-office-open-lock".to_string(),
+            "Open an Office artifact without blocking run-state writes.".to_string(),
+            0,
+        )
+        .expect("run is valid");
+        store
+            .lock()
+            .expect("store lock")
+            .append_agent_run_start(&run)
+            .expect("run appends");
+        let client = StoreLockCheckingOfficeClient {
+            store: &store,
+            lock_available_at_write: Mutex::new(Vec::new()),
+        };
+        let mut action = AgentChatActionProposal {
+            action_type: "office_open".to_string(),
+            title: Some("Open lock-safe report".to_string()),
+            reason: Some("Verify the background launch lock boundary.".to_string()),
+            risk: Some("low".to_string()),
+            requires_confirmation: false,
+            target: Some("office/lock-safe.docx".to_string()),
+            target_location: None,
+            destination: None,
+            preferred_browser: None,
+            content: None,
+            capability: Some(CapabilityKind::FileRead),
+            policy_decision: Some(PolicyDecision::Allow),
+            execution_state: "proposed".to_string(),
+            dispatch_note: None,
+            permission_request_id: None,
+            capability_invocation_id: None,
+            workflow_run_id: None,
+            blocked_reason: None,
+        };
+
+        let invocation = dispatch_agent_office_open_tool_with_store_mutex(
+            &store,
+            AccessMode::AskOnRisk,
+            &mut action,
+            Some(run.id),
+            &client,
+        )
+        .expect("background Office launch executes");
+
+        assert_eq!(invocation.status, ToolExecutionStatus::Succeeded);
+        assert_eq!(client.lock_checks(), vec![true]);
+        assert_eq!(action.execution_state, "succeeded");
+    }
+
+    #[test]
+    fn generic_file_write_tool_audits_protected_path_as_blocked_before_executor() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let client = RecordingFileWriteClient::new();
+        let executor = FileWriteAgentToolExecutor { client: &client };
+
+        let invocation = execute_agent_tool_with_executor(
+            &store,
+            ToolExecutionRequest {
+                tool_id: FILE_WRITE_TOOL_ID.to_string(),
+                input: json!({
+                    "path": ".git/config",
+                    "summary": "Change protected metadata.",
+                    "content": "[core]"
+                }),
+                access_mode: AccessMode::FullAccess,
+                run_id: None,
+            },
+            &executor,
+        )
+        .expect("protected write is audited");
+
+        assert_eq!(invocation.status, ToolExecutionStatus::Blocked);
+        assert!(invocation
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("deny-first")));
+        assert!(client.recorded_calls().is_empty());
+    }
+
+    #[test]
+    fn generic_filesystem_mutation_tool_records_verified_run_step_and_releases_resource() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_dir.path().join("verified.txt");
+        let run = AgentRunStart::new(
+            "conversation-1".to_string(),
+            "Create a verified local file.".to_string(),
+            0,
+        )
+        .expect("run is valid");
+        store.append_agent_run_start(&run).expect("run appends");
+        let client = LocalFileSystemMutationClient;
+        let executor = FileSystemMutationAgentToolExecutor { client: &client };
+
+        let invocation = execute_agent_tool_with_executor(
+            &store,
+            ToolExecutionRequest {
+                tool_id: FILESYSTEM_MUTATE_TOOL_ID.to_string(),
+                input: json!({
+                    "operation": "create_file",
+                    "path": path.to_string_lossy(),
+                    "summary": "Create a verified local file.",
+                    "content": "verified body"
+                }),
+                access_mode: AccessMode::FullAccess,
+                run_id: Some(run.id),
+            },
+            &executor,
+        )
+        .expect("filesystem mutation executes");
+        let record = store
+            .list_agent_run_records()
+            .expect("run records load")
+            .into_iter()
+            .find(|record| record.id == run.id)
+            .expect("run record exists");
+
+        assert_eq!(invocation.status, ToolExecutionStatus::Succeeded);
+        assert_eq!(
+            fs::read_to_string(&path).expect("file reads"),
+            "verified body"
+        );
+        assert_eq!(invocation.evidence[0].kind, "filesystem_state");
+        assert!(invocation.verification.passed);
+        assert!(record.steps.iter().any(|step| {
+            step.label == FILESYSTEM_MUTATE_TOOL_ID && step.status == AgentRunStepStatus::Completed
+        }));
+        assert!(store
+            .list_active_agent_run_resource_claims()
+            .expect("resource claims load")
+            .is_empty());
+    }
+
+    #[test]
+    fn generic_filesystem_mutation_tool_blocks_protected_destination_before_executor() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let source = temp_dir.path().join("source.txt");
+        fs::write(&source, "source").expect("source writes");
+        let destination = temp_dir.path().join(".git").join("config");
+        let client = LocalFileSystemMutationClient;
+        let executor = FileSystemMutationAgentToolExecutor { client: &client };
+
+        let invocation = execute_agent_tool_with_executor(
+            &store,
+            ToolExecutionRequest {
+                tool_id: FILESYSTEM_MUTATE_TOOL_ID.to_string(),
+                input: json!({
+                    "operation": "rename_file",
+                    "path": source.to_string_lossy(),
+                    "destination": destination.to_string_lossy(),
+                    "summary": "Attempt a protected rename."
+                }),
+                access_mode: AccessMode::FullAccess,
+                run_id: None,
+            },
+            &executor,
+        )
+        .expect("protected mutation is audited");
+
+        assert_eq!(invocation.status, ToolExecutionStatus::Blocked);
+        assert!(invocation
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("deny-first")));
+        assert!(source.exists());
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn generic_filesystem_mutation_tool_blocks_conflicting_writer_until_release() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let first_path = temp_dir.path().join("first");
+        let second_path = temp_dir.path().join("second");
+        let request = |path: &Path| ToolExecutionRequest {
+            tool_id: FILESYSTEM_MUTATE_TOOL_ID.to_string(),
+            input: json!({
+                "operation": "create_directory",
+                "path": path.to_string_lossy(),
+                "summary": "Create a local directory."
+            }),
+            access_mode: AccessMode::FullAccess,
+            run_id: None,
+        };
+
+        let first = authorize_agent_tool_execution(&store, request(&first_path))
+            .expect("first mutation authorizes");
+        let first = match first {
+            AgentToolAuthorization::Ready(authorized) => authorized,
+            AgentToolAuthorization::Finished(_) => panic!("first mutation should hold the lease"),
+        };
+        let second = authorize_agent_tool_execution(&store, request(&second_path))
+            .expect("conflicting mutation is audited");
+        let second = match second {
+            AgentToolAuthorization::Finished(invocation) => invocation,
+            AgentToolAuthorization::Ready(_) => panic!("conflicting mutation must not authorize"),
+        };
+
+        assert_eq!(second.status, ToolExecutionStatus::Blocked);
+        assert!(second
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("resource")));
+        assert!(!second_path.exists());
+
+        let client = LocalFileSystemMutationClient;
+        let executor = FileSystemMutationAgentToolExecutor { client: &client };
+        let first = run_authorized_agent_tool_execution(first, &executor);
+        record_completed_agent_tool_execution(&store, &first).expect("first mutation completes");
+        assert_eq!(first.status, ToolExecutionStatus::Succeeded);
+        assert!(first_path.is_dir());
+        assert!(store
+            .list_active_agent_run_resource_claims()
+            .expect("resource claims load")
+            .is_empty());
+    }
+
+    #[test]
+    fn generic_terminal_read_tool_records_verified_output_and_run_step() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let run = AgentRunStart::new(
+            "conversation-1".to_string(),
+            "Inspect repository status.".to_string(),
+            0,
+        )
+        .expect("run is valid");
+        store.append_agent_run_start(&run).expect("run appends");
+        let client = RecordingTerminalReadClient::new(0);
+        let executor = TerminalReadAgentToolExecutor { client: &client };
+
+        let invocation = execute_agent_tool_with_executor(
+            &store,
+            ToolExecutionRequest {
+                tool_id: TERMINAL_READ_TOOL_ID.to_string(),
+                input: json!({
+                    "command": "git status --short",
+                    "summary": "Inspect repository status."
+                }),
+                access_mode: AccessMode::FullAccess,
+                run_id: Some(run.id),
+            },
+            &executor,
+        )
+        .expect("terminal read executes");
+        let record = store
+            .list_agent_run_records()
+            .expect("run records load")
+            .into_iter()
+            .find(|record| record.id == run.id)
+            .expect("run record exists");
+
+        assert_eq!(invocation.status, ToolExecutionStatus::Succeeded);
+        assert_eq!(client.recorded_calls(), vec!["git status --short"]);
+        assert_eq!(invocation.evidence[0].kind, "terminal_output");
+        assert!(invocation.verification.passed);
+        assert!(record.steps.iter().any(|step| {
+            step.label == TERMINAL_READ_TOOL_ID && step.status == AgentRunStepStatus::Completed
+        }));
+    }
+
+    #[test]
+    fn generic_terminal_read_tool_blocks_non_allowlisted_command_before_client() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let client = RecordingTerminalReadClient::new(0);
+        let executor = TerminalReadAgentToolExecutor { client: &client };
+
+        let invocation = execute_agent_tool_with_executor(
+            &store,
+            ToolExecutionRequest {
+                tool_id: TERMINAL_READ_TOOL_ID.to_string(),
+                input: json!({
+                    "command": "Get-Content .env",
+                    "summary": "Attempt to read a secret."
+                }),
+                access_mode: AccessMode::FullAccess,
+                run_id: None,
+            },
+            &executor,
+        )
+        .expect("disallowed command is audited");
+
+        assert_eq!(invocation.status, ToolExecutionStatus::Blocked);
+        assert!(invocation
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("allowlist")));
+        assert!(client.recorded_calls().is_empty());
+    }
+
+    #[test]
+    fn generic_terminal_read_tool_blocks_protected_directory_before_client() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let protected = temp_dir.path().join(".git");
+        let client = RecordingTerminalReadClient::new(0);
+        let executor = TerminalReadAgentToolExecutor { client: &client };
+
+        let invocation = execute_agent_tool_with_executor(
+            &store,
+            ToolExecutionRequest {
+                tool_id: TERMINAL_READ_TOOL_ID.to_string(),
+                input: json!({
+                    "command": format!("ds-agent:list-directory {}", protected.display()),
+                    "summary": "Attempt to list protected metadata."
+                }),
+                access_mode: AccessMode::FullAccess,
+                run_id: None,
+            },
+            &executor,
+        )
+        .expect("protected terminal read is audited");
+
+        assert_eq!(invocation.status, ToolExecutionStatus::Blocked);
+        assert!(invocation
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("deny-first")));
+        assert!(client.recorded_calls().is_empty());
+    }
+
+    #[test]
+    fn generic_browser_browse_tool_records_verified_page_and_run_step() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let run = AgentRunStart::new(
+            "conversation-1".to_string(),
+            "Read a public evidence page.".to_string(),
+            0,
+        )
+        .expect("run is valid");
+        store.append_agent_run_start(&run).expect("run appends");
+        let client = RecordingBrowserPageClient::new();
+        let executor = BrowserBrowseAgentToolExecutor { client: &client };
+
+        let invocation = execute_agent_tool_with_executor(
+            &store,
+            ToolExecutionRequest {
+                tool_id: BROWSER_BROWSE_TOOL_ID.to_string(),
+                input: json!({
+                    "url": "https://example.com/evidence",
+                    "summary": "Read a public evidence page."
+                }),
+                access_mode: AccessMode::FullAccess,
+                run_id: Some(run.id),
+            },
+            &executor,
+        )
+        .expect("browser browse executes");
+        let record = store
+            .list_agent_run_records()
+            .expect("run records load")
+            .into_iter()
+            .find(|record| record.id == run.id)
+            .expect("run record exists");
+
+        assert_eq!(invocation.status, ToolExecutionStatus::Succeeded);
+        assert_eq!(
+            client.recorded_calls(),
+            vec!["https://example.com/evidence"]
+        );
+        assert_eq!(invocation.evidence[0].kind, "browser_page");
+        assert_eq!(
+            invocation
+                .output
+                .as_ref()
+                .and_then(|output| output["requested_url"].as_str()),
+            Some("https://example.com/evidence")
+        );
+        assert!(record.steps.iter().any(|step| {
+            step.label == BROWSER_BROWSE_TOOL_ID && step.status == AgentRunStepStatus::Completed
+        }));
+    }
+
+    #[test]
+    fn generic_browser_open_tool_records_verified_launch_and_run_step() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let run = AgentRunStart::new(
+            "conversation-browser-open".to_string(),
+            "Open the requested website.".to_string(),
+            0,
+        )
+        .expect("run is valid");
+        store.append_agent_run_start(&run).expect("run appends");
+        let opener = RecordingBrowserUrlOpener::new(BrowserUrlOpenOutcome {
+            browser_label: "Chrome".to_string(),
+            fallback_note: None,
+        });
+        let mut action = AgentChatActionProposal {
+            action_type: "browser_open".to_string(),
+            title: Some("Open website".to_string()),
+            reason: Some("Open the user-requested URL.".to_string()),
+            risk: Some("low".to_string()),
+            requires_confirmation: false,
+            target: Some("https://example.com/account".to_string()),
+            target_location: None,
+            destination: None,
+            preferred_browser: Some("chrome".to_string()),
+            content: None,
+            capability: Some(CapabilityKind::BrowserBrowse),
+            policy_decision: Some(PolicyDecision::Allow),
+            execution_state: "proposed".to_string(),
+            dispatch_note: None,
+            permission_request_id: None,
+            capability_invocation_id: None,
+            workflow_run_id: None,
+            blocked_reason: None,
+        };
+
+        let invocation = dispatch_agent_browser_open_tool_with_executor(
+            &store,
+            AccessMode::AskOnRisk,
+            &mut action,
+            Some(run.id),
+            &opener,
+        )
+        .expect("browser launch executes through the generic runtime");
+        let record = store
+            .list_agent_run_records()
+            .expect("run records load")
+            .into_iter()
+            .find(|record| record.id == run.id)
+            .expect("run exists");
+
+        assert_eq!(invocation.tool_id, BROWSER_OPEN_TOOL_ID);
+        assert_eq!(invocation.status, ToolExecutionStatus::Succeeded);
+        assert_eq!(invocation.evidence[0].kind, "browser_open_receipt");
+        assert_eq!(action.execution_state, "succeeded");
+        assert_eq!(
+            opener.recorded_calls(),
+            vec![(
+                "https://example.com/account".to_string(),
+                Some("chrome".to_string())
+            )]
+        );
+        assert!(record.steps.iter().any(|step| {
+            step.label == BROWSER_OPEN_TOOL_ID && step.status == AgentRunStepStatus::Completed
+        }));
+    }
+
+    #[test]
+    fn background_browser_open_releases_event_store_lock_during_launch() {
+        let store = Mutex::new(EventStore::open_memory().expect("memory store opens"));
+        let run = AgentRunStart::new(
+            "conversation-browser-open-lock".to_string(),
+            "Open a website without blocking run-state writes.".to_string(),
+            0,
+        )
+        .expect("run is valid");
+        store
+            .lock()
+            .expect("store lock")
+            .append_agent_run_start(&run)
+            .expect("run appends");
+        let opener = StoreLockCheckingBrowserUrlOpener {
+            store: &store,
+            lock_available_at_open: Mutex::new(Vec::new()),
+        };
+        let mut action = AgentChatActionProposal {
+            action_type: "browser_open".to_string(),
+            title: Some("Open lock-safe website".to_string()),
+            reason: Some("Verify the background browser launch lock boundary.".to_string()),
+            risk: Some("low".to_string()),
+            requires_confirmation: false,
+            target: Some("https://example.com/lock-safe".to_string()),
+            target_location: None,
+            destination: None,
+            preferred_browser: None,
+            content: None,
+            capability: Some(CapabilityKind::BrowserBrowse),
+            policy_decision: Some(PolicyDecision::Allow),
+            execution_state: "proposed".to_string(),
+            dispatch_note: None,
+            permission_request_id: None,
+            capability_invocation_id: None,
+            workflow_run_id: None,
+            blocked_reason: None,
+        };
+
+        let invocation = dispatch_agent_browser_open_tool_with_store_mutex(
+            &store,
+            AccessMode::AskOnRisk,
+            &mut action,
+            Some(run.id),
+            &opener,
+        )
+        .expect("background browser launch executes");
+
+        assert_eq!(invocation.status, ToolExecutionStatus::Succeeded);
+        assert_eq!(opener.lock_checks(), vec![true]);
+        assert_eq!(action.execution_state, "succeeded");
+    }
+
+    #[test]
+    fn generic_operations_briefing_tool_persists_verified_run_once() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            temp_dir.path().join("revenue.md"),
+            "Room revenue improved by 6 percent.",
+        )
+        .expect("write evidence");
+        let store = EventStore::open_memory().expect("memory store opens");
+        let run = AgentRunStart::new(
+            "conversation-operations-briefing".to_string(),
+            "Build a verified operations briefing.".to_string(),
+            0,
+        )
+        .expect("run is valid");
+        store.append_agent_run_start(&run).expect("run appends");
+        let client = LocalEvidenceFolderClient::new(20, 512 * 1024);
+        let mut action = AgentChatActionProposal {
+            action_type: "operations_briefing".to_string(),
+            title: Some("Build operations briefing".to_string()),
+            reason: Some("Generate a draft from the selected evidence folder.".to_string()),
+            risk: Some("low".to_string()),
+            requires_confirmation: false,
+            target: Some(temp_dir.path().to_string_lossy().to_string()),
+            target_location: None,
+            destination: None,
+            preferred_browser: None,
+            content: None,
+            capability: Some(CapabilityKind::FileRead),
+            policy_decision: Some(PolicyDecision::Allow),
+            execution_state: "proposed".to_string(),
+            dispatch_note: None,
+            permission_request_id: None,
+            capability_invocation_id: None,
+            workflow_run_id: None,
+            blocked_reason: None,
+        };
+
+        let invocation = dispatch_agent_operations_briefing_tool_with_executor(
+            &store,
+            AccessMode::AskOnRisk,
+            &mut action,
+            Some(run.id),
+            &client,
+        )
+        .expect("operations briefing executes through the generic runtime");
+        let replay = dispatch_agent_operations_briefing_tool_with_executor(
+            &store,
+            AccessMode::AskOnRisk,
+            &mut action,
+            Some(run.id),
+            &client,
+        )
+        .expect("verified operations briefing is reused");
+        let workflow_runs = store
+            .list_operations_briefing_runs()
+            .expect("workflow runs load");
+        let record = store
+            .list_agent_run_records()
+            .expect("agent run records load")
+            .into_iter()
+            .find(|record| record.id == run.id)
+            .expect("agent run exists");
+
+        assert_eq!(invocation.tool_id, OPERATIONS_BRIEFING_TOOL_ID);
+        assert_eq!(invocation.status, ToolExecutionStatus::Succeeded);
+        assert_eq!(replay.id, invocation.id);
+        assert_eq!(invocation.evidence[0].kind, "operations_briefing_draft");
+        assert_eq!(workflow_runs.len(), 1);
+        assert_eq!(workflow_runs[0].evidence_invocation_id, Some(invocation.id));
+        assert_eq!(action.workflow_run_id, Some(workflow_runs[0].id));
+        assert!(record.steps.iter().any(|step| {
+            step.label == OPERATIONS_BRIEFING_TOOL_ID
+                && step.status == AgentRunStepStatus::Completed
+        }));
+    }
+
+    #[test]
+    fn background_operations_briefing_releases_event_store_lock_during_evidence_read() {
+        let store = Mutex::new(EventStore::open_memory().expect("memory store opens"));
+        let run = AgentRunStart::new(
+            "conversation-operations-briefing-lock".to_string(),
+            "Build a briefing without blocking run-state writes.".to_string(),
+            0,
+        )
+        .expect("run is valid");
+        store
+            .lock()
+            .expect("store lock")
+            .append_agent_run_start(&run)
+            .expect("run appends");
+        let client = StoreLockCheckingEvidenceFolderClient {
+            store: &store,
+            lock_available_at_read: Mutex::new(Vec::new()),
+        };
+        let mut action = AgentChatActionProposal {
+            action_type: "operations_briefing".to_string(),
+            title: Some("Build lock-safe briefing".to_string()),
+            reason: Some("Verify the background workflow lock boundary.".to_string()),
+            risk: Some("low".to_string()),
+            requires_confirmation: false,
+            target: Some("fixtures/evidence".to_string()),
+            target_location: None,
+            destination: None,
+            preferred_browser: None,
+            content: None,
+            capability: Some(CapabilityKind::FileRead),
+            policy_decision: Some(PolicyDecision::Allow),
+            execution_state: "proposed".to_string(),
+            dispatch_note: None,
+            permission_request_id: None,
+            capability_invocation_id: None,
+            workflow_run_id: None,
+            blocked_reason: None,
+        };
+
+        let invocation = dispatch_agent_operations_briefing_tool_with_store_mutex(
+            &store,
+            AccessMode::AskOnRisk,
+            &mut action,
+            Some(run.id),
+            &client,
+        )
+        .expect("background operations briefing executes");
+
+        assert_eq!(invocation.status, ToolExecutionStatus::Succeeded);
+        assert_eq!(client.lock_checks(), vec![true]);
+        assert_eq!(action.execution_state, "succeeded");
+        assert_eq!(
+            store
+                .lock()
+                .expect("store lock")
+                .list_operations_briefing_runs()
+                .expect("workflow runs load")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn generic_browser_browse_tool_blocks_private_target_before_client() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let client = RecordingBrowserPageClient::new();
+        let executor = BrowserBrowseAgentToolExecutor { client: &client };
+
+        let invocation = execute_agent_tool_with_executor(
+            &store,
+            ToolExecutionRequest {
+                tool_id: BROWSER_BROWSE_TOOL_ID.to_string(),
+                input: json!({
+                    "url": "http://169.254.169.254/latest/meta-data",
+                    "summary": "Attempt metadata access."
+                }),
+                access_mode: AccessMode::FullAccess,
+                run_id: None,
+            },
+            &executor,
+        )
+        .expect("private target is audited");
+
+        assert_eq!(invocation.status, ToolExecutionStatus::Blocked);
+        assert!(invocation
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("network sandbox")));
+        assert!(client.recorded_calls().is_empty());
+    }
+
+    #[test]
+    fn generic_browser_browse_tool_rejects_private_final_url() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let client = StaticBrowserPageClient {
+            calls: Cell::new(0),
+            page: BrowserPage {
+                final_url: "http://127.0.0.1/admin".to_string(),
+                title: "Unsafe redirect".to_string(),
+                text: "This response must not become evidence.".to_string(),
+            },
+        };
+        let executor = BrowserBrowseAgentToolExecutor { client: &client };
+
+        let invocation = execute_agent_tool_with_executor(
+            &store,
+            ToolExecutionRequest {
+                tool_id: BROWSER_BROWSE_TOOL_ID.to_string(),
+                input: json!({
+                    "url": "https://example.com/start",
+                    "summary": "Verify the final URL."
+                }),
+                access_mode: AccessMode::FullAccess,
+                run_id: None,
+            },
+            &executor,
+        )
+        .expect("unsafe result is audited");
+
+        assert_eq!(client.calls.get(), 1);
+        assert_eq!(invocation.status, ToolExecutionStatus::Failed);
+        assert!(invocation
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("network sandbox")));
+        assert!(invocation.evidence.is_empty());
+    }
+
+    #[test]
+    fn generic_network_search_tool_records_verified_source_links_and_run_step() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let run = AgentRunStart::new(
+            "conversation-1".to_string(),
+            "Search public evidence.".to_string(),
+            0,
+        )
+        .expect("run is valid");
+        store.append_agent_run_start(&run).expect("run appends");
+        let client = RecordingNetworkSearchClient::new();
+        let executor = NetworkSearchAgentToolExecutor { client: &client };
+
+        let invocation = execute_agent_tool_with_executor(
+            &store,
+            ToolExecutionRequest {
+                tool_id: NETWORK_SEARCH_TOOL_ID.to_string(),
+                input: json!({
+                    "query": "DS Agent architecture",
+                    "scope": "public web",
+                    "summary": "Search public evidence."
+                }),
+                access_mode: AccessMode::FullAccess,
+                run_id: Some(run.id),
+            },
+            &executor,
+        )
+        .expect("network search executes");
+        let record = store
+            .list_agent_run_records()
+            .expect("run records load")
+            .into_iter()
+            .find(|record| record.id == run.id)
+            .expect("run record exists");
+
+        assert_eq!(invocation.status, ToolExecutionStatus::Succeeded);
+        assert_eq!(
+            client.recorded_calls(),
+            vec![(
+                "DS Agent architecture".to_string(),
+                "public web".to_string()
+            )]
+        );
+        assert_eq!(invocation.evidence[0].kind, "source_links");
+        assert!(record.steps.iter().any(|step| {
+            step.label == NETWORK_SEARCH_TOOL_ID && step.status == AgentRunStepStatus::Completed
+        }));
+    }
+
+    #[test]
+    fn generic_network_search_tool_rejects_private_source_url() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let client = StaticNetworkSearchClient {
+            calls: Cell::new(0),
+            result: NetworkSearchResult {
+                provider: "unsafe fake".to_string(),
+                query: "metadata".to_string(),
+                scope: "public web".to_string(),
+                search_url: "https://search.example/?q=metadata".to_string(),
+                items: vec![NetworkSearchResultItem {
+                    title: "Metadata".to_string(),
+                    url: "http://127.0.0.1/admin".to_string(),
+                    snippet: "Unsafe local source".to_string(),
+                }],
+            },
+        };
+        let executor = NetworkSearchAgentToolExecutor { client: &client };
+
+        let invocation = execute_agent_tool_with_executor(
+            &store,
+            ToolExecutionRequest {
+                tool_id: NETWORK_SEARCH_TOOL_ID.to_string(),
+                input: json!({
+                    "query": "metadata",
+                    "scope": "public web",
+                    "summary": "Reject local sources."
+                }),
+                access_mode: AccessMode::FullAccess,
+                run_id: None,
+            },
+            &executor,
+        )
+        .expect("unsafe result is audited");
+
+        assert_eq!(client.calls.get(), 1);
+        assert_eq!(invocation.status, ToolExecutionStatus::Failed);
+        assert!(invocation
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("network sandbox")));
+        assert!(invocation.evidence.is_empty());
+    }
+
+    #[test]
+    fn generic_computer_screenshot_tool_records_verified_image_and_run_step() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let run = AgentRunStart::new(
+            "conversation-1".to_string(),
+            "Inspect the visible desktop.".to_string(),
+            0,
+        )
+        .expect("run is valid");
+        store.append_agent_run_start(&run).expect("run appends");
+        let client =
+            RecordingComputerScreenshotClient::new(1920, 1080, "computer-screenshots/primary.png");
+        let executor = ComputerScreenshotAgentToolExecutor { client: &client };
+
+        let invocation = execute_agent_tool_with_executor(
+            &store,
+            ToolExecutionRequest {
+                tool_id: COMPUTER_SCREENSHOT_TOOL_ID.to_string(),
+                input: json!({"summary": "Inspect the visible desktop."}),
+                access_mode: AccessMode::LimitedAuto,
+                run_id: Some(run.id),
+            },
+            &executor,
+        )
+        .expect("screenshot executes");
+        let record = store
+            .list_agent_run_records()
+            .expect("run records load")
+            .into_iter()
+            .find(|record| record.id == run.id)
+            .expect("run record exists");
+
+        assert_eq!(client.calls.get(), 1);
+        assert_eq!(invocation.status, ToolExecutionStatus::Succeeded);
+        assert_eq!(invocation.evidence[0].kind, "screenshot_image");
+        assert_eq!(
+            invocation.evidence[0].reference,
+            "computer-screenshots/primary.png"
+        );
+        assert!(record.steps.iter().any(|step| {
+            step.label == COMPUTER_SCREENSHOT_TOOL_ID
+                && step.status == AgentRunStepStatus::Completed
+        }));
+    }
+
+    #[test]
+    fn generic_computer_screenshot_tool_rejects_empty_dimensions() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let client =
+            RecordingComputerScreenshotClient::new(0, 1080, "computer-screenshots/invalid.png");
+        let executor = ComputerScreenshotAgentToolExecutor { client: &client };
+
+        let invocation = execute_agent_tool_with_executor(
+            &store,
+            ToolExecutionRequest {
+                tool_id: COMPUTER_SCREENSHOT_TOOL_ID.to_string(),
+                input: json!({"summary": "Reject empty capture."}),
+                access_mode: AccessMode::LimitedAuto,
+                run_id: None,
+            },
+            &executor,
+        )
+        .expect("invalid screenshot is audited");
+
+        assert_eq!(client.calls.get(), 1);
+        assert_eq!(invocation.status, ToolExecutionStatus::Failed);
+        assert!(invocation
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("dimensions")));
+        assert!(invocation.evidence.is_empty());
+    }
+
+    #[test]
+    fn generic_computer_control_tool_waits_then_records_one_shot_execution_receipt() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let run = AgentRunStart::new(
+            "conversation-1".to_string(),
+            "Execute one approved desktop action.".to_string(),
+            0,
+        )
+        .expect("run is valid");
+        store.append_agent_run_start(&run).expect("run appends");
+        let client = RecordingComputerControlClient::new();
+        let executor = ComputerControlAgentToolExecutor { client: &client };
+        let request = ToolExecutionRequest {
+            tool_id: COMPUTER_CONTROL_TOOL_ID.to_string(),
+            input: json!({
+                "target": "Word",
+                "action": "click:10,20,left",
+                "summary": "Click the selected Word control."
+            }),
+            access_mode: AccessMode::FullAccess,
+            run_id: Some(run.id),
+        };
+
+        let waiting = execute_agent_tool_with_executor(&store, request.clone(), &executor)
+            .expect("control waits for approval");
+        let approval_request_id = waiting
+            .approval_request_id
+            .expect("approval request is linked");
+        assert_eq!(waiting.status, ToolExecutionStatus::WaitingForConfirmation);
+        assert!(client.recorded_calls().is_empty());
+        store
+            .resolve_capability_access_request(
+                approval_request_id,
+                true,
+                "Approved exact computer action.".to_string(),
+            )
+            .expect("approval resolves");
+
+        let invocation = execute_agent_tool_with_executor(&store, request, &executor)
+            .expect("approved control executes");
+        let record = store
+            .list_agent_run_records()
+            .expect("run records load")
+            .into_iter()
+            .find(|record| record.id == run.id)
+            .expect("run record exists");
+
+        assert_eq!(invocation.id, waiting.id);
+        assert_eq!(invocation.status, ToolExecutionStatus::Succeeded);
+        assert_eq!(invocation.approval_request_id, Some(approval_request_id));
+        assert_eq!(invocation.evidence[0].kind, "computer_control_receipt");
+        assert_eq!(client.recorded_calls().len(), 1);
+        assert!(record.steps.iter().any(|step| {
+            step.label == COMPUTER_CONTROL_TOOL_ID && step.status == AgentRunStepStatus::Completed
+        }));
+    }
+
+    #[test]
+    fn generic_computer_control_tool_blocks_unstructured_action_before_client() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let client = RecordingComputerControlClient::new();
+        let executor = ComputerControlAgentToolExecutor { client: &client };
+
+        let invocation = execute_agent_tool_with_executor(
+            &store,
+            ToolExecutionRequest {
+                tool_id: COMPUTER_CONTROL_TOOL_ID.to_string(),
+                input: json!({
+                    "target": "Word",
+                    "action": "open PowerShell and run a command",
+                    "summary": "Reject unstructured control."
+                }),
+                access_mode: AccessMode::FullAccess,
+                run_id: None,
+            },
+            &executor,
+        )
+        .expect("unsafe action is audited");
+
+        assert_eq!(invocation.status, ToolExecutionStatus::Blocked);
+        assert!(invocation
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("structured")));
+        assert!(client.recorded_calls().is_empty());
+    }
+
+    #[test]
+    fn computer_control_write_lease_blocks_screenshot_until_execution_finishes() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let control_client = RecordingComputerControlClient::new();
+        let screenshot_client = RecordingComputerScreenshotClient::new(
+            1600,
+            900,
+            "computer-screenshots/after-control.png",
+        );
+        let control_request = ToolExecutionRequest {
+            tool_id: COMPUTER_CONTROL_TOOL_ID.to_string(),
+            input: json!({
+                "target": "Word",
+                "action": "click:10,20,left",
+                "summary": "Hold the foreground desktop writer."
+            }),
+            access_mode: AccessMode::FullAccess,
+            run_id: None,
+        };
+        let waiting = execute_agent_tool_with_executor(
+            &store,
+            control_request.clone(),
+            &ComputerControlAgentToolExecutor {
+                client: &control_client,
+            },
+        )
+        .expect("control waits for approval");
+        let approval_request_id = waiting
+            .approval_request_id
+            .expect("control approval is linked");
+        store
+            .resolve_capability_access_request(
+                approval_request_id,
+                true,
+                "Approved exact control writer.".to_string(),
+            )
+            .expect("approval resolves");
+        let control = authorize_agent_tool_execution(&store, control_request)
+            .expect("approved control authorizes");
+        let control = match control {
+            AgentToolAuthorization::Ready(authorized) => authorized,
+            AgentToolAuthorization::Finished(_) => panic!("control should hold the desktop writer"),
+        };
+
+        let blocked_screenshot = execute_agent_tool_with_executor(
+            &store,
+            ToolExecutionRequest {
+                tool_id: COMPUTER_SCREENSHOT_TOOL_ID.to_string(),
+                input: json!({"summary": "Do not race the active input action."}),
+                access_mode: AccessMode::LimitedAuto,
+                run_id: None,
+            },
+            &ComputerScreenshotAgentToolExecutor {
+                client: &screenshot_client,
+            },
+        )
+        .expect("screenshot conflict is audited");
+
+        assert_eq!(blocked_screenshot.status, ToolExecutionStatus::Blocked);
+        assert!(blocked_screenshot
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("resource")));
+        assert_eq!(screenshot_client.calls.get(), 0);
+
+        let control = run_authorized_agent_tool_execution(
+            control,
+            &ComputerControlAgentToolExecutor {
+                client: &control_client,
+            },
+        );
+        record_completed_agent_tool_execution(&store, &control).expect("control completes");
+        assert_eq!(control.status, ToolExecutionStatus::Succeeded);
+
+        let screenshot = execute_agent_tool_with_executor(
+            &store,
+            ToolExecutionRequest {
+                tool_id: COMPUTER_SCREENSHOT_TOOL_ID.to_string(),
+                input: json!({"summary": "Capture state after the input action."}),
+                access_mode: AccessMode::LimitedAuto,
+                run_id: None,
+            },
+            &ComputerScreenshotAgentToolExecutor {
+                client: &screenshot_client,
+            },
+        )
+        .expect("screenshot executes after writer release");
+
+        assert_eq!(screenshot.status, ToolExecutionStatus::Succeeded);
+        assert_eq!(screenshot_client.calls.get(), 1);
+    }
+
+    #[test]
+    fn generic_skill_activation_records_hash_verified_context_evidence() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let instructions = r#"{"steps":[{"tool":"network.search","require_sources":true}]}"#;
+        let skill_id = install_test_declarative_skill(&store, instructions);
+        let mut action = normalize_agent_action_proposal(
+            AgentChatActionProposal {
+                action_type: "skill_activate".to_string(),
+                title: Some("Activate verified research workflow".to_string()),
+                reason: Some("Use the installed declarative workflow.".to_string()),
+                risk: Some("low".to_string()),
+                requires_confirmation: false,
+                target: Some(skill_id.to_string()),
+                target_location: None,
+                destination: None,
+                preferred_browser: None,
+                content: Some("Research DS Agent runtime evidence.".to_string()),
+                capability: None,
+                policy_decision: None,
+                execution_state: "proposed".to_string(),
+                dispatch_note: None,
+                permission_request_id: None,
+                capability_invocation_id: None,
+                workflow_run_id: None,
+                blocked_reason: None,
+            },
+            AccessMode::AskOnRisk,
+        );
+
+        let invocation = dispatch_agent_skill_activate_tool_with_executor(
+            &store,
+            AccessMode::AskOnRisk,
+            &mut action,
+            None,
+        )
+        .expect("skill activation dispatches");
+
+        assert_eq!(action.execution_state, "succeeded");
+        assert_eq!(invocation.status, ToolExecutionStatus::Succeeded);
+        assert_eq!(invocation.capability, CapabilityKind::SkillUse);
+        assert_eq!(invocation.evidence[0].kind, "skill_context");
+        assert_eq!(
+            invocation
+                .output
+                .as_ref()
+                .and_then(|output| output["instructions"].as_str()),
+            Some(instructions)
+        );
+        assert!(invocation.verification.summary.contains("SHA-256"));
+        assert!(store
+            .list_capability_invocations()
+            .expect("capability audit loads")
+            .iter()
+            .any(|record| record.capability == CapabilityKind::SkillUse));
+        let skill_execution = store
+            .list_skill_executions()
+            .expect("skill executions load")
+            .into_iter()
+            .find(|record| record.tool_invocation_id == Some(invocation.id))
+            .expect("skill activation execution is linked");
+        assert_eq!(
+            skill_execution.status,
+            crate::kernel::skill::SkillExecutionStatus::Activated
+        );
+        assert_eq!(
+            skill_execution.evidence_ref,
+            Some(invocation.evidence[0].reference.clone())
+        );
+    }
+
+    #[test]
+    fn agent_chat_executes_computer_screenshot_through_generic_runtime() {
+        let store = Mutex::new(EventStore::open_memory().expect("memory store opens"));
+        let model_envelope = serde_json::json!({
+            "protocol_version": "ds-agent-envelope-v1",
+            "reply_to_user": "我会先检查当前桌面。",
+            "agent_actions": [{
+                "action_type": "computer_screenshot",
+                "title": "Inspect desktop",
+                "reason": "Capture visible state before planning input",
+                "risk": "medium",
+                "requires_confirmation": false
+            }],
+            "missing_prerequisites": []
+        });
+        let transport = SequencedDeepSeekTransport::new(vec![
+            model_envelope.to_string(),
+            "已根据截图证据检查当前桌面。".to_string(),
+        ]);
+        let cache = DeepSeekMemoryChatCompletionCache::default();
+        let file_client = LocalFileContentClient::new(512 * 1024);
+        let file_write_client = RecordingFileWriteClient::new();
+        let search_client = RecordingNetworkSearchClient::new();
+        let browser_client = RecordingBrowserPageClient::new();
+        let computer_use_client = RecordingComputerScreenshotClient::new(
+            1600,
+            900,
+            "computer-screenshots/chat-primary.png",
+        );
+
+        let response = run_agent_chat_with_clients_and_api_keys_and_computer_use(
+            &store,
+            &transport,
+            &cache,
+            &["test-secret".to_string()],
+            AgentChatRequest {
+                prompt: "看看当前桌面再告诉我下一步。".to_string(),
+                model_route: ModelRoute::Flash,
+                thinking_level: ThinkingLevel::Fast,
+                access_mode: AccessMode::LimitedAuto,
+            },
+            AgentChatRuntimeContext::default(),
+            None,
+            &file_client,
+            &file_write_client,
+            &search_client,
+            &browser_client,
+            &computer_use_client,
+        )
+        .expect("computer screenshot chat executes");
+        let store = store.lock().expect("store lock");
+        let invocation = store
+            .list_tool_invocations()
+            .expect("tool invocations load")
+            .into_iter()
+            .find(|invocation| invocation.tool_id == COMPUTER_SCREENSHOT_TOOL_ID)
+            .expect("screenshot invocation exists");
+
+        assert_eq!(computer_use_client.calls.get(), 1);
+        assert_eq!(response.content, "已根据截图证据检查当前桌面。");
+        assert_eq!(response.proposed_actions[0].execution_state, "succeeded");
+        assert_eq!(invocation.status, ToolExecutionStatus::Succeeded);
+        assert!(invocation
+            .evidence
+            .iter()
+            .any(|evidence| evidence.kind == "screenshot_image"));
+        assert_eq!(transport.recorded_requests().len(), 2);
+    }
+
+    #[test]
+    fn generic_file_read_tool_records_verified_content_and_run_step() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_dir.path().join("evidence.md");
+        fs::write(&path, "verified evidence").expect("fixture writes");
+        let run = AgentRunStart::new(
+            "conversation-1".to_string(),
+            "Read verified evidence.".to_string(),
+            0,
+        )
+        .expect("run is valid");
+        store.append_agent_run_start(&run).expect("run appends");
+        let client = RecordingFileContentClient::new("verified evidence");
+        let executor = FileReadAgentToolExecutor { client: &client };
+
+        let invocation = execute_agent_tool_with_executor(
+            &store,
+            ToolExecutionRequest {
+                tool_id: FILE_READ_TOOL_ID.to_string(),
+                input: json!({
+                    "path": path.to_string_lossy(),
+                    "summary": "Read verified evidence."
+                }),
+                access_mode: AccessMode::FullAccess,
+                run_id: Some(run.id),
+            },
+            &executor,
+        )
+        .expect("file read executes");
+        let record = store
+            .list_agent_run_records()
+            .expect("run records load")
+            .into_iter()
+            .find(|record| record.id == run.id)
+            .expect("run record exists");
+
+        assert_eq!(invocation.status, ToolExecutionStatus::Succeeded);
+        assert_eq!(client.recorded_calls(), vec![path.to_string_lossy()]);
+        assert_eq!(invocation.evidence[0].kind, "file_content");
+        assert_eq!(
+            invocation
+                .output
+                .as_ref()
+                .and_then(|output| output["text"].as_str()),
+            Some("verified evidence")
+        );
+        assert!(record.steps.iter().any(|step| {
+            step.label == FILE_READ_TOOL_ID && step.status == AgentRunStepStatus::Completed
+        }));
+        assert!(store
+            .list_active_agent_run_resource_claims()
+            .expect("resource claims load")
+            .is_empty());
+    }
+
+    #[test]
+    fn generic_file_read_tool_blocks_protected_relative_path_before_client() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let client = RecordingFileContentClient::new("secret");
+        let executor = FileReadAgentToolExecutor { client: &client };
+
+        for path in [".env", ".git/config", "../outside.txt"] {
+            let invocation = execute_agent_tool_with_executor(
+                &store,
+                ToolExecutionRequest {
+                    tool_id: FILE_READ_TOOL_ID.to_string(),
+                    input: json!({"path": path, "summary": "Attempt protected read."}),
+                    access_mode: AccessMode::FullAccess,
+                    run_id: None,
+                },
+                &executor,
+            )
+            .expect("protected read is audited");
+            assert_eq!(invocation.status, ToolExecutionStatus::Blocked);
+            assert!(invocation
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("deny-first")));
+        }
+        assert!(client.recorded_calls().is_empty());
+    }
+
+    #[test]
+    fn generic_file_read_tool_blocks_while_local_mutation_writer_holds_resource() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let target_dir = temp_dir.path().join("created");
+        let read_path = temp_dir.path().join("evidence.txt");
+        fs::write(&read_path, "evidence").expect("fixture writes");
+        let writer = authorize_agent_tool_execution(
+            &store,
+            ToolExecutionRequest {
+                tool_id: FILESYSTEM_MUTATE_TOOL_ID.to_string(),
+                input: json!({
+                    "operation": "create_directory",
+                    "path": target_dir.to_string_lossy(),
+                    "summary": "Hold the local writer lease."
+                }),
+                access_mode: AccessMode::FullAccess,
+                run_id: None,
+            },
+        )
+        .expect("writer authorizes");
+        let writer = match writer {
+            AgentToolAuthorization::Ready(authorized) => authorized,
+            AgentToolAuthorization::Finished(_) => panic!("writer should hold the resource"),
+        };
+        let client = RecordingFileContentClient::new("evidence");
+        let reader = execute_agent_tool_with_executor(
+            &store,
+            ToolExecutionRequest {
+                tool_id: FILE_READ_TOOL_ID.to_string(),
+                input: json!({
+                    "path": read_path.to_string_lossy(),
+                    "summary": "Read while mutation is active."
+                }),
+                access_mode: AccessMode::FullAccess,
+                run_id: None,
+            },
+            &FileReadAgentToolExecutor { client: &client },
+        )
+        .expect("reader conflict is audited");
+
+        assert_eq!(reader.status, ToolExecutionStatus::Blocked);
+        assert!(client.recorded_calls().is_empty());
+
+        let mutation_client = LocalFileSystemMutationClient;
+        let writer = run_authorized_agent_tool_execution(
+            writer,
+            &FileSystemMutationAgentToolExecutor {
+                client: &mutation_client,
+            },
+        );
+        record_completed_agent_tool_execution(&store, &writer).expect("writer completes");
+        assert_eq!(writer.status, ToolExecutionStatus::Succeeded);
+    }
+
+    #[test]
+    fn one_shot_file_read_approval_cannot_be_consumed_by_different_input() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let approved_path = temp_dir.path().join("approved.txt");
+        let different_path = temp_dir.path().join("different.txt");
+        fs::write(&approved_path, "approved").expect("approved fixture writes");
+        fs::write(&different_path, "different").expect("different fixture writes");
+        let request = |path: &Path| ToolExecutionRequest {
+            tool_id: FILE_READ_TOOL_ID.to_string(),
+            input: json!({
+                "path": path.to_string_lossy(),
+                "summary": "Read the explicitly approved file."
+            }),
+            access_mode: AccessMode::AskEveryStep,
+            run_id: None,
+        };
+        let client = RecordingFileContentClient::new("approved");
+        let executor = FileReadAgentToolExecutor { client: &client };
+
+        let waiting = execute_agent_tool_with_executor(&store, request(&approved_path), &executor)
+            .expect("approved input waits");
+        let approval_request_id = waiting
+            .approval_request_id
+            .expect("approval request exists");
+        store
+            .resolve_capability_access_request(
+                approval_request_id,
+                true,
+                "Approved only for the audited file read.".to_string(),
+            )
+            .expect("approval resolves");
+
+        let mismatched =
+            execute_agent_tool_with_executor(&store, request(&different_path), &executor)
+                .expect("mismatched input is audited");
+        assert_eq!(
+            mismatched.status,
+            ToolExecutionStatus::WaitingForConfirmation
+        );
+        assert_ne!(mismatched.approval_request_id, Some(approval_request_id));
+        assert!(client.recorded_calls().is_empty());
+
+        let succeeded =
+            execute_agent_tool_with_executor(&store, request(&approved_path), &executor)
+                .expect("approved input resumes");
+        assert_eq!(succeeded.status, ToolExecutionStatus::Succeeded);
+        assert_eq!(succeeded.id, waiting.id);
+        assert_eq!(
+            client.recorded_calls(),
+            vec![approved_path.to_string_lossy()]
+        );
+    }
+
+    #[test]
+    fn concurrent_same_capability_runs_keep_exact_pending_approvals_isolated() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let first_run = AgentRunStart::new(
+            "conversation-a".to_string(),
+            "Write report A.".to_string(),
+            0,
+        )
+        .expect("first run is valid");
+        let second_run = AgentRunStart::new(
+            "conversation-b".to_string(),
+            "Write report B.".to_string(),
+            0,
+        )
+        .expect("second run is valid");
+        store
+            .append_agent_run_start(&first_run)
+            .expect("first run appends");
+        store
+            .append_agent_run_start(&second_run)
+            .expect("second run appends");
+        let request = |run_id, path: &str| ToolExecutionRequest {
+            tool_id: FILE_WRITE_TOOL_ID.to_string(),
+            input: json!({
+                "path": path,
+                "summary": "Write an independently approved report.",
+                "content": path
+            }),
+            access_mode: AccessMode::AskOnRisk,
+            run_id: Some(run_id),
+        };
+        let client = RecordingFileWriteClient::new();
+        let executor = FileWriteAgentToolExecutor { client: &client };
+
+        let first_waiting = execute_agent_tool_with_executor(
+            &store,
+            request(first_run.id, "reports/a.md"),
+            &executor,
+        )
+        .expect("first run waits");
+        let second_waiting = execute_agent_tool_with_executor(
+            &store,
+            request(second_run.id, "reports/b.md"),
+            &executor,
+        )
+        .expect("second run waits");
+
+        assert_eq!(
+            first_waiting.status,
+            ToolExecutionStatus::WaitingForConfirmation
+        );
+        assert_eq!(
+            second_waiting.status,
+            ToolExecutionStatus::WaitingForConfirmation
+        );
+        assert_ne!(
+            first_waiting.approval_request_id,
+            second_waiting.approval_request_id
+        );
+        assert!(client.recorded_calls().is_empty());
+    }
+
+    #[test]
+    fn approved_tool_resume_recovers_and_finishes_owning_run_from_audit() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let executor = FakeAgentToolExecutor::new();
+        let run = AgentRunStart::new(
+            "conversation-1".to_string(),
+            "Download the update after approval.".to_string(),
+            0,
+        )
+        .expect("run is valid");
+        store.append_agent_run_start(&run).expect("run appends");
+        let mut action = normalize_agent_action_proposal(
+            AgentChatActionProposal {
+                action_type: "app_update_download".to_string(),
+                title: Some("Download update".to_string()),
+                reason: None,
+                risk: Some("high".to_string()),
+                requires_confirmation: true,
+                target: None,
+                target_location: None,
+                destination: None,
+                preferred_browser: None,
+                content: None,
+                capability: None,
+                policy_decision: None,
+                execution_state: "proposed".to_string(),
+                dispatch_note: None,
+                permission_request_id: None,
+                capability_invocation_id: None,
+                workflow_run_id: None,
+                blocked_reason: None,
+            },
+            AccessMode::AskOnRisk,
+        );
+        let waiting = execute_agent_tool_with_executor(
+            &store,
+            agent_app_update_tool_request(&action, AccessMode::AskOnRisk, Some(run.id))
+                .expect("tool request builds"),
+            &executor,
+        )
+        .expect("tool waits for approval");
+        apply_tool_invocation_to_agent_action(&mut action, &waiting);
+        assert_eq!(
+            agent_tool_run_id_for_action(&store, &action).expect("run link loads"),
+            Some(run.id)
+        );
+        store
+            .resolve_capability_access_request(
+                waiting
+                    .approval_request_id
+                    .expect("approval request exists"),
+                true,
+                "Approved from the local permission surface.".to_string(),
+            )
+            .expect("approval resolves");
+
+        let resumed_request = agent_app_update_tool_request(
+            &action,
+            AccessMode::AskOnRisk,
+            agent_tool_run_id_for_action(&store, &action).expect("run link loads"),
+        )
+        .expect("resumed request builds");
+        let resumed = execute_agent_tool_with_executor(&store, resumed_request, &executor)
+            .expect("approved tool executes");
+        let record = finish_agent_run_after_resumed_tool(&store, &resumed)
+            .expect("run settles")
+            .expect("owning run exists");
+
+        assert_eq!(resumed.status, ToolExecutionStatus::Succeeded);
+        assert_eq!(record.status, AgentRunStatus::Queued);
+        assert!(record.finished_at.is_none());
+        assert_eq!(record.continuation_count, 1);
+        assert!(record.steps.iter().any(|step| {
+            step.label == APP_UPDATE_DOWNLOAD_TOOL_ID
+                && step.status == AgentRunStepStatus::Completed
+        }));
+    }
+
+    #[test]
+    fn rejected_tool_approval_blocks_owning_run() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let executor = FakeAgentToolExecutor::new();
+        let run = AgentRunStart::new(
+            "conversation-1".to_string(),
+            "Download the update after approval.".to_string(),
+            0,
+        )
+        .expect("run is valid");
+        store.append_agent_run_start(&run).expect("run appends");
+        let mut action = normalize_agent_action_proposal(
+            AgentChatActionProposal {
+                action_type: "app_update_download".to_string(),
+                title: Some("Download update".to_string()),
+                reason: None,
+                risk: Some("high".to_string()),
+                requires_confirmation: true,
+                target: None,
+                target_location: None,
+                destination: None,
+                preferred_browser: None,
+                content: None,
+                capability: None,
+                policy_decision: None,
+                execution_state: "proposed".to_string(),
+                dispatch_note: None,
+                permission_request_id: None,
+                capability_invocation_id: None,
+                workflow_run_id: None,
+                blocked_reason: None,
+            },
+            AccessMode::AskOnRisk,
+        );
+        let waiting = execute_agent_tool_with_executor(
+            &store,
+            agent_app_update_tool_request(&action, AccessMode::AskOnRisk, Some(run.id))
+                .expect("tool request builds"),
+            &executor,
+        )
+        .expect("tool waits for approval");
+        apply_tool_invocation_to_agent_action(&mut action, &waiting);
+        store
+            .resolve_capability_access_request(
+                waiting
+                    .approval_request_id
+                    .expect("approval request exists"),
+                false,
+                "Rejected from the local permission surface.".to_string(),
+            )
+            .expect("rejection resolves");
+
+        let record = block_agent_run_after_action_resolution(
+            &store,
+            &action,
+            "Local permission was rejected before tool dispatch.".to_string(),
+        )
+        .expect("run transition records")
+        .expect("owning run exists");
+
+        assert_eq!(record.status, AgentRunStatus::Blocked);
+        assert_eq!(executor.calls.get(), 0);
+        assert_eq!(
+            record.status_reason.as_deref(),
+            Some("Local permission was rejected before tool dispatch.")
+        );
+    }
+
+    #[test]
+    fn generic_tool_executor_blocks_cancelled_run_before_executor_call() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let executor = FakeAgentToolExecutor::new();
+        let run = AgentRunStart::new(
+            "conversation-1".to_string(),
+            "Check for an update.".to_string(),
+            0,
+        )
+        .expect("run is valid");
+        store.append_agent_run_start(&run).expect("run appends");
+        let cancel = AgentRunCancelRequest::new(run.id, "User stopped the run.".to_string())
+            .expect("cancel is valid");
+        store
+            .append_agent_run_cancel_request(&cancel)
+            .expect("cancel appends");
+
+        let invocation = execute_agent_tool_with_executor(
+            &store,
+            ToolExecutionRequest {
+                tool_id: APP_UPDATE_CHECK_TOOL_ID.to_string(),
+                input: json!({}),
+                access_mode: AccessMode::FullAccess,
+                run_id: Some(run.id),
+            },
+            &executor,
+        )
+        .expect("cancelled run is audited as blocked");
+
+        assert_eq!(invocation.status, ToolExecutionStatus::Blocked);
+        assert_eq!(executor.calls.get(), 0);
+        assert!(invocation
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("cancel")));
+    }
+
+    #[test]
+    fn generic_tool_executor_serializes_conflicting_update_writes() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let executor = FakeAgentToolExecutor::new();
+        let first_run = AgentRunStart::new(
+            "conversation-1".to_string(),
+            "Download an update.".to_string(),
+            0,
+        )
+        .expect("first run is valid");
+        let second_run = AgentRunStart::new(
+            "conversation-2".to_string(),
+            "Download another update.".to_string(),
+            0,
+        )
+        .expect("second run is valid");
+        store
+            .append_agent_run_start(&first_run)
+            .expect("first run appends");
+        store
+            .append_agent_run_start(&second_run)
+            .expect("second run appends");
+        let request = |run_id| ToolExecutionRequest {
+            tool_id: APP_UPDATE_DOWNLOAD_TOOL_ID.to_string(),
+            input: json!({}),
+            access_mode: AccessMode::FullAccess,
+            run_id: Some(run_id),
+        };
+
+        let first = match authorize_agent_tool_execution(&store, request(first_run.id))
+            .expect("first tool authorizes")
+        {
+            AgentToolAuthorization::Ready(authorized) => authorized,
+            AgentToolAuthorization::Finished(_) => panic!("first tool should hold the resource"),
+        };
+        let conflict = match authorize_agent_tool_execution(&store, request(second_run.id))
+            .expect("conflict is audited")
+        {
+            AgentToolAuthorization::Finished(invocation) => invocation,
+            AgentToolAuthorization::Ready(_) => panic!("conflicting write must not authorize"),
+        };
+        assert_eq!(conflict.status, ToolExecutionStatus::Blocked);
+        assert_eq!(executor.calls.get(), 0);
+
+        let completed = run_authorized_agent_tool_execution(first, &executor);
+        record_completed_agent_tool_execution(&store, &completed)
+            .expect("first completion releases resource");
+        assert_eq!(completed.status, ToolExecutionStatus::Succeeded);
+
+        assert!(matches!(
+            authorize_agent_tool_execution(&store, request(second_run.id))
+                .expect("second tool authorizes after release"),
+            AgentToolAuthorization::Ready(_)
+        ));
+    }
+
+    #[test]
+    fn agent_chat_normalizes_app_update_tools_through_local_policy() {
+        let check = normalize_agent_action_proposal(
+            AgentChatActionProposal {
+                action_type: "check_app_update".to_string(),
+                title: Some("Check update".to_string()),
+                reason: None,
+                risk: None,
+                requires_confirmation: false,
+                target: None,
+                destination: None,
+                target_location: None,
+                preferred_browser: None,
+                content: None,
+                capability: None,
+                policy_decision: None,
+                execution_state: "proposed".to_string(),
+                dispatch_note: None,
+                permission_request_id: None,
+                capability_invocation_id: None,
+                workflow_run_id: None,
+                blocked_reason: None,
+            },
+            AccessMode::AskOnRisk,
+        );
+        let install = normalize_agent_action_proposal(
+            AgentChatActionProposal {
+                action_type: "install_app_update".to_string(),
+                title: Some("Install update".to_string()),
+                reason: None,
+                risk: None,
+                requires_confirmation: false,
+                target: Some("C:/Temp/ds-agent-updates/update.exe".to_string()),
+                destination: None,
+                target_location: None,
+                preferred_browser: None,
+                content: None,
+                capability: None,
+                policy_decision: None,
+                execution_state: "proposed".to_string(),
+                dispatch_note: None,
+                permission_request_id: None,
+                capability_invocation_id: None,
+                workflow_run_id: None,
+                blocked_reason: None,
+            },
+            AccessMode::FullAccess,
+        );
+
+        assert_eq!(check.action_type, "app_update_check");
+        assert_eq!(check.capability, Some(CapabilityKind::AppUpdateCheck));
+        assert_eq!(check.policy_decision, Some(PolicyDecision::Allow));
+        assert_eq!(check.execution_state, "proposed");
+        assert_eq!(install.action_type, "app_update_install");
+        assert_eq!(install.capability, Some(CapabilityKind::AppUpdateInstall));
+        assert_eq!(install.policy_decision, Some(PolicyDecision::Ask));
+        assert_eq!(install.execution_state, "needs_confirmation");
+        assert!(install.requires_confirmation);
+    }
+
+    #[test]
+    fn agent_chat_app_update_download_resumes_only_after_local_approval() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let executor = FakeAgentToolExecutor::new();
+        let mut action = normalize_agent_action_proposal(
+            AgentChatActionProposal {
+                action_type: "app_update_download".to_string(),
+                title: Some("Download update".to_string()),
+                reason: None,
+                risk: Some("high".to_string()),
+                requires_confirmation: true,
+                target: None,
+                destination: None,
+                target_location: None,
+                preferred_browser: None,
+                content: None,
+                capability: None,
+                policy_decision: None,
+                execution_state: "proposed".to_string(),
+                dispatch_note: None,
+                permission_request_id: None,
+                capability_invocation_id: None,
+                workflow_run_id: None,
+                blocked_reason: None,
+            },
+            AccessMode::AskOnRisk,
+        );
+
+        dispatch_agent_app_update_action_with_executor(
+            &store,
+            AccessMode::AskOnRisk,
+            &mut action,
+            &executor,
+        )
+        .expect("download waits for approval");
+        assert_eq!(action.execution_state, "needs_confirmation");
+        assert_eq!(executor.calls.get(), 0);
+        let approval_request_id = action
+            .permission_request_id
+            .expect("permission request is linked to action");
+
+        store
+            .resolve_capability_access_request(
+                approval_request_id,
+                true,
+                "Approved from the local chat action card.".to_string(),
+            )
+            .expect("approval resolves");
+        dispatch_agent_app_update_action_with_executor(
+            &store,
+            AccessMode::AskOnRisk,
+            &mut action,
+            &executor,
+        )
+        .expect("approved download executes");
+
+        assert_eq!(action.execution_state, "succeeded");
+        assert_eq!(executor.calls.get(), 1);
+        assert!(action
+            .dispatch_note
+            .as_deref()
+            .is_some_and(|note| note.contains("DS Agent_0.1.3_x64-setup.exe")));
     }
 
     #[test]
@@ -10424,13 +17250,13 @@ mod tests {
     fn app_update_status_keeps_current_formal_release_quiet_from_release_list() {
         let releases = vec![
             GithubRelease {
-                tag_name: "v0.1.2".to_string(),
-                html_url: "https://github.com/Lee-take/dsagent/releases/tag/v0.1.2"
+                tag_name: "v0.2.0".to_string(),
+                html_url: "https://github.com/Lee-take/dsagent/releases/tag/v0.2.0"
                     .to_string(),
                 assets: vec![GithubReleaseAsset {
-                    name: "DS Agent_0.1.2_x64-setup.exe".to_string(),
+                    name: "DS Agent_0.2.0_x64-setup.exe".to_string(),
                     browser_download_url:
-                        "https://github.com/Lee-take/dsagent/releases/download/v0.1.2/DS.Agent_0.1.2_x64-setup.exe"
+                        "https://github.com/Lee-take/dsagent/releases/download/v0.2.0/DS.Agent_0.2.0_x64-setup.exe"
                             .to_string(),
                 }],
             },
@@ -10450,8 +17276,8 @@ mod tests {
         let status = update_status_from_releases(releases, app_update_current_version());
 
         assert!(!status.update_available);
-        assert_eq!(status.current_version, "v0.1.2");
-        assert_eq!(status.latest_version.as_deref(), Some("0.1.2"));
+        assert_eq!(status.current_version, "v0.2.0");
+        assert_eq!(status.latest_version.as_deref(), Some("0.2.0"));
         assert!(status.asset_name.is_none());
     }
 
@@ -10598,6 +17424,16 @@ mod tests {
         calls: Mutex<Vec<(String, Option<String>)>>,
     }
 
+    struct StoreLockCheckingBrowserUrlOpener<'a> {
+        store: &'a Mutex<EventStore>,
+        lock_available_at_open: Mutex<Vec<bool>>,
+    }
+
+    struct StoreLockCheckingEvidenceFolderClient<'a> {
+        store: &'a Mutex<EventStore>,
+        lock_available_at_read: Mutex<Vec<bool>>,
+    }
+
     struct RecordingComputerControlClient {
         calls: Mutex<Vec<(String, ComputerControlAction)>>,
     }
@@ -10621,11 +17457,28 @@ mod tests {
         store: &'a Mutex<EventStore>,
         run_id: Uuid,
         response_text: String,
+        cancel_on_call: usize,
+        call_count: Mutex<usize>,
+    }
+
+    struct GuidanceQueueingDeepSeekTransport<'a> {
+        store: &'a Mutex<EventStore>,
+        run_id: Uuid,
+        guidance: String,
+        responses: Mutex<Vec<String>>,
+        requests: Mutex<Vec<DeepSeekChatCompletionRequest>>,
+        call_count: Mutex<usize>,
+        queued_guidance_id: Mutex<Option<Uuid>>,
     }
 
     struct StoreLockCheckingFileContentClient<'a> {
         store: &'a Mutex<EventStore>,
         lock_available_at_read: Mutex<Vec<bool>>,
+    }
+
+    struct StoreLockCheckingOfficeClient<'a> {
+        store: &'a Mutex<EventStore>,
+        lock_available_at_write: Mutex<Vec<bool>>,
     }
 
     impl RecordingDeepSeekTransport {
@@ -10757,6 +17610,18 @@ mod tests {
         }
     }
 
+    impl ComputerScreenshotClient for RecordingComputerControlClient {
+        fn capture_screenshot(&self) -> Result<ComputerScreenshot, String> {
+            Ok(ComputerScreenshot {
+                display_label: "Primary display".to_string(),
+                evidence_ref: "computer-screenshots/control-test.png".to_string(),
+                width: 1600,
+                height: 900,
+                captured_at: Utc::now(),
+            })
+        }
+    }
+
     impl RecordingBrowserUrlOpener {
         fn new(outcome: BrowserUrlOpenOutcome) -> Self {
             Self {
@@ -10787,6 +17652,60 @@ mod tests {
         }
     }
 
+    impl StoreLockCheckingBrowserUrlOpener<'_> {
+        fn lock_checks(&self) -> Vec<bool> {
+            self.lock_available_at_open
+                .lock()
+                .map(|checks| checks.clone())
+                .unwrap_or_default()
+        }
+    }
+
+    impl BrowserUrlOpener for StoreLockCheckingBrowserUrlOpener<'_> {
+        fn open_url(
+            &self,
+            _url: &str,
+            _preferred_browser: Option<&str>,
+        ) -> Result<BrowserUrlOpenOutcome, String> {
+            let lock_available = self.store.try_lock().is_ok();
+            self.lock_available_at_open
+                .lock()
+                .expect("record browser store lock check")
+                .push(lock_available);
+            Ok(BrowserUrlOpenOutcome {
+                browser_label: "test browser".to_string(),
+                fallback_note: None,
+            })
+        }
+    }
+
+    impl StoreLockCheckingEvidenceFolderClient<'_> {
+        fn lock_checks(&self) -> Vec<bool> {
+            self.lock_available_at_read
+                .lock()
+                .map(|checks| checks.clone())
+                .unwrap_or_default()
+        }
+    }
+
+    impl EvidenceFolderClient for StoreLockCheckingEvidenceFolderClient<'_> {
+        fn read_text_files(&self, folder_path: &str) -> Result<Vec<EvidenceFolderFile>, String> {
+            let lock_available = self.store.try_lock().is_ok();
+            self.lock_available_at_read
+                .lock()
+                .expect("record workflow store lock check")
+                .push(lock_available);
+            let text = "Room revenue improved by 6 percent.".to_string();
+            Ok(vec![EvidenceFolderFile {
+                path: format!("{folder_path}/revenue.md"),
+                title: "revenue.md".to_string(),
+                bytes: text.len() as u64,
+                encoding: "utf-8".to_string(),
+                text,
+            }])
+        }
+    }
+
     impl RecordingFileWriteClient {
         fn new() -> Self {
             Self {
@@ -10812,6 +17731,74 @@ mod tests {
                 path: path.to_string(),
                 bytes: content.len() as u64,
                 encoding: "utf-8".to_string(),
+            })
+        }
+    }
+
+    impl StoreLockCheckingOfficeClient<'_> {
+        fn lock_checks(&self) -> Vec<bool> {
+            self.lock_available_at_write
+                .lock()
+                .map(|checks| checks.clone())
+                .unwrap_or_default()
+        }
+    }
+
+    impl OfficeArtifactClient for StoreLockCheckingOfficeClient<'_> {
+        fn write_office_artifact(
+            &self,
+            spec: &OfficeCreateSpec,
+        ) -> Result<OfficeCreateResult, String> {
+            let lock_available = self.store.try_lock().is_ok();
+            self.lock_available_at_write
+                .lock()
+                .expect("record Office store lock check")
+                .push(lock_available);
+            Ok(OfficeCreateResult {
+                path: spec.path.clone(),
+                bytes: 512,
+                app: spec.app,
+                artifact_kind: "test_office_artifact".to_string(),
+            })
+        }
+    }
+
+    impl OfficeUpdateClient for StoreLockCheckingOfficeClient<'_> {
+        fn update_office_artifact(
+            &self,
+            spec: &OfficeUpdateSpec,
+        ) -> Result<OfficeUpdateResult, String> {
+            let lock_available = self.store.try_lock().is_ok();
+            self.lock_available_at_write
+                .lock()
+                .expect("record Office store lock check")
+                .push(lock_available);
+            Ok(OfficeUpdateResult {
+                path: spec.path.clone(),
+                bytes: 768,
+                app: spec.app,
+                artifact_kind: "test_office_artifact".to_string(),
+                summary: "updated existing Office artifact".to_string(),
+            })
+        }
+    }
+
+    impl OfficeOpenClient for StoreLockCheckingOfficeClient<'_> {
+        fn open_office_artifact(
+            &self,
+            path: &str,
+            preferred_app: Option<OfficeApp>,
+        ) -> Result<OfficeOpenResult, String> {
+            let lock_available = self.store.try_lock().is_ok();
+            self.lock_available_at_write
+                .lock()
+                .expect("record Office store lock check")
+                .push(lock_available);
+            Ok(OfficeOpenResult {
+                path: path.to_string(),
+                app: preferred_app.unwrap_or(OfficeApp::Word),
+                opener_label: "test Office launcher".to_string(),
+                fallback_note: None,
             })
         }
     }
@@ -10974,10 +17961,21 @@ mod tests {
             run_id: Uuid,
             response_text: impl Into<String>,
         ) -> Self {
+            Self::new_on_call(store, run_id, response_text, 1)
+        }
+
+        fn new_on_call(
+            store: &'a Mutex<EventStore>,
+            run_id: Uuid,
+            response_text: impl Into<String>,
+            cancel_on_call: usize,
+        ) -> Self {
             Self {
                 store,
                 run_id,
                 response_text: response_text.into(),
+                cancel_on_call,
+                call_count: Mutex::new(0),
             }
         }
     }
@@ -10989,17 +17987,94 @@ mod tests {
             _api_key: &str,
             request: &DeepSeekChatCompletionRequest,
         ) -> Result<DeepSeekChatCompletionResponse, String> {
-            let cancel =
-                AgentRunCancelRequest::new(self.run_id, "用户取消了后台任务。".to_string())
-                    .expect("cancel request");
-            self.store
-                .lock()
-                .expect("store lock")
-                .append_agent_run_cancel_request(&cancel)
-                .expect("cancel request appends");
+            let call_count = {
+                let mut call_count = self.call_count.lock().expect("call count lock");
+                *call_count += 1;
+                *call_count
+            };
+            if call_count == self.cancel_on_call {
+                let cancel =
+                    AgentRunCancelRequest::new(self.run_id, "用户取消了后台任务。".to_string())
+                        .expect("cancel request");
+                self.store
+                    .lock()
+                    .expect("store lock")
+                    .append_agent_run_cancel_request(&cancel)
+                    .expect("cancel request appends");
+            }
             Ok(DeepSeekChatCompletionResponse::from_text(
                 request.model.clone(),
                 self.response_text.clone(),
+            ))
+        }
+    }
+
+    impl<'a> GuidanceQueueingDeepSeekTransport<'a> {
+        fn new(
+            store: &'a Mutex<EventStore>,
+            run_id: Uuid,
+            guidance: impl Into<String>,
+            responses: Vec<String>,
+        ) -> Self {
+            Self {
+                store,
+                run_id,
+                guidance: guidance.into(),
+                responses: Mutex::new(responses),
+                requests: Mutex::new(Vec::new()),
+                call_count: Mutex::new(0),
+                queued_guidance_id: Mutex::new(None),
+            }
+        }
+
+        fn recorded_requests(&self) -> Vec<DeepSeekChatCompletionRequest> {
+            self.requests
+                .lock()
+                .map(|requests| requests.clone())
+                .unwrap_or_default()
+        }
+
+        fn queued_guidance_id(&self) -> Option<Uuid> {
+            self.queued_guidance_id.lock().ok().and_then(|id| *id)
+        }
+    }
+
+    impl DeepSeekChatCompletionTransport for GuidanceQueueingDeepSeekTransport<'_> {
+        fn post_chat_completion(
+            &self,
+            _endpoint: &str,
+            _api_key: &str,
+            request: &DeepSeekChatCompletionRequest,
+        ) -> Result<DeepSeekChatCompletionResponse, String> {
+            self.requests
+                .lock()
+                .expect("record requests")
+                .push(request.clone());
+            let call_count = {
+                let mut call_count = self.call_count.lock().expect("call count lock");
+                *call_count += 1;
+                *call_count
+            };
+            if call_count == 1 {
+                let guidance = AgentRunQueuedGuidance::new(self.run_id, self.guidance.clone())
+                    .expect("queued guidance is valid");
+                self.store
+                    .lock()
+                    .expect("store lock")
+                    .append_agent_run_queued_guidance(&guidance)
+                    .expect("guidance appends");
+                *self.queued_guidance_id.lock().expect("guidance id lock") = Some(guidance.id);
+            }
+            let response_text = {
+                let mut responses = self.responses.lock().expect("response lock");
+                if responses.is_empty() {
+                    return Err("no fake DeepSeek response left".to_string());
+                }
+                responses.remove(0)
+            };
+            Ok(DeepSeekChatCompletionResponse::from_text(
+                request.model.clone(),
+                response_text,
             ))
         }
     }
@@ -11027,6 +18102,49 @@ mod tests {
             created_at: updated_at,
             updated_at,
         }
+    }
+
+    fn install_test_declarative_skill(store: &EventStore, instructions: &str) -> Uuid {
+        let entry_sha256 = sha256_hex(instructions.as_bytes());
+        let manifest = SkillManifest::from_json(
+            &serde_json::json!({
+                "schema_version": "ds-agent.skill.v1",
+                "name": "verified-research-workflow",
+                "version": "1.0.0",
+                "description": "Collect public evidence and produce a verified answer.",
+                "author": "DS Agent test",
+                "license": "Apache-2.0",
+                "source": {
+                    "kind": "local",
+                    "url": "file:///skills/verified-research-workflow",
+                    "integrity": {
+                        "algorithm": "sha256",
+                        "hash": entry_sha256.clone()
+                    }
+                },
+                "capabilities": ["network_search"],
+                "permissions": [{
+                    "kind": "network_search",
+                    "scope": "public_web",
+                    "reason": "Collect source-linked public evidence."
+                }],
+                "entry": {
+                    "kind": "declarative_workflow",
+                    "path": "workflow.json"
+                }
+            })
+            .to_string(),
+        )
+        .expect("test skill manifest validates");
+        let mut installation = SkillInstallationRecord::new(manifest, "test package".to_string())
+            .expect("test skill installation");
+        installation.entry_content = Some(instructions.to_string());
+        installation.entry_sha256 = Some(entry_sha256);
+        let skill_id = installation.id;
+        store
+            .append_skill_installation(&installation)
+            .expect("test skill installs");
+        skill_id
     }
 
     impl<'a> StoreLockCheckingFileContentClient<'a> {
@@ -11185,6 +18303,67 @@ mod tests {
     }
 
     #[test]
+    fn agent_run_lease_heartbeat_runs_during_long_worker_operation() {
+        let store = Mutex::new(EventStore::open_memory().expect("memory store opens"));
+        let start = AgentRunStart::queued(
+            "heartbeat-conversation".to_string(),
+            "Run long enough to require a lease heartbeat.".to_string(),
+            0,
+        )
+        .expect("run is valid");
+        let (claimed, resource) = {
+            let event_store = store.lock().expect("store lock");
+            event_store
+                .append_agent_run_start(&start)
+                .expect("run appends");
+            let claimed = event_store
+                .claim_agent_run(start.id, "worker-heartbeat".to_string(), 1)
+                .expect("run claim succeeds");
+            let resource = event_store
+                .claim_agent_run_resource(
+                    AgentRunResourceClaim::new(
+                        start.id,
+                        Uuid::new_v4(),
+                        "workspace://mutation".to_string(),
+                        AgentRunResourceAccess::Write,
+                        1,
+                    )
+                    .expect("resource claim is valid"),
+                )
+                .expect("resource claim succeeds");
+            (claimed, resource)
+        };
+
+        let (output, heartbeat) = run_with_agent_run_lease_heartbeat(
+            &store,
+            start.id,
+            "worker-heartbeat",
+            60,
+            StdDuration::from_millis(5),
+            || {
+                std::thread::sleep(StdDuration::from_millis(25));
+                "operation complete"
+            },
+        );
+        let event_store = store.lock().expect("store lock");
+        let renewed = event_store
+            .list_agent_run_records()
+            .expect("runs load")
+            .into_iter()
+            .find(|record| record.id == start.id)
+            .expect("run exists");
+        let active_resources = event_store
+            .list_active_agent_run_resource_claims()
+            .expect("resources load");
+
+        assert_eq!(output, "operation complete");
+        assert!(heartbeat.is_ok());
+        assert!(renewed.lease_expires_at > claimed.lease_expires_at);
+        assert_eq!(active_resources.len(), 1);
+        assert!(active_resources[0].lease_expires_at > resource.lease_expires_at);
+    }
+
+    #[test]
     fn queued_agent_run_worker_claims_executes_and_finishes_next_run() {
         let store = Mutex::new(EventStore::open_memory().expect("memory store opens"));
         let start = AgentRunStart::queued(
@@ -11198,6 +18377,17 @@ mod tests {
             .expect("store lock")
             .append_agent_run_start(&start)
             .expect("queued run appends");
+        store
+            .lock()
+            .expect("store lock")
+            .append_agent_run_execution_context(
+                &AgentRunExecutionContext::new(
+                    start.id,
+                    "Durable compressed conversation context for recovery.".to_string(),
+                )
+                .expect("execution context is valid"),
+            )
+            .expect("execution context appends");
         let transport = RecordingDeepSeekTransport::new(
             r#"{
                 "protocol_version": "ds-agent-envelope/v1",
@@ -11251,7 +18441,1293 @@ mod tests {
                 (1, AgentRunStepStatus::Completed, "DeepSeek"),
             ]
         );
-        assert_eq!(transport.recorded_requests().len(), 1);
+        let requests = transport.recorded_requests();
+        assert_eq!(requests.len(), 1);
+        let initial_prompt = requests[0]
+            .messages
+            .iter()
+            .find(|message| matches!(message.role, DeepSeekChatRole::User))
+            .expect("initial user prompt exists");
+        assert!(initial_prompt
+            .content
+            .contains("Durable compressed conversation context for recovery."));
+    }
+
+    #[test]
+    fn queued_agent_run_executes_followup_tools_under_the_same_run_id() {
+        let store = Mutex::new(EventStore::open_memory().expect("memory store opens"));
+        let start = AgentRunStart::queued(
+            "conversation-bounded-loop".to_string(),
+            "Research and write the verified result in the background.".to_string(),
+            0,
+        )
+        .expect("queued run start");
+        store
+            .lock()
+            .expect("store lock")
+            .append_agent_run_start(&start)
+            .expect("queued run appends");
+        let transport = SequencedDeepSeekTransport::new(vec![
+            serde_json::json!({
+                "protocol_version": "ds-agent-envelope-v1",
+                "reply_to_user": "Collecting public evidence.",
+                "agent_actions": [{
+                    "action_type": "network_search",
+                    "title": "Search runtime evidence",
+                    "reason": "Collect source-linked evidence before writing.",
+                    "risk": "low",
+                    "requires_confirmation": false,
+                    "target": "DS Agent bounded runtime"
+                }],
+                "missing_prerequisites": []
+            })
+            .to_string(),
+            serde_json::json!({
+                "protocol_version": "ds-agent-envelope-v1",
+                "reply_to_user": "Writing the verified result.",
+                "agent_actions": [{
+                    "action_type": "file_write",
+                    "title": "Write runtime evidence",
+                    "reason": "Persist the source-backed result.",
+                    "risk": "low",
+                    "requires_confirmation": false,
+                    "target": "bounded-loop-result.md",
+                    "content": "Verified bounded runtime evidence."
+                }],
+                "missing_prerequisites": []
+            })
+            .to_string(),
+            "The background run completed both verified tool rounds.".to_string(),
+        ]);
+        let cache = DeepSeekMemoryChatCompletionCache::default();
+        let file_client = LocalFileContentClient::new(512 * 1024);
+        let file_write_client = RecordingFileWriteClient::new();
+        let search_client = RecordingNetworkSearchClient::new();
+        let browser_client = RecordingBrowserPageClient::new();
+
+        let outcome = run_next_queued_agent_chat_with_clients_and_api_keys(
+            &store,
+            &transport,
+            &cache,
+            &["test-secret".to_string()],
+            "worker-bounded-loop".to_string(),
+            ModelRoute::Flash,
+            ThinkingLevel::Fast,
+            AccessMode::FullAccess,
+            AgentChatRuntimeContext::default(),
+            None,
+            &file_client,
+            &file_write_client,
+            &search_client,
+            &browser_client,
+        )
+        .expect("worker execution succeeds")
+        .expect("queued run exists");
+
+        assert_eq!(outcome.record.status, AgentRunStatus::Completed);
+        assert_eq!(outcome.response.proposed_actions.len(), 2);
+        assert!(outcome
+            .response
+            .proposed_actions
+            .iter()
+            .all(|action| action.execution_state == "succeeded"));
+        assert_eq!(transport.recorded_requests().len(), 3);
+        let invocations = store
+            .lock()
+            .expect("store lock")
+            .list_tool_invocations()
+            .expect("tool invocations load");
+        assert_eq!(invocations.len(), 2);
+        assert!(invocations
+            .iter()
+            .all(|invocation| invocation.run_id == Some(start.id)));
+        assert!(outcome
+            .record
+            .steps
+            .iter()
+            .any(|step| step.label == NETWORK_SEARCH_TOOL_ID));
+        assert!(outcome
+            .record
+            .steps
+            .iter()
+            .any(|step| step.label == FILE_WRITE_TOOL_ID));
+    }
+
+    #[test]
+    fn queued_agent_run_activates_skill_then_executes_its_planned_tool() {
+        let store = Mutex::new(EventStore::open_memory().expect("memory store opens"));
+        let instructions = r#"{"steps":[{"tool":"network.search","require_sources":true}],"done_when":"source links are verified"}"#;
+        let skill_id = {
+            let store = store.lock().expect("store lock");
+            install_test_declarative_skill(&store, instructions)
+        };
+        let start = AgentRunStart::queued(
+            "conversation-skill-loop".to_string(),
+            "Use the installed research workflow for this task.".to_string(),
+            0,
+        )
+        .expect("queued run start");
+        store
+            .lock()
+            .expect("store lock")
+            .append_agent_run_start(&start)
+            .expect("queued run appends");
+        let transport = SequencedDeepSeekTransport::new(vec![
+            serde_json::json!({
+                "protocol_version": "ds-agent-envelope-v1",
+                "reply_to_user": "Activating the installed research workflow.",
+                "agent_actions": [{
+                    "action_type": "skill_activate",
+                    "title": "Activate verified research workflow",
+                    "reason": "The installed workflow matches the user task.",
+                    "risk": "low",
+                    "requires_confirmation": false,
+                    "target": skill_id.to_string(),
+                    "content": "Collect source-linked DS Agent runtime evidence."
+                }],
+                "missing_prerequisites": []
+            })
+            .to_string(),
+            serde_json::json!({
+                "protocol_version": "ds-agent-envelope-v1",
+                "reply_to_user": "The verified workflow requires public source evidence.",
+                "agent_actions": [{
+                    "action_type": "network_search",
+                    "title": "Search from activated workflow",
+                    "reason": "Follow the hash-verified declarative workflow.",
+                    "risk": "low",
+                    "requires_confirmation": false,
+                    "target": "DS Agent bounded runtime audit"
+                }],
+                "missing_prerequisites": []
+            })
+            .to_string(),
+            "The activated workflow completed with verified source evidence.".to_string(),
+        ]);
+        let cache = DeepSeekMemoryChatCompletionCache::default();
+        let file_client = LocalFileContentClient::new(512 * 1024);
+        let file_write_client = RecordingFileWriteClient::new();
+        let search_client = RecordingNetworkSearchClient::new();
+        let browser_client = RecordingBrowserPageClient::new();
+
+        let outcome = run_next_queued_agent_chat_with_clients_and_api_keys(
+            &store,
+            &transport,
+            &cache,
+            &["test-secret".to_string()],
+            "worker-skill-loop".to_string(),
+            ModelRoute::Flash,
+            ThinkingLevel::Fast,
+            AccessMode::LimitedAuto,
+            AgentChatRuntimeContext::default(),
+            None,
+            &file_client,
+            &file_write_client,
+            &search_client,
+            &browser_client,
+        )
+        .expect("skill-backed worker execution succeeds")
+        .expect("queued run exists");
+
+        assert_eq!(outcome.record.status, AgentRunStatus::Completed);
+        assert_eq!(outcome.response.proposed_actions.len(), 2);
+        assert_eq!(search_client.recorded_calls().len(), 1);
+        let requests = transport.recorded_requests();
+        assert_eq!(requests.len(), 3);
+        let initial_prompt = requests[0]
+            .messages
+            .iter()
+            .find(|message| matches!(message.role, DeepSeekChatRole::User))
+            .expect("initial user prompt exists");
+        assert!(initial_prompt
+            .content
+            .contains("Installed declarative Skill catalog"));
+        assert!(initial_prompt.content.contains(&skill_id.to_string()));
+        let invocations = store
+            .lock()
+            .expect("store lock")
+            .list_tool_invocations()
+            .expect("tool invocations load");
+        assert_eq!(invocations.len(), 2);
+        assert!(invocations
+            .iter()
+            .any(|invocation| invocation.tool_id == SKILL_ACTIVATE_TOOL_ID));
+        assert!(invocations
+            .iter()
+            .any(|invocation| invocation.tool_id == NETWORK_SEARCH_TOOL_ID));
+        assert!(invocations
+            .iter()
+            .all(|invocation| invocation.run_id == Some(start.id)));
+        let skill_invocation = invocations
+            .iter()
+            .find(|invocation| invocation.tool_id == SKILL_ACTIVATE_TOOL_ID)
+            .expect("skill invocation exists");
+        assert_eq!(
+            skill_invocation
+                .output
+                .as_ref()
+                .and_then(|output| output["instructions"].as_str()),
+            Some(instructions)
+        );
+    }
+
+    #[test]
+    fn queued_agent_run_blocks_when_selected_skill_is_disabled() {
+        let store = Mutex::new(EventStore::open_memory().expect("memory store opens"));
+        let skill_id = {
+            let store = store.lock().expect("store lock");
+            let skill_id =
+                install_test_declarative_skill(&store, r#"{"steps":[{"tool":"network.search"}]}"#);
+            let disabled = SkillEnablementChange::new(
+                skill_id,
+                SkillEnablementStatus::Disabled,
+                "Disabled before agent execution.".to_string(),
+            )
+            .expect("disable change is valid");
+            store
+                .append_skill_enablement_change(&disabled)
+                .expect("disable change appends");
+            skill_id
+        };
+        let start = AgentRunStart::queued(
+            "conversation-disabled-skill".to_string(),
+            "Use the disabled workflow.".to_string(),
+            0,
+        )
+        .expect("queued run start");
+        store
+            .lock()
+            .expect("store lock")
+            .append_agent_run_start(&start)
+            .expect("queued run appends");
+        let transport = RecordingDeepSeekTransport::new(
+            serde_json::json!({
+                "protocol_version": "ds-agent-envelope-v1",
+                "reply_to_user": "Trying the requested installed workflow.",
+                "agent_actions": [{
+                    "action_type": "skill_activate",
+                    "title": "Activate disabled workflow",
+                    "reason": "The user selected this workflow.",
+                    "risk": "low",
+                    "requires_confirmation": false,
+                    "target": skill_id.to_string(),
+                    "content": "Run the selected workflow."
+                }],
+                "missing_prerequisites": []
+            })
+            .to_string(),
+        );
+        let cache = DeepSeekMemoryChatCompletionCache::default();
+        let file_client = LocalFileContentClient::new(512 * 1024);
+        let file_write_client = RecordingFileWriteClient::new();
+        let search_client = RecordingNetworkSearchClient::new();
+        let browser_client = RecordingBrowserPageClient::new();
+
+        let outcome = run_next_queued_agent_chat_with_clients_and_api_keys(
+            &store,
+            &transport,
+            &cache,
+            &["test-secret".to_string()],
+            "worker-disabled-skill".to_string(),
+            ModelRoute::Flash,
+            ThinkingLevel::Fast,
+            AccessMode::LimitedAuto,
+            AgentChatRuntimeContext::default(),
+            None,
+            &file_client,
+            &file_write_client,
+            &search_client,
+            &browser_client,
+        )
+        .expect("disabled skill result is audited")
+        .expect("queued run exists");
+
+        assert_eq!(outcome.record.status, AgentRunStatus::Blocked);
+        assert_eq!(
+            outcome.response.proposed_actions[0].execution_state,
+            "failed"
+        );
+        assert!(outcome.response.proposed_actions[0]
+            .blocked_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("disabled"));
+        let invocation = store
+            .lock()
+            .expect("store lock")
+            .list_tool_invocations()
+            .expect("tool invocations load")
+            .into_iter()
+            .find(|invocation| invocation.tool_id == SKILL_ACTIVATE_TOOL_ID)
+            .expect("failed skill invocation exists");
+        assert_eq!(invocation.status, ToolExecutionStatus::Failed);
+        assert!(invocation
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("disabled"));
+    }
+
+    #[test]
+    fn queued_agent_run_applies_new_guidance_at_the_next_tool_boundary() {
+        let store = Mutex::new(EventStore::open_memory().expect("memory store opens"));
+        let start = AgentRunStart::queued(
+            "conversation-live-guidance".to_string(),
+            "Research the runtime in the background.".to_string(),
+            0,
+        )
+        .expect("queued run start");
+        store
+            .lock()
+            .expect("store lock")
+            .append_agent_run_start(&start)
+            .expect("queued run appends");
+        let guidance = "Focus the final answer on cancellation and audit evidence.";
+        let transport = GuidanceQueueingDeepSeekTransport::new(
+            &store,
+            start.id,
+            guidance,
+            vec![
+                serde_json::json!({
+                    "protocol_version": "ds-agent-envelope-v1",
+                    "reply_to_user": "Collecting public evidence.",
+                    "agent_actions": [{
+                        "action_type": "network_search",
+                        "title": "Search runtime evidence",
+                        "reason": "Collect source-linked evidence before the final answer.",
+                        "risk": "low",
+                        "requires_confirmation": false,
+                        "target": "DS Agent cancellation audit runtime"
+                    }],
+                    "missing_prerequisites": []
+                })
+                .to_string(),
+                "The final answer incorporates the queued guidance.".to_string(),
+            ],
+        );
+        let cache = DeepSeekMemoryChatCompletionCache::default();
+        let file_client = LocalFileContentClient::new(512 * 1024);
+        let file_write_client = RecordingFileWriteClient::new();
+        let search_client = RecordingNetworkSearchClient::new();
+        let browser_client = RecordingBrowserPageClient::new();
+
+        let outcome = run_next_queued_agent_chat_with_clients_and_api_keys(
+            &store,
+            &transport,
+            &cache,
+            &["test-secret".to_string()],
+            "worker-live-guidance".to_string(),
+            ModelRoute::Flash,
+            ThinkingLevel::Fast,
+            AccessMode::LimitedAuto,
+            AgentChatRuntimeContext::default(),
+            None,
+            &file_client,
+            &file_write_client,
+            &search_client,
+            &browser_client,
+        )
+        .expect("worker execution succeeds")
+        .expect("queued run exists");
+
+        let requests = transport.recorded_requests();
+        assert_eq!(requests.len(), 2);
+        let followup_prompt = requests[1]
+            .messages
+            .iter()
+            .find(|message| matches!(message.role, DeepSeekChatRole::User))
+            .expect("follow-up user prompt exists");
+        assert!(followup_prompt.content.contains(guidance));
+        let guidance_id = transport
+            .queued_guidance_id()
+            .expect("guidance id was recorded");
+        let persisted = outcome
+            .record
+            .queued_guidance
+            .iter()
+            .find(|item| item.id == guidance_id)
+            .expect("guidance remains in run history");
+        assert!(persisted.applied_at.is_some());
+        assert!(outcome.record.steps.iter().any(|step| {
+            step.label == "agent.guidance" && step.status == AgentRunStepStatus::Completed
+        }));
+    }
+
+    #[test]
+    fn queued_agent_run_persists_bounded_loop_stop_step() {
+        let store = Mutex::new(EventStore::open_memory().expect("memory store opens"));
+        let start = AgentRunStart::queued(
+            "conversation-loop-stop".to_string(),
+            "Keep proposing searches.".to_string(),
+            0,
+        )
+        .expect("queued run start");
+        store
+            .lock()
+            .expect("store lock")
+            .append_agent_run_start(&start)
+            .expect("queued run appends");
+        let responses = (0..5)
+            .map(|index| {
+                serde_json::json!({
+                    "protocol_version": "ds-agent-envelope-v1",
+                    "reply_to_user": format!("Continue search round {}.", index + 1),
+                    "agent_actions": [{
+                        "action_type": "network_search",
+                        "title": format!("Bounded search {}", index + 1),
+                        "reason": "Exercise the persisted loop stop condition.",
+                        "risk": "low",
+                        "requires_confirmation": false,
+                        "target": format!("bounded background search {}", index + 1)
+                    }],
+                    "missing_prerequisites": []
+                })
+                .to_string()
+            })
+            .collect::<Vec<_>>();
+        let transport = SequencedDeepSeekTransport::new(responses);
+        let cache = DeepSeekMemoryChatCompletionCache::default();
+        let file_client = LocalFileContentClient::new(512 * 1024);
+        let file_write_client = RecordingFileWriteClient::new();
+        let search_client = RecordingNetworkSearchClient::new();
+        let browser_client = RecordingBrowserPageClient::new();
+
+        let outcome = run_next_queued_agent_chat_with_clients_and_api_keys(
+            &store,
+            &transport,
+            &cache,
+            &["test-secret".to_string()],
+            "worker-loop-stop".to_string(),
+            ModelRoute::Flash,
+            ThinkingLevel::Fast,
+            AccessMode::LimitedAuto,
+            AgentChatRuntimeContext::default(),
+            None,
+            &file_client,
+            &file_write_client,
+            &search_client,
+            &browser_client,
+        )
+        .expect("worker execution stops cleanly")
+        .expect("queued run exists");
+
+        assert_eq!(outcome.record.status, AgentRunStatus::Blocked);
+        assert_eq!(search_client.recorded_calls().len(), 4);
+        assert_eq!(outcome.response.proposed_actions.len(), 5);
+        assert_eq!(
+            outcome.response.proposed_actions[4].execution_state,
+            "blocked"
+        );
+        let stop_step = outcome
+            .record
+            .steps
+            .iter()
+            .find(|step| step.label == "agent.loop")
+            .expect("bounded loop stop step is persisted");
+        assert_eq!(stop_step.status, AgentRunStepStatus::Failed);
+        assert!(stop_step.detail.contains("4 tool rounds"));
+    }
+
+    #[test]
+    fn queued_agent_run_worker_persists_waiting_approval_without_finishing() {
+        let store = Mutex::new(EventStore::open_memory().expect("memory store opens"));
+        let start = AgentRunStart::queued(
+            "conversation-1".to_string(),
+            "Download the available update after approval.".to_string(),
+            0,
+        )
+        .expect("queued run start");
+        store
+            .lock()
+            .expect("store lock")
+            .append_agent_run_start(&start)
+            .expect("queued run appends");
+        let transport = RecordingDeepSeekTransport::new(
+            r#"{
+                "protocol_version": "ds-agent-envelope/v1",
+                "reply_to_user": "需要本地确认后下载更新。",
+                "agent_actions": [{
+                    "action_type": "app_update_download",
+                    "title": "Download update",
+                    "reason": "A verified update is available",
+                    "risk": "high",
+                    "requires_confirmation": true
+                }],
+                "missing_prerequisites": []
+            }"#,
+        );
+        let cache = DeepSeekMemoryChatCompletionCache::default();
+        let file_client = LocalFileContentClient::new(512 * 1024);
+        let file_write_client = RecordingFileWriteClient::new();
+        let search_client = RecordingNetworkSearchClient::new();
+        let browser_client = RecordingBrowserPageClient::new();
+
+        let outcome = run_next_queued_agent_chat_with_clients_and_api_keys(
+            &store,
+            &transport,
+            &cache,
+            &["test-secret".to_string()],
+            "worker-a".to_string(),
+            ModelRoute::Flash,
+            ThinkingLevel::Fast,
+            AccessMode::AskOnRisk,
+            AgentChatRuntimeContext::default(),
+            None,
+            &file_client,
+            &file_write_client,
+            &search_client,
+            &browser_client,
+        )
+        .expect("worker execution succeeds")
+        .expect("queued run exists");
+
+        assert_eq!(outcome.record.id, start.id);
+        assert_eq!(
+            outcome.record.status,
+            AgentRunStatus::WaitingForConfirmation
+        );
+        assert!(outcome.record.finished_at.is_none());
+        assert!(outcome.record.waiting_tool_invocation_id.is_some());
+        assert_eq!(
+            outcome.response.proposed_actions[0].execution_state,
+            "needs_confirmation"
+        );
+    }
+
+    #[test]
+    fn queued_network_search_run_resumes_after_approval_and_finishes_with_sources() {
+        let store = Mutex::new(EventStore::open_memory().expect("memory store opens"));
+        let start = AgentRunStart::queued(
+            "conversation-1".to_string(),
+            "Search public evidence after approval.".to_string(),
+            0,
+        )
+        .expect("queued run start");
+        store
+            .lock()
+            .expect("store lock")
+            .append_agent_run_start(&start)
+            .expect("queued run appends");
+        let transport = RecordingDeepSeekTransport::new(
+            r#"{
+                "protocol_version": "ds-agent-envelope/v1",
+                "reply_to_user": "需要本地确认后检索公开来源。",
+                "agent_actions": [{
+                    "action_type": "network_search",
+                    "title": "Search public evidence",
+                    "reason": "Collect source links",
+                    "risk": "low",
+                    "requires_confirmation": true,
+                    "target": "DS Agent architecture"
+                }],
+                "missing_prerequisites": []
+            }"#,
+        );
+        let cache = DeepSeekMemoryChatCompletionCache::default();
+        let file_client = LocalFileContentClient::new(512 * 1024);
+        let file_write_client = RecordingFileWriteClient::new();
+        let search_client = RecordingNetworkSearchClient::new();
+        let browser_client = RecordingBrowserPageClient::new();
+
+        let outcome = run_next_queued_agent_chat_with_clients_and_api_keys(
+            &store,
+            &transport,
+            &cache,
+            &["test-secret".to_string()],
+            "worker-a".to_string(),
+            ModelRoute::Flash,
+            ThinkingLevel::Fast,
+            AccessMode::AskEveryStep,
+            AgentChatRuntimeContext::default(),
+            None,
+            &file_client,
+            &file_write_client,
+            &search_client,
+            &browser_client,
+        )
+        .expect("worker execution succeeds")
+        .expect("queued run exists");
+        assert_eq!(
+            outcome.record.status,
+            AgentRunStatus::WaitingForConfirmation
+        );
+        assert!(outcome.record.waiting_tool_invocation_id.is_some());
+        let mut action = outcome.response.proposed_actions[0].clone();
+        let approval_request_id = action
+            .permission_request_id
+            .expect("network search permission request is linked");
+        let waiting_invocation_id = action
+            .capability_invocation_id
+            .expect("waiting tool invocation is linked");
+
+        action = {
+            let store = store.lock().expect("store lock");
+            store
+                .resolve_capability_access_request(
+                    approval_request_id,
+                    true,
+                    "Approved from the local permission surface.".to_string(),
+                )
+                .expect("approval resolves");
+            resume_agent_chat_action_with_clients(
+                &store,
+                AccessMode::AskEveryStep,
+                action,
+                &file_client,
+                &file_write_client,
+                &search_client,
+                &browser_client,
+                None,
+            )
+            .expect("approved action resumes")
+        };
+        let store = store.lock().expect("store lock");
+        let record = store
+            .list_agent_run_records()
+            .expect("run records load")
+            .into_iter()
+            .find(|record| record.id == start.id)
+            .expect("run record exists");
+        let invocation = store
+            .list_tool_invocations()
+            .expect("tool invocations load")
+            .into_iter()
+            .find(|invocation| invocation.id == waiting_invocation_id)
+            .expect("resumed invocation exists");
+
+        assert_eq!(action.execution_state, "succeeded");
+        assert_eq!(record.status, AgentRunStatus::Queued);
+        assert_eq!(
+            search_client.recorded_calls(),
+            vec![(
+                "DS Agent architecture".to_string(),
+                "public web".to_string()
+            )]
+        );
+        assert_eq!(invocation.run_id, Some(start.id));
+        assert_eq!(invocation.tool_id, NETWORK_SEARCH_TOOL_ID);
+        assert_eq!(invocation.status, ToolExecutionStatus::Succeeded);
+        assert!(invocation
+            .evidence
+            .iter()
+            .any(|evidence| evidence.kind == "source_links"));
+        assert!(record.steps.iter().any(|step| {
+            step.label == NETWORK_SEARCH_TOOL_ID && step.status == AgentRunStepStatus::Completed
+        }));
+        assert!(record.finished_at.is_none());
+        assert_eq!(record.continuation_count, 1);
+    }
+
+    #[test]
+    fn queued_computer_control_run_resumes_same_invocation_and_finishes_without_text_leak() {
+        let store = Mutex::new(EventStore::open_memory().expect("memory store opens"));
+        let start = AgentRunStart::queued(
+            "conversation-1".to_string(),
+            "Type approved text into the active document.".to_string(),
+            0,
+        )
+        .expect("queued run start");
+        store
+            .lock()
+            .expect("store lock")
+            .append_agent_run_start(&start)
+            .expect("queued run appends");
+        let transport = RecordingDeepSeekTransport::new(
+            r#"{
+                "protocol_version": "ds-agent-envelope/v1",
+                "reply_to_user": "需要本地确认并解锁后执行输入。",
+                "agent_actions": [{
+                    "action_type": "computer_control",
+                    "title": "Type approved text",
+                    "reason": "Update the active document",
+                    "risk": "critical",
+                    "requires_confirmation": true,
+                    "target": "Word",
+                    "content": "type:private-purpose-token"
+                }],
+                "missing_prerequisites": []
+            }"#,
+        );
+        let cache = DeepSeekMemoryChatCompletionCache::default();
+        let file_client = LocalFileContentClient::new(512 * 1024);
+        let file_write_client = RecordingFileWriteClient::new();
+        let search_client = RecordingNetworkSearchClient::new();
+        let browser_client = RecordingBrowserPageClient::new();
+        let computer_use_client = RecordingComputerControlClient::new();
+
+        let outcome = run_queued_agent_chat_with_clients_and_api_keys_and_computer_use(
+            &store,
+            &transport,
+            &cache,
+            &["test-secret".to_string()],
+            None,
+            None,
+            "worker-a".to_string(),
+            ModelRoute::Flash,
+            ThinkingLevel::Fast,
+            AccessMode::FullAccess,
+            AgentChatRuntimeContext::default(),
+            None,
+            &file_client,
+            &file_write_client,
+            &search_client,
+            &browser_client,
+            &computer_use_client,
+        )
+        .expect("worker execution succeeds")
+        .expect("queued run exists");
+        assert_eq!(
+            outcome.record.status,
+            AgentRunStatus::WaitingForConfirmation
+        );
+        let action = outcome.response.proposed_actions[0].clone();
+        let approval_request_id = action
+            .permission_request_id
+            .expect("computer control approval is linked");
+        let waiting_invocation_id = action
+            .capability_invocation_id
+            .expect("waiting invocation is linked");
+
+        let resumed = {
+            let store = store.lock().expect("store lock");
+            store
+                .resolve_capability_access_request(
+                    approval_request_id,
+                    true,
+                    "Approved exact computer action.".to_string(),
+                )
+                .expect("approval resolves");
+            resume_agent_chat_action_with_clients_and_computer_use(
+                &store,
+                AccessMode::FullAccess,
+                action,
+                &file_client,
+                &file_write_client,
+                &search_client,
+                &browser_client,
+                &computer_use_client,
+                None,
+            )
+            .expect("approved computer action resumes")
+        };
+        let store = store.lock().expect("store lock");
+        let record = store
+            .list_agent_run_records()
+            .expect("run records load")
+            .into_iter()
+            .find(|record| record.id == start.id)
+            .expect("run record exists");
+        let invocation = store
+            .list_tool_invocations()
+            .expect("tool invocations load")
+            .into_iter()
+            .find(|invocation| invocation.id == waiting_invocation_id)
+            .expect("resumed invocation exists");
+        let serialized = serde_json::to_string(&invocation).expect("invocation serializes");
+
+        assert_eq!(resumed.execution_state, "succeeded");
+        assert_eq!(record.status, AgentRunStatus::Queued);
+        assert_eq!(invocation.id, waiting_invocation_id);
+        assert_eq!(invocation.status, ToolExecutionStatus::Succeeded);
+        assert_eq!(invocation.approval_request_id, Some(approval_request_id));
+        assert!(invocation
+            .evidence
+            .iter()
+            .any(|evidence| evidence.kind == "computer_control_receipt"));
+        assert!(!serialized.contains("private-purpose-token"));
+        assert!(record.steps.iter().any(|step| {
+            step.label == COMPUTER_CONTROL_TOOL_ID && step.status == AgentRunStepStatus::Completed
+        }));
+        assert!(record.finished_at.is_none());
+        assert_eq!(record.continuation_count, 1);
+        assert_eq!(computer_use_client.recorded_calls().len(), 1);
+    }
+
+    #[test]
+    fn queued_file_write_run_resumes_after_approval_and_finishes_with_evidence() {
+        let store = Mutex::new(EventStore::open_memory().expect("memory store opens"));
+        let start = AgentRunStart::queued(
+            "conversation-1".to_string(),
+            "Write a verified report after approval.".to_string(),
+            0,
+        )
+        .expect("queued run start");
+        store
+            .lock()
+            .expect("store lock")
+            .append_agent_run_start(&start)
+            .expect("queued run appends");
+        let waiting_response = r#"{
+                "protocol_version": "ds-agent-envelope/v1",
+                "reply_to_user": "需要本地确认后写入报告。",
+                "agent_actions": [{
+                    "action_type": "file_write",
+                    "title": "Write report",
+                    "reason": "Persist the verified result",
+                    "risk": "high",
+                    "requires_confirmation": true,
+                    "target": "reports/verified.md",
+                    "content": "Verified report body"
+                }],
+                "missing_prerequisites": []
+            }"#;
+        let transport = SequencedDeepSeekTransport::new(vec![
+            waiting_response.to_string(),
+            waiting_response.to_string(),
+            r#"{
+                "protocol_version": "ds-agent-envelope/v1",
+                "reply_to_user": "已根据验证过的写入证据完成任务。",
+                "agent_actions": [],
+                "missing_prerequisites": []
+            }"#
+            .to_string(),
+        ]);
+        let cache = DeepSeekMemoryChatCompletionCache::default();
+        let file_client = LocalFileContentClient::new(512 * 1024);
+        let file_write_client = RecordingFileWriteClient::new();
+        let search_client = RecordingNetworkSearchClient::new();
+        let browser_client = RecordingBrowserPageClient::new();
+
+        let outcome = run_next_queued_agent_chat_with_clients_and_api_keys(
+            &store,
+            &transport,
+            &cache,
+            &["test-secret".to_string()],
+            "worker-a".to_string(),
+            ModelRoute::Flash,
+            ThinkingLevel::Fast,
+            AccessMode::AskOnRisk,
+            AgentChatRuntimeContext::default(),
+            None,
+            &file_client,
+            &file_write_client,
+            &search_client,
+            &browser_client,
+        )
+        .expect("worker execution succeeds")
+        .expect("queued run exists");
+        let mut action = outcome.response.proposed_actions[0].clone();
+        let approval_request_id = action
+            .permission_request_id
+            .expect("file write permission request is linked");
+
+        let resumed = {
+            let store = store.lock().expect("store lock");
+            store
+                .resolve_capability_access_request(
+                    approval_request_id,
+                    true,
+                    "Approved from the local permission surface.".to_string(),
+                )
+                .expect("approval resolves");
+            resume_agent_chat_action_with_clients(
+                &store,
+                AccessMode::AskOnRisk,
+                action.clone(),
+                &file_client,
+                &file_write_client,
+                &search_client,
+                &browser_client,
+                None,
+            )
+            .expect("approved action resumes")
+        };
+        action = resumed;
+        let queued_record = store
+            .lock()
+            .expect("store lock")
+            .list_agent_run_records()
+            .expect("run records load")
+            .into_iter()
+            .find(|record| record.id == start.id)
+            .expect("run record exists");
+
+        assert_eq!(action.execution_state, "succeeded");
+        assert_eq!(queued_record.status, AgentRunStatus::Queued);
+        assert!(queued_record.finished_at.is_none());
+        assert_eq!(queued_record.continuation_count, 1);
+
+        let continued = run_next_queued_agent_chat_with_clients_and_api_keys(
+            &store,
+            &transport,
+            &cache,
+            &["test-secret".to_string()],
+            "worker-b".to_string(),
+            ModelRoute::Flash,
+            ThinkingLevel::Fast,
+            AccessMode::AskOnRisk,
+            AgentChatRuntimeContext::default(),
+            None,
+            &file_client,
+            &file_write_client,
+            &search_client,
+            &browser_client,
+        )
+        .expect("continuation worker succeeds")
+        .expect("continued run is queued");
+
+        assert_eq!(continued.record.id, start.id);
+        assert_eq!(continued.record.status, AgentRunStatus::Completed);
+        assert_eq!(
+            continued.response.content,
+            "已根据验证过的写入证据完成任务。"
+        );
+        assert_eq!(
+            file_write_client.recorded_calls(),
+            vec![(
+                "reports/verified.md".to_string(),
+                "Verified report body".to_string()
+            )]
+        );
+        assert!(continued.record.steps.iter().any(|step| {
+            step.label == FILE_WRITE_TOOL_ID && step.status == AgentRunStepStatus::Completed
+        }));
+        assert!(continued.record.finished_at.is_some());
+        assert_eq!(transport.recorded_requests().len(), 3);
+    }
+
+    #[test]
+    fn queued_filesystem_mutation_run_resumes_after_approval_and_finishes_with_evidence() {
+        let store = Mutex::new(EventStore::open_memory().expect("memory store opens"));
+        let start = AgentRunStart::queued(
+            "conversation-1".to_string(),
+            "Create a verified local file after approval.".to_string(),
+            0,
+        )
+        .expect("queued run start");
+        store
+            .lock()
+            .expect("store lock")
+            .append_agent_run_start(&start)
+            .expect("queued run appends");
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_dir.path().join("approved.txt");
+        let transport = RecordingDeepSeekTransport::new(
+            serde_json::json!({
+                "protocol_version": "ds-agent-envelope/v1",
+                "reply_to_user": "需要本地确认后创建文件。",
+                "agent_actions": [{
+                    "action_type": "file_create",
+                    "title": "Create approved file",
+                    "reason": "Persist the verified result",
+                    "risk": "high",
+                    "requires_confirmation": true,
+                    "target": path.to_string_lossy(),
+                    "content": "approved body"
+                }],
+                "missing_prerequisites": []
+            })
+            .to_string(),
+        );
+        let cache = DeepSeekMemoryChatCompletionCache::default();
+        let file_client = LocalFileContentClient::new(512 * 1024);
+        let file_write_client = RecordingFileWriteClient::new();
+        let search_client = RecordingNetworkSearchClient::new();
+        let browser_client = RecordingBrowserPageClient::new();
+
+        let outcome = run_next_queued_agent_chat_with_clients_and_api_keys(
+            &store,
+            &transport,
+            &cache,
+            &["test-secret".to_string()],
+            "worker-a".to_string(),
+            ModelRoute::Flash,
+            ThinkingLevel::Fast,
+            AccessMode::AskOnRisk,
+            AgentChatRuntimeContext::default(),
+            None,
+            &file_client,
+            &file_write_client,
+            &search_client,
+            &browser_client,
+        )
+        .expect("worker execution succeeds")
+        .expect("queued run exists");
+        let mut action = outcome.response.proposed_actions[0].clone();
+        let approval_request_id = action
+            .permission_request_id
+            .expect("filesystem permission request is linked");
+
+        action = {
+            let store = store.lock().expect("store lock");
+            store
+                .resolve_capability_access_request(
+                    approval_request_id,
+                    true,
+                    "Approved from the local permission surface.".to_string(),
+                )
+                .expect("approval resolves");
+            resume_agent_chat_action_with_clients(
+                &store,
+                AccessMode::AskOnRisk,
+                action,
+                &file_client,
+                &file_write_client,
+                &search_client,
+                &browser_client,
+                None,
+            )
+            .expect("approved action resumes")
+        };
+        let store = store.lock().expect("store lock");
+        let record = store
+            .list_agent_run_records()
+            .expect("run records load")
+            .into_iter()
+            .find(|record| record.id == start.id)
+            .expect("run record exists");
+
+        assert_eq!(action.execution_state, "succeeded");
+        assert_eq!(record.status, AgentRunStatus::Queued);
+        assert_eq!(
+            fs::read_to_string(&path).expect("file reads"),
+            "approved body"
+        );
+        assert!(record.steps.iter().any(|step| {
+            step.label == FILESYSTEM_MUTATE_TOOL_ID && step.status == AgentRunStepStatus::Completed
+        }));
+        assert!(record.finished_at.is_none());
+        assert_eq!(record.continuation_count, 1);
+        assert!(store
+            .list_tool_invocations()
+            .expect("tool invocations load")
+            .iter()
+            .any(|invocation| {
+                invocation.run_id == Some(start.id)
+                    && invocation.tool_id == FILESYSTEM_MUTATE_TOOL_ID
+                    && invocation.status == ToolExecutionStatus::Succeeded
+                    && invocation
+                        .evidence
+                        .iter()
+                        .any(|evidence| evidence.kind == "filesystem_state")
+            }));
+    }
+
+    #[test]
+    fn queued_terminal_read_run_resumes_after_approval_and_finishes_with_evidence() {
+        let store = Mutex::new(EventStore::open_memory().expect("memory store opens"));
+        let start = AgentRunStart::queued(
+            "conversation-1".to_string(),
+            "List a local directory after approval.".to_string(),
+            0,
+        )
+        .expect("queued run start");
+        store
+            .lock()
+            .expect("store lock")
+            .append_agent_run_start(&start)
+            .expect("queued run appends");
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        fs::write(temp_dir.path().join("evidence.txt"), "evidence").expect("fixture writes");
+        let transport = RecordingDeepSeekTransport::new(
+            serde_json::json!({
+                "protocol_version": "ds-agent-envelope/v1",
+                "reply_to_user": "需要本地确认后读取目录。",
+                "agent_actions": [{
+                    "action_type": "terminal_read",
+                    "title": "List directory",
+                    "reason": "Inspect local evidence names",
+                    "risk": "medium",
+                    "requires_confirmation": true,
+                    "target": temp_dir.path().to_string_lossy()
+                }],
+                "missing_prerequisites": []
+            })
+            .to_string(),
+        );
+        let cache = DeepSeekMemoryChatCompletionCache::default();
+        let file_client = LocalFileContentClient::new(512 * 1024);
+        let file_write_client = RecordingFileWriteClient::new();
+        let search_client = RecordingNetworkSearchClient::new();
+        let browser_client = RecordingBrowserPageClient::new();
+
+        let outcome = run_next_queued_agent_chat_with_clients_and_api_keys(
+            &store,
+            &transport,
+            &cache,
+            &["test-secret".to_string()],
+            "worker-a".to_string(),
+            ModelRoute::Flash,
+            ThinkingLevel::Fast,
+            AccessMode::AskEveryStep,
+            AgentChatRuntimeContext::default(),
+            None,
+            &file_client,
+            &file_write_client,
+            &search_client,
+            &browser_client,
+        )
+        .expect("worker execution succeeds")
+        .expect("queued run exists");
+        let mut action = outcome.response.proposed_actions[0].clone();
+        let approval_request_id = action
+            .permission_request_id
+            .expect("terminal read permission request is linked");
+
+        action = {
+            let store = store.lock().expect("store lock");
+            store
+                .resolve_capability_access_request(
+                    approval_request_id,
+                    true,
+                    "Approved from the local permission surface.".to_string(),
+                )
+                .expect("approval resolves");
+            resume_agent_chat_action_with_clients(
+                &store,
+                AccessMode::AskEveryStep,
+                action,
+                &file_client,
+                &file_write_client,
+                &search_client,
+                &browser_client,
+                None,
+            )
+            .expect("approved action resumes")
+        };
+        let store = store.lock().expect("store lock");
+        let record = store
+            .list_agent_run_records()
+            .expect("run records load")
+            .into_iter()
+            .find(|record| record.id == start.id)
+            .expect("run record exists");
+
+        assert_eq!(action.execution_state, "succeeded");
+        assert_eq!(record.status, AgentRunStatus::Queued);
+        assert!(record.steps.iter().any(|step| {
+            step.label == TERMINAL_READ_TOOL_ID && step.status == AgentRunStepStatus::Completed
+        }));
+        assert!(record.finished_at.is_none());
+        assert_eq!(record.continuation_count, 1);
+        assert!(store
+            .list_tool_invocations()
+            .expect("tool invocations load")
+            .iter()
+            .any(|invocation| {
+                invocation.run_id == Some(start.id)
+                    && invocation.tool_id == TERMINAL_READ_TOOL_ID
+                    && invocation.status == ToolExecutionStatus::Succeeded
+                    && invocation
+                        .output
+                        .as_ref()
+                        .and_then(|output| output["stdout"].as_str())
+                        .is_some_and(|stdout| stdout.contains("evidence.txt"))
+            }));
+    }
+
+    #[test]
+    fn queued_file_read_run_resumes_after_approval_and_finishes_with_evidence() {
+        let store = Mutex::new(EventStore::open_memory().expect("memory store opens"));
+        let start = AgentRunStart::queued(
+            "conversation-1".to_string(),
+            "Read a local evidence file after approval.".to_string(),
+            0,
+        )
+        .expect("queued run start");
+        store
+            .lock()
+            .expect("store lock")
+            .append_agent_run_start(&start)
+            .expect("queued run appends");
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_dir.path().join("evidence.md");
+        fs::write(&path, "approved evidence").expect("fixture writes");
+        let transport = RecordingDeepSeekTransport::new(
+            serde_json::json!({
+                "protocol_version": "ds-agent-envelope/v1",
+                "reply_to_user": "需要本地确认后读取证据。",
+                "agent_actions": [{
+                    "action_type": "file_read",
+                    "title": "Read evidence",
+                    "reason": "Use local evidence for the answer",
+                    "risk": "low",
+                    "requires_confirmation": true,
+                    "target": path.to_string_lossy()
+                }],
+                "missing_prerequisites": []
+            })
+            .to_string(),
+        );
+        let cache = DeepSeekMemoryChatCompletionCache::default();
+        let file_client = LocalFileContentClient::new(512 * 1024);
+        let file_write_client = RecordingFileWriteClient::new();
+        let search_client = RecordingNetworkSearchClient::new();
+        let browser_client = RecordingBrowserPageClient::new();
+
+        let outcome = run_next_queued_agent_chat_with_clients_and_api_keys(
+            &store,
+            &transport,
+            &cache,
+            &["test-secret".to_string()],
+            "worker-a".to_string(),
+            ModelRoute::Flash,
+            ThinkingLevel::Fast,
+            AccessMode::AskEveryStep,
+            AgentChatRuntimeContext::default(),
+            None,
+            &file_client,
+            &file_write_client,
+            &search_client,
+            &browser_client,
+        )
+        .expect("worker execution succeeds")
+        .expect("queued run exists");
+        let mut action = outcome.response.proposed_actions[0].clone();
+        let approval_request_id = action
+            .permission_request_id
+            .expect("file read permission request is linked");
+
+        action = {
+            let store = store.lock().expect("store lock");
+            store
+                .resolve_capability_access_request(
+                    approval_request_id,
+                    true,
+                    "Approved from the local permission surface.".to_string(),
+                )
+                .expect("approval resolves");
+            resume_agent_chat_action_with_clients(
+                &store,
+                AccessMode::AskEveryStep,
+                action,
+                &file_client,
+                &file_write_client,
+                &search_client,
+                &browser_client,
+                None,
+            )
+            .expect("approved action resumes")
+        };
+        let store = store.lock().expect("store lock");
+        let record = store
+            .list_agent_run_records()
+            .expect("run records load")
+            .into_iter()
+            .find(|record| record.id == start.id)
+            .expect("run record exists");
+
+        assert_eq!(action.execution_state, "succeeded");
+        assert_eq!(record.status, AgentRunStatus::Queued);
+        assert!(record.steps.iter().any(|step| {
+            step.label == FILE_READ_TOOL_ID && step.status == AgentRunStepStatus::Completed
+        }));
+        assert!(record.finished_at.is_none());
+        assert_eq!(record.continuation_count, 1);
+        assert!(store
+            .list_tool_invocations()
+            .expect("tool invocations load")
+            .iter()
+            .any(|invocation| {
+                invocation.run_id == Some(start.id)
+                    && invocation.tool_id == FILE_READ_TOOL_ID
+                    && invocation.status == ToolExecutionStatus::Succeeded
+                    && invocation
+                        .output
+                        .as_ref()
+                        .and_then(|output| output["text"].as_str())
+                        == Some("approved evidence")
+            }));
     }
 
     #[test]
@@ -11310,6 +19786,80 @@ mod tests {
             outcome.record.finish_summary.as_deref(),
             Some("Agent run cancelled before committing the completed response.")
         );
+    }
+
+    #[test]
+    fn queued_agent_run_observes_cancel_before_a_followup_tool_round() {
+        let store = Mutex::new(EventStore::open_memory().expect("memory store opens"));
+        let start = AgentRunStart::queued(
+            "conversation-cancel-between-rounds".to_string(),
+            "Search until cancelled.".to_string(),
+            0,
+        )
+        .expect("queued run start");
+        store
+            .lock()
+            .expect("store lock")
+            .append_agent_run_start(&start)
+            .expect("queued run appends");
+        let repeated_action = serde_json::json!({
+            "protocol_version": "ds-agent-envelope-v1",
+            "reply_to_user": "Continue with another search.",
+            "agent_actions": [{
+                "action_type": "network_search",
+                "title": "Search before cancellation",
+                "reason": "Exercise cancellation between bounded tool rounds.",
+                "risk": "low",
+                "requires_confirmation": false,
+                "target": "cancel between agent loop rounds"
+            }],
+            "missing_prerequisites": []
+        })
+        .to_string();
+        let transport =
+            CancelingDeepSeekTransport::new_on_call(&store, start.id, repeated_action, 2);
+        let cache = DeepSeekMemoryChatCompletionCache::default();
+        let file_client = LocalFileContentClient::new(512 * 1024);
+        let file_write_client = RecordingFileWriteClient::new();
+        let search_client = RecordingNetworkSearchClient::new();
+        let browser_client = RecordingBrowserPageClient::new();
+
+        let outcome = run_next_queued_agent_chat_with_clients_and_api_keys(
+            &store,
+            &transport,
+            &cache,
+            &["test-secret".to_string()],
+            "worker-cancel-between-rounds".to_string(),
+            ModelRoute::Flash,
+            ThinkingLevel::Fast,
+            AccessMode::LimitedAuto,
+            AgentChatRuntimeContext::default(),
+            None,
+            &file_client,
+            &file_write_client,
+            &search_client,
+            &browser_client,
+        )
+        .expect("worker cancellation is handled")
+        .expect("queued run exists");
+
+        assert_eq!(search_client.recorded_calls().len(), 1);
+        assert_eq!(outcome.record.status, AgentRunStatus::Cancelled);
+        assert!(outcome.record.cancel_requested);
+        assert_eq!(outcome.response.proposed_actions.len(), 2);
+        assert_eq!(
+            outcome.response.proposed_actions[0].execution_state,
+            "succeeded"
+        );
+        assert_eq!(
+            outcome.response.proposed_actions[1].execution_state,
+            "blocked"
+        );
+        assert!(outcome.response.proposed_actions[1]
+            .blocked_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("cancellation"));
     }
 
     #[test]
@@ -12955,6 +21505,93 @@ mod tests {
     }
 
     #[test]
+    fn memory_background_maintenance_reprojects_conflicts_after_an_archive() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let now = Utc::now();
+        let target = MemoryRecord {
+            id: Uuid::new_v4(),
+            title: "Superseded workflow rule".to_string(),
+            body: "Use the previous workflow rule.".to_string(),
+            memory_type: MemoryType::WorkflowRule,
+            scope: MemoryScope::Project,
+            sensitivity: MemorySensitivity::Normal,
+            lifecycle: MemoryLifecycle::Active,
+            source: MemoryRecordSource::MemoryCandidate,
+            source_id: None,
+            pinned: false,
+            expires_at: None,
+            linked_memory_ids: Vec::new(),
+            linked_memories: Vec::new(),
+            search_match: MemorySearchMatch::direct(),
+            created_at: now,
+            updated_at: now,
+        };
+        store.append_memory_record(&target).expect("target appends");
+
+        let candidate = |body: &str, action| {
+            let mut candidate = MemoryCandidate::new_with_metadata_and_expiration(
+                target.title.clone(),
+                body.to_string(),
+                MemoryCandidateSource::WorkflowReflection,
+                Some(target.id),
+                "DS Agent detected competing maintenance actions.".to_string(),
+                target.memory_type,
+                target.scope,
+                target.sensitivity,
+                target.lifecycle,
+                target.expires_at,
+            )
+            .expect("candidate builds");
+            candidate.suggested_action = action;
+            candidate
+        };
+        let archive_candidate = candidate(&target.body, MemoryCandidateSuggestedAction::Archive);
+        let update_candidate = candidate(
+            "Use the replacement workflow rule.",
+            MemoryCandidateSuggestedAction::Update,
+        );
+        store
+            .append_memory_candidate(&update_candidate)
+            .expect("update candidate appends");
+        store
+            .append_memory_candidate(&archive_candidate)
+            .expect("archive candidate appends");
+
+        let summary = run_memory_background_maintenance_in_store(&store).expect("maintenance runs");
+        let stale_update_applied = apply_memory_candidate_update_if_current(
+            &store,
+            update_candidate.id,
+            target.id,
+            "Try stale update after archive.".to_string(),
+        )
+        .expect("stale conflict is deferred");
+        let candidates = store
+            .list_memory_candidate_records()
+            .expect("candidate records load");
+
+        assert!(!stale_update_applied);
+        assert_eq!(summary.auto_candidate_decisions_applied, 1);
+        assert_eq!(summary.auto_archives_applied, 1);
+        assert_eq!(summary.auto_updates_applied, 0);
+        assert_eq!(
+            candidates
+                .iter()
+                .find(|record| record.candidate.id == archive_candidate.id)
+                .expect("archive candidate remains visible")
+                .effective_status,
+            MemoryCandidateStatus::Accepted
+        );
+        assert_eq!(
+            candidates
+                .iter()
+                .find(|record| record.candidate.id == update_candidate.id)
+                .expect("update candidate remains visible")
+                .effective_status,
+            MemoryCandidateStatus::Pending
+        );
+    }
+
+    #[test]
     fn memory_background_maintenance_uses_model_rewrite_for_update_candidate() {
         let store = EventStore::open_memory().expect("memory store opens");
         let now = Utc::now();
@@ -13330,6 +21967,62 @@ schema_version: 1
     }
 
     #[test]
+    fn agent_chat_protocol_blocks_unwired_capability_actions() {
+        let prompt = super::build_agent_chat_protocol_user_prompt(
+            &AgentChatRequest {
+                prompt: "运行本地构建命令。".to_string(),
+                model_route: ModelRoute::Auto,
+                thinking_level: ThinkingLevel::Fast,
+                access_mode: AccessMode::AskEveryStep,
+            },
+            &AgentChatRuntimeContext::default(),
+        );
+        assert!(!prompt.contains(", terminal_write,"));
+        for action_type in [
+            "terminal_write",
+            "drive_read",
+            "drive_write",
+            "email_draft",
+            "email_send",
+            "work_package_export",
+        ] {
+            let action = normalize_agent_action_proposal(
+                AgentChatActionProposal {
+                    action_type: action_type.to_string(),
+                    title: Some("运行未接线能力".to_string()),
+                    reason: Some("验证模型动作面只暴露通用运行时工具".to_string()),
+                    risk: Some("high".to_string()),
+                    requires_confirmation: true,
+                    target: Some("test-target".to_string()),
+                    target_location: None,
+                    destination: None,
+                    preferred_browser: None,
+                    content: None,
+                    capability: None,
+                    policy_decision: None,
+                    execution_state: "proposed".to_string(),
+                    dispatch_note: None,
+                    permission_request_id: None,
+                    capability_invocation_id: None,
+                    workflow_run_id: None,
+                    blocked_reason: None,
+                },
+                AccessMode::AskEveryStep,
+            );
+
+            assert_eq!(action.execution_state, "blocked", "{action_type}");
+            assert!(
+                action
+                    .blocked_reason
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains(&format!("unsupported action_type `{action_type}`")),
+                "{action_type}"
+            );
+        }
+    }
+
+    #[test]
     fn agent_chat_blocks_unknown_model_action_proposals() {
         let model_envelope = serde_json::json!({
             "protocol_version": "ds-agent-envelope-v1",
@@ -13572,7 +22265,7 @@ schema_version: 1
                 prompt: "执行这个命令。".to_string(),
                 model_route: ModelRoute::Flash,
                 thinking_level: ThinkingLevel::Fast,
-                access_mode: AccessMode::FullAccess,
+                access_mode: AccessMode::AskOnRisk,
             },
             None,
         )
@@ -13976,6 +22669,48 @@ schema_version: 1
         )
         .expect("dispatch should create and open the office file");
 
+        assert_eq!(
+            reply.proposed_actions[0].execution_state,
+            "needs_confirmation"
+        );
+        assert_eq!(
+            reply.proposed_actions[1].execution_state,
+            "waiting_prerequisite"
+        );
+        assert!(file_write_client.recorded_calls().is_empty());
+        let approval_request_id = reply.proposed_actions[0]
+            .permission_request_id
+            .expect("Office create approval is linked");
+        store
+            .resolve_capability_access_request(
+                approval_request_id,
+                true,
+                "Approved exact Office artifact creation.".to_string(),
+            )
+            .expect("Office create approval resolves");
+        reply.proposed_actions[0] = resume_agent_chat_action_with_clients(
+            &store,
+            AccessMode::AskOnRisk,
+            reply.proposed_actions[0].clone(),
+            &file_client,
+            &file_write_client,
+            &search_client,
+            &browser_client,
+            None,
+        )
+        .expect("approved Office create resumes");
+        reply.proposed_actions[1].execution_state = "proposed".to_string();
+        dispatch_agent_action_proposals(
+            &store,
+            AccessMode::AskOnRisk,
+            &mut reply,
+            &file_client,
+            &file_write_client,
+            &search_client,
+            &browser_client,
+        )
+        .expect("created Office file opens without another confirmation");
+
         assert_eq!(reply.proposed_actions[0].execution_state, "succeeded");
         assert_eq!(reply.proposed_actions[1].execution_state, "succeeded");
         assert_eq!(
@@ -14066,14 +22801,52 @@ schema_version: 1
         )
         .expect("desktop office actions should dispatch");
 
+        assert_eq!(
+            reply.proposed_actions[0].execution_state,
+            "needs_confirmation"
+        );
+        assert_eq!(
+            reply.proposed_actions[1].execution_state,
+            "waiting_prerequisite"
+        );
+        assert!(file_write_client.recorded_calls().is_empty());
+        let approval_request_id = reply.proposed_actions[0]
+            .permission_request_id
+            .expect("desktop Office create approval is linked");
+        store
+            .resolve_capability_access_request(
+                approval_request_id,
+                true,
+                "Approved exact desktop Office artifact creation.".to_string(),
+            )
+            .expect("desktop Office create approval resolves");
+        reply.proposed_actions[0] = resume_agent_chat_action_with_clients(
+            &store,
+            AccessMode::AskOnRisk,
+            reply.proposed_actions[0].clone(),
+            &file_client,
+            &file_write_client,
+            &search_client,
+            &browser_client,
+            None,
+        )
+        .expect("approved desktop Office create resumes");
+        reply.proposed_actions[1].execution_state = "proposed".to_string();
+        dispatch_agent_action_proposals(
+            &store,
+            AccessMode::AskOnRisk,
+            &mut reply,
+            &file_client,
+            &file_write_client,
+            &search_client,
+            &browser_client,
+        )
+        .expect("created desktop Office file opens without another confirmation");
+
         assert!(reply
             .proposed_actions
             .iter()
             .all(|action| action.execution_state == "succeeded"));
-        assert!(reply
-            .proposed_actions
-            .iter()
-            .all(|action| action.permission_request_id.is_none()));
         assert_eq!(
             reply.proposed_actions[0].target.as_deref(),
             Some("desktop/测试文档.docx")
@@ -14195,119 +22968,6 @@ schema_version: 1
             invocations[0].approval_request_id,
             Some(approval_request_id)
         );
-    }
-
-    #[test]
-    fn agent_chat_computer_control_dispatches_approved_structured_action() {
-        let store =
-            crate::kernel::event_store::EventStore::open_memory().expect("memory store opens");
-        let client = RecordingComputerControlClient::new();
-        let approval_request_id = Uuid::new_v4();
-        let mut action = AgentChatActionProposal {
-            action_type: "computer_control".to_string(),
-            title: Some("Type test text".to_string()),
-            reason: Some("User asked DS Agent to write text in Word.".to_string()),
-            risk: Some("critical".to_string()),
-            requires_confirmation: true,
-            target: Some("Microsoft Word".to_string()),
-            target_location: None,
-            destination: None,
-            preferred_browser: None,
-            content: Some("type:我在测试".to_string()),
-            capability: Some(CapabilityKind::ComputerControl),
-            policy_decision: Some(PolicyDecision::Ask),
-            execution_state: "needs_confirmation".to_string(),
-            dispatch_note: None,
-            permission_request_id: Some(approval_request_id),
-            capability_invocation_id: None,
-            workflow_run_id: None,
-            blocked_reason: None,
-        };
-
-        dispatch_agent_computer_control_action(
-            &store,
-            AccessMode::AskOnRisk,
-            &mut action,
-            &client,
-            true,
-            Some(approval_request_id),
-        )
-        .expect("computer control action dispatches");
-
-        assert_eq!(action.execution_state, "succeeded");
-        assert!(action
-            .dispatch_note
-            .as_deref()
-            .unwrap_or_default()
-            .contains("computer control completed"));
-        let calls = client.recorded_calls();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, "Microsoft Word");
-        assert_eq!(
-            calls[0].1,
-            ComputerControlAction::TypeText {
-                text: "我在测试".to_string()
-            }
-        );
-        let invocations = store
-            .list_capability_invocations()
-            .expect("invocations load");
-        assert_eq!(invocations.len(), 1);
-        assert_eq!(invocations[0].capability, CapabilityKind::ComputerControl);
-        assert_eq!(
-            invocations[0].approval_request_id,
-            Some(approval_request_id)
-        );
-    }
-
-    #[test]
-    fn agent_chat_computer_control_blocks_unstructured_natural_language_action() {
-        let store =
-            crate::kernel::event_store::EventStore::open_memory().expect("memory store opens");
-        let client = RecordingComputerControlClient::new();
-        let mut action = AgentChatActionProposal {
-            action_type: "computer_control".to_string(),
-            title: Some("Create Word document".to_string()),
-            reason: Some("Create a Word document on the desktop and write test text.".to_string()),
-            risk: Some("critical".to_string()),
-            requires_confirmation: true,
-            target: Some("Microsoft Word".to_string()),
-            target_location: None,
-            destination: None,
-            preferred_browser: None,
-            content: Some("create a Word document and type 我在测试".to_string()),
-            capability: Some(CapabilityKind::ComputerControl),
-            policy_decision: Some(PolicyDecision::Ask),
-            execution_state: "needs_confirmation".to_string(),
-            dispatch_note: None,
-            permission_request_id: Some(Uuid::new_v4()),
-            capability_invocation_id: None,
-            workflow_run_id: None,
-            blocked_reason: None,
-        };
-        let approval_request_id = action.permission_request_id;
-
-        dispatch_agent_computer_control_action(
-            &store,
-            AccessMode::AskOnRisk,
-            &mut action,
-            &client,
-            true,
-            approval_request_id,
-        )
-        .expect("unstructured action is handled on the action");
-
-        assert_eq!(action.execution_state, "blocked");
-        assert!(action
-            .blocked_reason
-            .as_deref()
-            .unwrap_or_default()
-            .contains("structured action"));
-        assert!(client.recorded_calls().is_empty());
-        assert!(store
-            .list_capability_invocations()
-            .expect("invocations load")
-            .is_empty());
     }
 
     #[test]
@@ -14471,10 +23131,18 @@ schema_version: 1
             reply.proposed_actions[0].execution_state,
             "needs_confirmation"
         );
-        assert!(store
+        let waiting_invocations = store
             .list_capability_invocations()
-            .expect("invocations load")
-            .is_empty());
+            .expect("invocations load");
+        assert_eq!(waiting_invocations.len(), 1);
+        assert_eq!(
+            waiting_invocations[0].status,
+            CapabilityInvocationStatus::PendingApproval
+        );
+        assert_eq!(
+            waiting_invocations[0].approval_request_id,
+            Some(permission_request_id)
+        );
         store
             .resolve_capability_access_request(
                 permission_request_id,
@@ -14659,7 +23327,6 @@ schema_version: 1
             invocations[0].status,
             crate::kernel::capability::CapabilityInvocationStatus::Succeeded
         );
-
         let reply_json = serde_json::to_value(&reply).expect("reply serializes");
         assert_eq!(
             reply_json["proposed_actions"][0]["execution_state"],
@@ -14942,6 +23609,19 @@ schema_version: 1
             invocation.capability == CapabilityKind::FileWrite
                 && invocation.status == CapabilityInvocationStatus::Succeeded
         }));
+        let tool_invocations = store
+            .list_tool_invocations()
+            .expect("tool invocations load");
+        assert_eq!(tool_invocations.len(), 4);
+        assert!(tool_invocations.iter().all(|invocation| {
+            invocation.tool_id == FILESYSTEM_MUTATE_TOOL_ID
+                && invocation.status == ToolExecutionStatus::Succeeded
+                && invocation.verification.passed
+                && invocation
+                    .evidence
+                    .iter()
+                    .any(|evidence| evidence.kind == "filesystem_state")
+        }));
     }
 
     #[test]
@@ -15020,6 +23700,19 @@ schema_version: 1
             invocation.capability == CapabilityKind::FileWrite
                 && invocation.status == CapabilityInvocationStatus::Succeeded
         }));
+        let tool_invocations = store
+            .list_tool_invocations()
+            .expect("tool invocations load");
+        assert_eq!(tool_invocations.len(), 3);
+        assert!(tool_invocations.iter().all(|invocation| {
+            invocation.tool_id == FILESYSTEM_MUTATE_TOOL_ID
+                && invocation.status == ToolExecutionStatus::Succeeded
+                && invocation.verification.passed
+                && invocation
+                    .evidence
+                    .iter()
+                    .any(|evidence| evidence.kind == "filesystem_state")
+        }));
     }
 
     #[test]
@@ -15091,7 +23784,26 @@ schema_version: 1
             invocations[0].status,
             crate::kernel::capability::CapabilityInvocationStatus::Succeeded
         );
-
+        assert_eq!(
+            invocations[0].requested_url.as_deref(),
+            Some("https://search.example/?q=DeepSeek+Agent+OS+latest")
+        );
+        assert_eq!(
+            invocations[0].evidence_url.as_deref(),
+            Some("https://example.com/ds-agent")
+        );
+        let tool_invocations = store
+            .list_tool_invocations()
+            .expect("tool invocations load");
+        assert_eq!(tool_invocations.len(), 1);
+        assert_eq!(tool_invocations[0].tool_id, NETWORK_SEARCH_TOOL_ID);
+        assert_eq!(tool_invocations[0].tool_version, "1.0.0");
+        assert_eq!(tool_invocations[0].status, ToolExecutionStatus::Succeeded);
+        assert!(tool_invocations[0].verification.passed);
+        assert!(tool_invocations[0]
+            .evidence
+            .iter()
+            .any(|evidence| evidence.kind == "source_links"));
         let reply_json = serde_json::to_value(&reply).expect("reply serializes");
         assert_eq!(
             reply_json["proposed_actions"][0]["execution_state"],
@@ -15173,6 +23885,26 @@ schema_version: 1
             invocations[0].status,
             crate::kernel::capability::CapabilityInvocationStatus::Succeeded
         );
+        assert_eq!(
+            invocations[0].requested_url.as_deref(),
+            Some("https://example.com/ds-agent")
+        );
+        assert_eq!(
+            invocations[0].evidence_url.as_deref(),
+            Some("https://example.com/ds-agent")
+        );
+        let tool_invocations = store
+            .list_tool_invocations()
+            .expect("tool invocations load");
+        assert_eq!(tool_invocations.len(), 1);
+        assert_eq!(tool_invocations[0].tool_id, BROWSER_BROWSE_TOOL_ID);
+        assert_eq!(tool_invocations[0].tool_version, "1.0.0");
+        assert_eq!(tool_invocations[0].status, ToolExecutionStatus::Succeeded);
+        assert!(tool_invocations[0].verification.passed);
+        assert!(tool_invocations[0]
+            .evidence
+            .iter()
+            .any(|evidence| evidence.kind == "browser_page"));
 
         let reply_json = serde_json::to_value(&reply).expect("reply serializes");
         assert_eq!(
@@ -15502,6 +24234,10 @@ schema_version: 1
             reply.proposed_actions[0].execution_state,
             "needs_confirmation"
         );
+        assert!(store
+            .list_operations_briefing_runs()
+            .expect("workflow runs load before approval")
+            .is_empty());
         store
             .resolve_capability_access_request(
                 permission_request_id,
@@ -15524,7 +24260,7 @@ schema_version: 1
         let runs = store
             .list_operations_briefing_runs()
             .expect("operations briefing runs load");
-        assert_eq!(runs.len(), 2);
+        assert_eq!(runs.len(), 1);
         assert_eq!(reply.proposed_actions[0].execution_state, "succeeded");
         let workflow_run_id = reply.proposed_actions[0]
             .workflow_run_id
@@ -15623,6 +24359,150 @@ schema_version: 1
             .content
             .contains("completion_verifier"));
         assert!(followup_user_message.content.contains("completion_advice"));
+    }
+
+    #[test]
+    fn agent_chat_executes_followup_tool_actions_in_the_same_bounded_loop() {
+        let initial_envelope = serde_json::json!({
+            "protocol_version": "ds-agent-envelope-v1",
+            "reply_to_user": "I will gather public evidence first.",
+            "agent_actions": [
+                {
+                    "action_type": "network_search",
+                    "title": "Collect source evidence",
+                    "reason": "The requested artifact needs current public evidence.",
+                    "risk": "low",
+                    "requires_confirmation": false,
+                    "target": "DS Agent verified runtime"
+                }
+            ],
+            "missing_prerequisites": []
+        });
+        let followup_action_envelope = serde_json::json!({
+            "protocol_version": "ds-agent-envelope-v1",
+            "reply_to_user": "The evidence is sufficient, so I will write the requested artifact.",
+            "agent_actions": [
+                {
+                    "action_type": "file_write",
+                    "title": "Write verified artifact",
+                    "reason": "Persist the evidence-backed result requested by the user.",
+                    "risk": "low",
+                    "requires_confirmation": false,
+                    "target": "followup-loop-output.md",
+                    "content": "Verified DS Agent runtime evidence."
+                }
+            ],
+            "missing_prerequisites": []
+        });
+        let transport = SequencedDeepSeekTransport::new(vec![
+            initial_envelope.to_string(),
+            followup_action_envelope.to_string(),
+            "The evidence-backed artifact was written and verified.".to_string(),
+        ]);
+        let cache = DeepSeekMemoryChatCompletionCache::default();
+        let store = EventStore::open_memory().expect("memory store opens");
+        let file_client = LocalFileContentClient::new(512 * 1024);
+        let file_write_client = RecordingFileWriteClient::new();
+        let search_client = RecordingNetworkSearchClient::new();
+        let browser_client = RecordingBrowserPageClient::new();
+
+        let (reply, telemetry) = agent_chat_with_dispatch_and_tool_followup(
+            &transport,
+            &cache,
+            "test-secret",
+            AgentChatRequest {
+                prompt: "Research the runtime and write a verified note.".to_string(),
+                model_route: ModelRoute::Flash,
+                thinking_level: ThinkingLevel::Fast,
+                access_mode: AccessMode::FullAccess,
+            },
+            super::AgentChatRuntimeContext::default(),
+            None,
+            &store,
+            &file_client,
+            &file_write_client,
+            &search_client,
+            &browser_client,
+        )
+        .expect("agent loop should execute the follow-up action");
+
+        assert_eq!(telemetry.len(), 3, "{reply:#?}");
+        assert_eq!(transport.recorded_requests().len(), 3);
+        assert_eq!(search_client.recorded_calls().len(), 1);
+        assert_eq!(file_write_client.recorded_calls().len(), 1);
+        assert_eq!(reply.proposed_actions.len(), 2);
+        assert!(reply
+            .proposed_actions
+            .iter()
+            .all(|action| action.execution_state == "succeeded"));
+        assert_eq!(
+            reply.content,
+            "The evidence-backed artifact was written and verified."
+        );
+    }
+
+    #[test]
+    fn agent_chat_blocks_new_actions_after_four_tool_rounds() {
+        let mut responses = (0..5)
+            .map(|index| {
+                serde_json::json!({
+                    "protocol_version": "ds-agent-envelope-v1",
+                    "reply_to_user": format!("Continue tool round {}.", index + 1),
+                    "agent_actions": [
+                        {
+                            "action_type": "network_search",
+                            "title": format!("Search round {}", index + 1),
+                            "reason": "Exercise the bounded agent loop stop condition.",
+                            "risk": "low",
+                            "requires_confirmation": false,
+                            "target": format!("bounded agent loop round {}", index + 1)
+                        }
+                    ],
+                    "missing_prerequisites": []
+                })
+                .to_string()
+            })
+            .collect::<Vec<_>>();
+        responses.push("This response must never be requested.".to_string());
+        let transport = SequencedDeepSeekTransport::new(responses);
+        let cache = DeepSeekMemoryChatCompletionCache::default();
+        let store = EventStore::open_memory().expect("memory store opens");
+        let file_client = LocalFileContentClient::new(512 * 1024);
+        let file_write_client = RecordingFileWriteClient::new();
+        let search_client = RecordingNetworkSearchClient::new();
+        let browser_client = RecordingBrowserPageClient::new();
+
+        let (reply, telemetry) = agent_chat_with_dispatch_and_tool_followup(
+            &transport,
+            &cache,
+            "test-secret",
+            AgentChatRequest {
+                prompt: "Keep searching forever.".to_string(),
+                model_route: ModelRoute::Flash,
+                thinking_level: ThinkingLevel::Fast,
+                access_mode: AccessMode::LimitedAuto,
+            },
+            super::AgentChatRuntimeContext::default(),
+            None,
+            &store,
+            &file_client,
+            &file_write_client,
+            &search_client,
+            &browser_client,
+        )
+        .expect("agent loop should stop cleanly at its tool-round limit");
+
+        assert_eq!(search_client.recorded_calls().len(), 4);
+        assert_eq!(transport.recorded_requests().len(), 5);
+        assert_eq!(telemetry.len(), 5);
+        assert_eq!(reply.proposed_actions.len(), 5);
+        assert_eq!(reply.proposed_actions[4].execution_state, "blocked");
+        assert!(reply.proposed_actions[4]
+            .blocked_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("4 tool rounds"));
+        assert!(reply.content.contains("4 轮工具执行上限"));
     }
 
     #[test]
@@ -15752,7 +24632,7 @@ schema_version: 1
                 prompt: "在桌面创建一个 Word 文档。".to_string(),
                 model_route: ModelRoute::Flash,
                 thinking_level: ThinkingLevel::Fast,
-                access_mode: AccessMode::AskOnRisk,
+                access_mode: AccessMode::FullAccess,
             },
             AgentChatRuntimeContext::default(),
             None,
@@ -15766,7 +24646,7 @@ schema_version: 1
         assert_eq!(response.proposed_actions.len(), 1);
         assert_eq!(response.proposed_actions[0].execution_state, "succeeded");
         assert!(response.content.contains("DS Agent 已完成并验证本地动作"));
-        assert!(response.content.contains("Word document created"));
+        assert!(response.content.contains("desktop/deterministic.docx"));
         assert!(response
             .content
             .contains("验证：本地执行器返回成功状态和结果记录。"));
@@ -15901,6 +24781,7 @@ schema_version: 1
                 access_mode: AccessMode::FullAccess,
             },
             AgentChatRuntimeContext {
+                active_run_id: None,
                 workspace_ready: AgentChatReadiness::Missing,
                 workspace_note: "local workspace needs setup".to_string(),
                 network_search_ready: AgentChatReadiness::Ready,
@@ -15908,6 +24789,7 @@ schema_version: 1
                 network_search_source_model: None,
                 soul_profile: None,
                 memory_context: super::AgentMemoryRuntimeContext::default(),
+                skill_catalog: Vec::new(),
                 desktop_dir: None,
             },
             None,

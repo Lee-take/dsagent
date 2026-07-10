@@ -10,10 +10,44 @@ const {
   agentChatGuidanceStepState,
   agentChatLoopSteps,
   createAgentChatRun,
+  hasOpenAgentRunRecords,
   queueAgentRunGuidance,
   requestAgentRunCancel,
+  shouldRunDurableAgentWorker,
+  shouldShowAgentStopControl,
   buildAgentGuidancePrompt,
 } = await import(runStateModuleUrl);
+
+test("starts the durable worker only when desktop recovery is idle and configured", () => {
+  assert.equal(
+    shouldRunDurableAgentWorker({
+      desktopRuntime: true,
+      setupNeeded: false,
+      workerBusy: false,
+      chatPending: false,
+      queuedLocalCount: 0,
+      credentialReady: true,
+    }),
+    true,
+  );
+});
+
+test("does not race the durable worker with foreground or local queued work", () => {
+  const ready = {
+    desktopRuntime: true,
+    setupNeeded: false,
+    workerBusy: false,
+    chatPending: false,
+    queuedLocalCount: 0,
+    credentialReady: true,
+  };
+  assert.equal(shouldRunDurableAgentWorker({ ...ready, desktopRuntime: false }), false);
+  assert.equal(shouldRunDurableAgentWorker({ ...ready, setupNeeded: true }), false);
+  assert.equal(shouldRunDurableAgentWorker({ ...ready, workerBusy: true }), false);
+  assert.equal(shouldRunDurableAgentWorker({ ...ready, chatPending: true }), false);
+  assert.equal(shouldRunDurableAgentWorker({ ...ready, queuedLocalCount: 1 }), false);
+  assert.equal(shouldRunDurableAgentWorker({ ...ready, credentialReady: false }), false);
+});
 
 test("uses a stop action while an agent task is running without draft guidance", () => {
   assert.equal(agentChatComposerAction({ pending: true, draft: "" }), "stop");
@@ -21,7 +55,10 @@ test("uses a stop action while an agent task is running without draft guidance",
 });
 
 test("keeps the main composer available for a new queued task while a run is active", () => {
-  assert.equal(agentChatComposerAction({ pending: true, draft: "继续检查下一份文件" }), "send");
+  assert.equal(
+    agentChatComposerAction({ pending: true, draft: "继续检查下一份文件" }),
+    "send_new_task",
+  );
 });
 
 test("uses a send-guidance action only when the user explicitly targets the active run", () => {
@@ -48,7 +85,10 @@ test("returns to stop action after submitted guidance clears the draft", () => {
 });
 
 test("keeps attachments in the main composer as a new queued task while a run is active", () => {
-  assert.equal(agentChatComposerAction({ pending: true, draft: "", attachmentCount: 1 }), "send");
+  assert.equal(
+    agentChatComposerAction({ pending: true, draft: "", attachmentCount: 1 }),
+    "send_new_task",
+  );
 });
 
 test("uses send-guidance action for attachments only in explicit guidance mode", () => {
@@ -63,8 +103,62 @@ test("uses send-guidance action for attachments only in explicit guidance mode",
   );
 });
 
+test("keeps a visible stop control when the active composer action queues a new task", () => {
+  assert.equal(
+    shouldShowAgentStopControl({
+      pending: true,
+      composerAction: "send_new_task",
+    }),
+    true,
+  );
+  assert.equal(
+    shouldShowAgentStopControl({
+      pending: true,
+      composerAction: "send_guidance",
+    }),
+    true,
+  );
+  assert.equal(
+    shouldShowAgentStopControl({
+      pending: true,
+      composerAction: "stop",
+    }),
+    false,
+  );
+  assert.equal(
+    shouldShowAgentStopControl({
+      pending: false,
+      composerAction: "send",
+    }),
+    false,
+  );
+});
+
 test("keeps normal send action when no agent task is running", () => {
   assert.equal(agentChatComposerAction({ pending: false, draft: "新任务" }), "send");
+});
+
+test("keeps the run inspector live while durable records are still open", () => {
+  assert.equal(
+    hasOpenAgentRunRecords([
+      { status: "completed" },
+      { status: "queued" },
+    ]),
+    true,
+  );
+  assert.equal(hasOpenAgentRunRecords([{ status: "running" }]), true);
+  assert.equal(hasOpenAgentRunRecords([{ status: "waiting_for_prerequisite" }]), true);
+  assert.equal(hasOpenAgentRunRecords([{ status: "waiting_for_confirmation" }]), true);
+  assert.equal(hasOpenAgentRunRecords([{ status: "blocked" }]), true);
+  assert.equal(hasOpenAgentRunRecords([{ status: "cancel_requested" }]), true);
+  assert.equal(
+    hasOpenAgentRunRecords([
+      { status: "completed" },
+      { status: "failed" },
+      { status: "cancelled" },
+    ]),
+    false,
+  );
 });
 
 test("marks queued and active guidance distinctly for the run inspector", () => {

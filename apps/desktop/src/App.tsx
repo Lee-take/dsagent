@@ -44,8 +44,11 @@ import {
   buildAgentGuidancePrompt,
   createAgentChatRun,
   finishAgentRun,
+  hasOpenAgentRunRecords,
   queueAgentRunGuidance,
   requestAgentRunCancel,
+  shouldRunDurableAgentWorker,
+  shouldShowAgentStopControl,
 } from "./agentChatRunState";
 import type { AgentChatGuidanceStatus, AgentChatRun } from "./agentChatRunState";
 import {
@@ -76,6 +79,7 @@ import type {
   AgentContextReceipt,
   AgentRunRecord,
   AgentRunWorkerResult,
+  AgentToolContract,
   AgentSoulProfileState,
   AppUpdateDownloadResult,
   AppUpdateInstallResult,
@@ -126,10 +130,37 @@ import type {
   TerminalReadCommand,
   ThemeStyle,
   ThinkingLevel,
+  ToolInvocationRecord,
   WorkPackage,
   WorkPackageImportPreview,
   WorkPackageImportSummary,
 } from "./types";
+
+const APP_UPDATE_CHECK_TOOL_ID = "app_update.check";
+const APP_UPDATE_DOWNLOAD_TOOL_ID = "app_update.download";
+const APP_UPDATE_INSTALL_TOOL_ID = "app_update.install";
+
+function invokeAgentTool(
+  toolId: string,
+  input: Record<string, unknown>,
+  accessMode: AccessMode,
+) {
+  return invoke<ToolInvocationRecord>("execute_agent_tool", {
+    request: {
+      tool_id: toolId,
+      input,
+      access_mode: accessMode,
+      run_id: null,
+    },
+  });
+}
+
+function upsertToolInvocation(
+  invocations: ToolInvocationRecord[],
+  invocation: ToolInvocationRecord,
+) {
+  return [invocation, ...invocations.filter((current) => current.id !== invocation.id)];
+}
 
 const fallbackState: FoundationState = {
   app_name: "DS Agent",
@@ -776,12 +807,14 @@ function agentChatRunFromRecord(record: AgentRunRecord, displayPrompt?: string):
     prompt: displayPrompt ?? record.prompt,
     status: record.status,
     cancel_requested: record.cancel_requested,
-    queued_guidance: record.queued_guidance.map((guidance) => ({
-      id: guidance.id,
-      content: guidance.guidance,
-      attachment_count: 0,
-      created_at: guidance.queued_at,
-    })),
+    queued_guidance: record.queued_guidance
+      .filter((guidance) => guidance.applied_at === null)
+      .map((guidance) => ({
+        id: guidance.id,
+        content: guidance.guidance,
+        attachment_count: 0,
+        created_at: guidance.queued_at,
+      })),
     created_at: record.started_at,
     updated_at: record.updated_at,
   };
@@ -803,6 +836,10 @@ function capabilityFamilyIcon(family: CapabilityFamily) {
       return TerminalSquare;
     case "computer_use":
       return MonitorCog;
+    case "app_update":
+      return PackageOpen;
+    case "skill":
+      return PackageOpen;
   }
 }
 
@@ -849,6 +886,8 @@ export function App() {
   const [capabilityCatalog, setCapabilityCatalog] = useState<CapabilityDescriptor[]>([]);
   const [capabilityRecords, setCapabilityRecords] = useState<CapabilityAccessRecord[]>([]);
   const [capabilityInvocations, setCapabilityInvocations] = useState<CapabilityInvocation[]>([]);
+  const [agentToolContracts, setAgentToolContracts] = useState<AgentToolContract[]>([]);
+  const [toolInvocations, setToolInvocations] = useState<ToolInvocationRecord[]>([]);
   const [agentContextReceipts, setAgentContextReceipts] = useState<AgentContextReceipt[]>([]);
   const [skillRecords, setSkillRecords] = useState<SkillRecord[]>([]);
   const [skillExecutionRecords, setSkillExecutionRecords] = useState<SkillExecutionRecord[]>([]);
@@ -1058,7 +1097,9 @@ export function App() {
   const queuedAgentPromptRef = useRef<QueuedAgentPrompt[]>([]);
   const agentStopRequestedRef = useRef(false);
   const agentChatRunTokenRef = useRef(0);
-  const appUpdateDownloadKeyRef = useRef("");
+  const agentChatPendingRef = useRef(agentChatPending);
+  const activeAgentConversationIdRef = useRef(activeAgentConversationId);
+  const backgroundAgentWorkerBusyRef = useRef(false);
   const feedbackReviewItems = useMemo(() => {
     const memoriesById = new Map(memoryRecords.map((memory) => [memory.id, memory]));
     const feedbackByMemory = selectedMemoryFeedbackRecords.reduce(
@@ -1193,6 +1234,11 @@ export function App() {
     draft: agentPrompt,
     attachmentCount: readyAgentAttachmentCount,
   });
+  const showAgentStopControl = shouldShowAgentStopControl({
+    pending: agentChatPending,
+    composerAction: agentComposerAction,
+  });
+  const hasOpenAgentRuns = hasOpenAgentRunRecords(agentRunRecords);
   const networkSearchSourceModelMissing =
     modelToolStrategy.network_search_source_model_required &&
     !state.network_search_source_model;
@@ -1319,7 +1365,22 @@ export function App() {
     }
 
     void invoke<FoundationState>("get_foundation_state")
-      .then(setState)
+      .then(async (foundationState) => {
+        setState(foundationState);
+        const invocation = await invokeAgentTool(
+          APP_UPDATE_CHECK_TOOL_ID,
+          {},
+          foundationState.access_mode,
+        );
+        setToolInvocations((current) => upsertToolInvocation(current, invocation));
+        if (invocation.status === "succeeded" && invocation.output) {
+          setAppUpdateStatus(invocation.output as unknown as AppUpdateStatus);
+        } else if (invocation.status === "waiting_for_confirmation") {
+          setAppUpdateNotice(copy.appUpdate.approvalRequired);
+        } else if (invocation.error) {
+          setAppUpdateError(invocation.error);
+        }
+      })
       .catch(() => setState(fallbackState));
     void invoke<DeepSeekCredentialStatus>("get_deepseek_credential_status")
       .then(setDeepSeekCredentialStatus)
@@ -1348,9 +1409,6 @@ export function App() {
         applySoulProfileState(fallbackAgentSoulProfileState);
         setSoulProfileError(copy.settingsPanel.soulProfileLoadFailed);
       });
-    void invoke<AppUpdateStatus>("check_app_update")
-      .then(setAppUpdateStatus)
-      .catch(() => setAppUpdateStatus(fallbackAppUpdateStatus));
     void invoke<DeepSeekPricingState>("get_deepseek_pricing_state")
       .then((pricingState) => {
         setDeepSeekPricingState(pricingState);
@@ -1361,59 +1419,6 @@ export function App() {
         setDeepSeekPricingError(copy.deepSeekPricing.loadFailed);
       });
   }, []);
-
-  useEffect(() => {
-    if (!hasDesktopRuntime()) {
-      return;
-    }
-
-    if (!appUpdateStatus.update_available) {
-      appUpdateDownloadKeyRef.current = "";
-      setDownloadedAppUpdate(null);
-      return;
-    }
-
-    const updateKey = `${appUpdateStatus.latest_version ?? ""}|${appUpdateStatus.asset_name ?? ""}`;
-    if (appUpdateDownloadKeyRef.current === updateKey) {
-      return;
-    }
-
-    appUpdateDownloadKeyRef.current = updateKey;
-    let active = true;
-    setDownloadedAppUpdate(null);
-    setAppUpdateDownloadPending(true);
-    setAppUpdateError("");
-    setAppUpdateNotice("");
-
-    void invoke<AppUpdateDownloadResult>("download_app_update")
-      .then((result) => {
-        if (!active) {
-          return;
-        }
-        setDownloadedAppUpdate(result);
-        setAppUpdateNotice(copy.appUpdate.downloadReady(result.latest_version));
-      })
-      .catch((error) => {
-        if (!active) {
-          return;
-        }
-        setAppUpdateError(String(error) || copy.appUpdate.downloadFailed);
-      })
-      .finally(() => {
-        if (active) {
-          setAppUpdateDownloadPending(false);
-        }
-      });
-
-    return () => {
-      active = false;
-    };
-  }, [
-    appUpdateStatus.asset_name,
-    appUpdateStatus.latest_version,
-    appUpdateStatus.update_available,
-    copy.appUpdate,
-  ]);
 
   useEffect(() => {
     if (!hasDesktopRuntime()) {
@@ -1476,6 +1481,14 @@ export function App() {
   useEffect(() => {
     agentMessagesRef.current = agentMessages;
   }, [agentMessages]);
+
+  useEffect(() => {
+    agentChatPendingRef.current = agentChatPending;
+  }, [agentChatPending]);
+
+  useEffect(() => {
+    activeAgentConversationIdRef.current = activeAgentConversationId;
+  }, [activeAgentConversationId]);
 
   useEffect(() => {
     const chatThread = chatThreadRef.current;
@@ -1958,6 +1971,8 @@ export function App() {
       setCapabilityCatalog([]);
       setCapabilityRecords([]);
       setCapabilityInvocations([]);
+      setAgentToolContracts([]);
+      setToolInvocations([]);
       setAgentContextReceipts([]);
       setSkillRecords([]);
       setSkillExecutionRecords([]);
@@ -1976,6 +1991,8 @@ export function App() {
       invoke<CapabilityDescriptor[]>("list_capability_catalog"),
       invoke<CapabilityAccessRecord[]>("list_capability_access_records"),
       invoke<CapabilityInvocation[]>("list_capability_invocations"),
+      invoke<AgentToolContract[]>("list_agent_tool_contracts"),
+      invoke<ToolInvocationRecord[]>("list_agent_tool_invocations"),
       invoke<AgentContextReceipt[]>("list_agent_context_receipts"),
       invoke<SkillRecord[]>("list_skill_records"),
       invoke<SkillExecutionRecord[]>("list_skill_execution_records"),
@@ -1992,6 +2009,8 @@ export function App() {
         catalog,
         capabilityAccessRecords,
         invocations,
+        toolContracts,
+        recordedToolInvocations,
         contextReceipts,
         skills,
         skillExecutions,
@@ -2007,6 +2026,8 @@ export function App() {
         setCapabilityCatalog(catalog);
         setCapabilityRecords(capabilityAccessRecords);
         setCapabilityInvocations(invocations);
+        setAgentToolContracts(toolContracts);
+        setToolInvocations(recordedToolInvocations);
         setAgentContextReceipts(contextReceipts);
         setSkillRecords(skills);
         setSkillExecutionRecords(skillExecutions);
@@ -2251,21 +2272,53 @@ export function App() {
   };
 
   const installAvailableAppUpdate = async () => {
-    if (!downloadedAppUpdateReady || downloadedAppUpdate === null) {
-      return;
-    }
-
-    setAppUpdateInstallPending(true);
+    const installing = downloadedAppUpdateReady && downloadedAppUpdate !== null;
+    setAppUpdateDownloadPending(!installing);
+    setAppUpdateInstallPending(installing);
     setAppUpdateError("");
     setAppUpdateNotice("");
 
     try {
-      await invoke<AppUpdateInstallResult>("install_app_update", {
-        installerPath: downloadedAppUpdate.installer_path,
-      });
-      setAppUpdateNotice(copy.appUpdate.installStarted(downloadedAppUpdate.latest_version));
+      const invocation = await invokeAgentTool(
+        installing ? APP_UPDATE_INSTALL_TOOL_ID : APP_UPDATE_DOWNLOAD_TOOL_ID,
+        installing && downloadedAppUpdate
+          ? { installer_path: downloadedAppUpdate.installer_path }
+          : {},
+        state.access_mode,
+      );
+      setToolInvocations((current) => upsertToolInvocation(current, invocation));
+      await refreshCapabilityState();
+
+      if (invocation.status === "waiting_for_confirmation") {
+        setAppUpdateNotice(copy.appUpdate.approvalRequired);
+        return;
+      }
+      if (invocation.status !== "succeeded" || !invocation.output) {
+        throw new Error(
+          invocation.error ||
+            (installing ? copy.appUpdate.installFailed : copy.appUpdate.downloadFailed),
+        );
+      }
+
+      if (installing) {
+        const result = invocation.output as unknown as AppUpdateInstallResult;
+        if (!result.restart_scheduled) {
+          throw new Error(copy.appUpdate.installFailed);
+        }
+        setAppUpdateNotice(
+          copy.appUpdate.installStarted(downloadedAppUpdate?.latest_version ?? appUpdateVersionLabel),
+        );
+      } else {
+        const result = invocation.output as unknown as AppUpdateDownloadResult;
+        setDownloadedAppUpdate(result);
+        setAppUpdateNotice(copy.appUpdate.downloadReady(result.latest_version));
+      }
     } catch (error) {
-      setAppUpdateError(String(error) || copy.appUpdate.installFailed);
+      setAppUpdateError(
+        String(error) || (installing ? copy.appUpdate.installFailed : copy.appUpdate.downloadFailed),
+      );
+    } finally {
+      setAppUpdateDownloadPending(false);
       setAppUpdateInstallPending(false);
     }
   };
@@ -2281,18 +2334,20 @@ export function App() {
     });
   };
 
-  const refreshCapabilityState = async () => {
-    const [records, audits, invocations, contextReceipts] = await Promise.all([
+  async function refreshCapabilityState() {
+    const [records, audits, invocations, contextReceipts, tools] = await Promise.all([
       invoke<CapabilityAccessRecord[]>("list_capability_access_records"),
       invoke<PermissionAuditEntry[]>("list_permission_audit_entries"),
       invoke<CapabilityInvocation[]>("list_capability_invocations"),
       invoke<AgentContextReceipt[]>("list_agent_context_receipts"),
+      invoke<ToolInvocationRecord[]>("list_agent_tool_invocations"),
     ]);
     setCapabilityRecords(records);
     setPermissionAudits(audits);
     setCapabilityInvocations(invocations);
     setAgentContextReceipts(contextReceipts);
-  };
+    setToolInvocations(tools);
+  }
 
   const refreshComputerControlUnlockStatus = async () => {
     const unlockStatus = await invoke<ComputerControlUnlockStatus>(
@@ -2325,7 +2380,7 @@ export function App() {
   };
 
   useEffect(() => {
-    if (!hasDesktopRuntime() || !agentChatPending) {
+    if (!hasDesktopRuntime() || (!agentChatPending && !hasOpenAgentRuns)) {
       return;
     }
 
@@ -2337,7 +2392,169 @@ export function App() {
     return () => {
       window.clearInterval(timer);
     };
-  }, [agentChatPending]);
+  }, [agentChatPending, hasOpenAgentRuns]);
+
+  useEffect(() => {
+    if (!hasDesktopRuntime() || localDirectoryState.needs_setup) {
+      return;
+    }
+
+    let cancelled = false;
+    const runNextDurableAgentTask = async () => {
+      const apiKeyCandidates = deepSeekApiKeyCandidates(
+        sessionDeepSeekApiKey,
+        fallbackDeepSeekApiKey,
+      );
+      if (cancelled || !shouldRunDurableAgentWorker({
+        desktopRuntime: hasDesktopRuntime(),
+        setupNeeded: localDirectoryState.needs_setup,
+        workerBusy: backgroundAgentWorkerBusyRef.current,
+        chatPending: agentChatPendingRef.current,
+        queuedLocalCount: queuedAgentPromptRef.current.length,
+        credentialReady:
+          deepSeekCredentialStatus.chat_completion_ready || apiKeyCandidates.length > 0,
+      })) {
+        return;
+      }
+
+      backgroundAgentWorkerBusyRef.current = true;
+      try {
+        const workerResult = await invoke<AgentRunWorkerResult | null>(
+          "run_next_queued_agent_chat_worker",
+          {
+            runId: null,
+            executionPrompt: null,
+            workerId: "desktop-durable-worker",
+            largeModelProvider: state.large_model_provider,
+            modelRoute: state.model_route,
+            thinkingLevel: state.thinking_level,
+            accessMode: state.access_mode,
+            networkSearchSourceModel: state.network_search_source_model || null,
+            apiKeyOverride: apiKeyCandidates[0] ?? null,
+            fallbackApiKeyOverride: apiKeyCandidates[1] ?? null,
+          },
+        );
+        if (!workerResult || cancelled) {
+          return;
+        }
+
+        upsertAgentRunRecord(workerResult.record);
+        const assistantMessage: AgentConversationMessage = {
+          id: workerResult.response.id,
+          role: "assistant",
+          content: workerResult.response.content,
+          model: workerResult.response.model,
+          protocol_version: workerResult.response.protocol_version,
+          proposed_actions: workerResult.response.proposed_actions,
+          missing_prerequisites: workerResult.response.missing_prerequisites,
+          memory_candidates: workerResult.response.memory_candidates,
+          created_at: workerResult.response.created_at,
+        };
+        setAgentConversations((currentConversations) => {
+          let matchedConversation = false;
+          const nextConversations = currentConversations.map((conversation) => {
+            if (conversation.id !== workerResult.record.conversation_id) {
+              return conversation;
+            }
+            matchedConversation = true;
+            const hasAssistantMessage = conversation.messages.some(
+              (message) => message.id === assistantMessage.id,
+            );
+            const hasUserPrompt = conversation.messages.some(
+              (message) =>
+                message.role === "user" && message.content === workerResult.record.prompt,
+            );
+            const messages = hasAssistantMessage
+              ? conversation.messages
+              : [
+                  ...(hasUserPrompt
+                    ? conversation.messages
+                    : [
+                        ...conversation.messages,
+                        {
+                          id: `run-${workerResult.record.id}-user`,
+                          role: "user" as const,
+                          content: workerResult.record.prompt,
+                          created_at: workerResult.record.started_at,
+                        },
+                      ]),
+                  assistantMessage,
+                ];
+            if (activeAgentConversationIdRef.current === conversation.id) {
+              agentMessagesRef.current = messages;
+              setAgentMessages(messages);
+              setActiveAgentRun(agentChatRunFromRecord(workerResult.record));
+            }
+            return {
+              ...conversation,
+              messages,
+              title:
+                conversation.manual_title
+                  ? conversation.title
+                  : deriveConversationTitle(messages, workerResult.record.prompt) ||
+                    conversation.title,
+              updated_at: workerResult.record.updated_at,
+            };
+          });
+          if (matchedConversation) {
+            return sortAgentConversations(nextConversations);
+          }
+
+          const recoveredConversation = createEmptyAgentConversation();
+          recoveredConversation.id = workerResult.record.conversation_id;
+          recoveredConversation.title = deriveConversationTitle(
+            [
+              {
+                id: `run-${workerResult.record.id}-user`,
+                role: "user",
+                content: workerResult.record.prompt,
+                created_at: workerResult.record.started_at,
+              },
+              assistantMessage,
+            ],
+            workerResult.record.prompt,
+          );
+          recoveredConversation.messages = [
+            {
+              id: `run-${workerResult.record.id}-user`,
+              role: "user",
+              content: workerResult.record.prompt,
+              created_at: workerResult.record.started_at,
+            },
+            assistantMessage,
+          ];
+          recoveredConversation.updated_at = workerResult.record.updated_at;
+          return sortAgentConversations([...nextConversations, recoveredConversation]);
+        });
+        await Promise.all([refreshAgentRunRecords(), refreshCapabilityState()]);
+      } catch {
+        if (!cancelled) {
+          void refreshAgentRunRecords().catch(() => null);
+        }
+      } finally {
+        backgroundAgentWorkerBusyRef.current = false;
+      }
+    };
+
+    void runNextDurableAgentTask();
+    const timer = window.setInterval(() => {
+      void runNextDurableAgentTask();
+    }, 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [
+    deepSeekCredentialStatus.chat_completion_ready,
+    fallbackDeepSeekApiKey,
+    localDirectoryState.needs_setup,
+    sessionDeepSeekApiKey,
+    state.access_mode,
+    state.large_model_provider,
+    state.model_route,
+    state.network_search_source_model,
+    state.thinking_level,
+  ]);
 
   const refreshMemoryCandidateRecords = async () => {
     const candidates = await invoke<MemoryCandidateRecord[]>("list_memory_candidate_records");
@@ -3434,10 +3651,19 @@ export function App() {
     if (agentChatPending && !options.isGuidanceContinuation && !options.runId) {
       let queuedRunId: string | null = null;
       try {
+        const queuedConversation = agentConversations.find(
+          (conversation) => conversation.id === activeAgentConversationId,
+        );
+        const queuedExecutionPrompt = buildAgentConversationContextPrompt(
+          promptWithAttachments,
+          agentMessagesRef.current,
+          queuedConversation?.soul_profile_bootstrap ?? null,
+        ).prompt;
         const queuedRecord = await invoke<AgentRunRecord>("enqueue_agent_run_record", {
           conversationId: activeAgentConversationId,
           prompt: displayPrompt,
           attachmentCount: readyAttachments.length,
+          executionPrompt: queuedExecutionPrompt,
         });
         queuedRunId = queuedRecord.id;
         upsertAgentRunRecord(queuedRecord);
@@ -3500,6 +3726,7 @@ export function App() {
               conversationId: activeAgentConversationId,
               prompt: displayPrompt,
               attachmentCount: readyAttachments.length,
+              executionPrompt: null,
         });
         if (queuedRecord) {
           agentRunId = queuedRecord.id;
@@ -3532,6 +3759,7 @@ export function App() {
     let runFinishedStatus: "completed" | "failed" = "completed";
     let runFinishError: string | null = null;
     let runFinishedByWorker = false;
+    let finishedWorkerRecord: AgentRunRecord | null = null;
     try {
       const contextPacket = buildAgentConversationContextPrompt(
         promptWithAttachments,
@@ -3588,6 +3816,7 @@ export function App() {
           throw new Error("Queued agent run was not available for the background worker.");
         }
         runFinishedByWorker = true;
+        finishedWorkerRecord = workerResult.record;
         agentRunId = workerResult.record.id;
         upsertAgentRunRecord(workerResult.record);
         response = workerResult.response;
@@ -3712,10 +3941,12 @@ export function App() {
 
       setActiveAgentRun((currentRun) =>
         currentRun?.id === agentRunId && !currentRun.cancel_requested
-          ? finishAgentRun(currentRun, {
-              status: runFinishedStatus,
-              finishedAt: new Date().toISOString(),
-            })
+          ? finishedWorkerRecord
+            ? agentChatRunFromRecord(finishedWorkerRecord, currentRun.prompt)
+            : finishAgentRun(currentRun, {
+                status: runFinishedStatus,
+                finishedAt: new Date().toISOString(),
+              })
           : currentRun,
       );
       setAgentChatPending(false);
@@ -4079,6 +4310,28 @@ export function App() {
     }
   };
 
+  const installRemoteSkillZipPackage = async () => {
+    clearSkillStatus();
+    const packageUrl = skillRemotePackageUrl.trim();
+    if (!packageUrl) {
+      setSkillError(copy.skills.installFailed);
+      return;
+    }
+
+    setSkillPending(true);
+    try {
+      await invoke<SkillRecord>("install_remote_skill_zip_package", {
+        packageUrl,
+      });
+      await refreshSkillRecords();
+      setSkillNotice(copy.skills.installSucceeded);
+    } catch (error) {
+      setSkillError(`${copy.skills.installFailed} ${String(error)}`);
+    } finally {
+      setSkillPending(false);
+    }
+  };
+
   const setLocalSkillEnabled = async (record: SkillRecord, enabled: boolean) => {
     clearSkillStatus();
     setSkillPending(true);
@@ -4233,6 +4486,13 @@ export function App() {
   const recentAgentRunRecords = [...agentRunRecords]
     .sort((left, right) => new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime())
     .slice(0, 5);
+  const recentToolInvocations = [...toolInvocations]
+    .sort(
+      (left, right) =>
+        new Date(right.finished_at ?? right.created_at).getTime() -
+        new Date(left.finished_at ?? left.created_at).getTime(),
+    )
+    .slice(0, 4);
   const queuedAgentRunCount = agentRunRecords.filter((record) => record.status === "queued").length;
   const latestAgentAllActionsDone =
     latestAgentActions.length > 0 &&
@@ -4497,7 +4757,7 @@ export function App() {
                   <button
                     className="app-update-button"
                     type="button"
-                    disabled={appUpdateBusy || !downloadedAppUpdateReady}
+                    disabled={appUpdateBusy}
                     onClick={() => void installAvailableAppUpdate()}
                   >
                     <Download size={14} aria-hidden="true" />
@@ -4919,6 +5179,15 @@ export function App() {
                   <button type="submit" disabled={skillPending}>
                     <ShieldCheck size={14} aria-hidden="true" />
                     {skillPending ? copy.skills.installing : copy.skills.previewRemote}
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary-action"
+                    disabled={skillPending}
+                    onClick={() => void installRemoteSkillZipPackage()}
+                  >
+                    <PackageOpen size={14} aria-hidden="true" />
+                    {copy.skills.installRemote}
                   </button>
                 </form>
                 {skillNotice ? <p className="package-message">{skillNotice}</p> : null}
@@ -5786,6 +6055,16 @@ export function App() {
                         {copy.chatWorkbench.queueGuidance}
                       </button>
                     ) : null}
+                    {showAgentStopControl ? (
+                      <button
+                        type="button"
+                        className="secondary-action"
+                        onClick={requestAgentStop}
+                      >
+                        <CircleStop size={15} aria-hidden="true" />
+                        {copy.chatWorkbench.stopTask}
+                      </button>
+                    ) : null}
                     <button
                       className={`primary-action composer-submit ${agentComposerAction}`}
                       type="submit"
@@ -5797,6 +6076,8 @@ export function App() {
                       )}
                       {agentComposerAction === "stop"
                         ? copy.chatWorkbench.stopTask
+                        : agentComposerAction === "send_new_task"
+                          ? copy.chatWorkbench.queueTask
                         : copy.chatWorkbench.saveTask}
                     </button>
                   </div>
@@ -6921,10 +7202,45 @@ export function App() {
                               ? ` / ${copy.runStatus.workerLabel(record.worker_id)}`
                               : ""}
                           </small>
+                          {record.status_reason ? <small>{record.status_reason}</small> : null}
                         </div>
-                        <span className={`access-status ${record.status}`}>{record.status}</span>
+                        <span className={`access-status ${record.status}`}>
+                          {copy.runStatus.agentRunStatus[record.status]}
+                        </span>
                       </article>
                     ))}
+                  </div>
+                </>
+              ) : null}
+              {recentToolInvocations.length > 0 ? (
+                <>
+                  <div className="queue-heading">
+                    <strong>{copy.runStatus.recentTools}</strong>
+                    <span>{recentToolInvocations.length}</span>
+                  </div>
+                  <div className="sidebar-record-list">
+                    {recentToolInvocations.map((invocation) => {
+                      const contract = agentToolContracts.find(
+                        (candidate) => candidate.id === invocation.tool_id,
+                      );
+                      return (
+                        <article className="sidebar-record-row" key={invocation.id}>
+                          <div>
+                            <span>{formatTaskDate(invocation.created_at, language)}</span>
+                            <strong>{contract?.title ?? invocation.tool_id}</strong>
+                            <small>
+                              {invocation.verification.summary}
+                              {invocation.evidence[0]
+                                ? ` / ${invocation.evidence[0].reference}`
+                                : ""}
+                            </small>
+                          </div>
+                          <span className={`access-status ${invocation.status}`}>
+                            {copy.runStatus.toolStatus[invocation.status]}
+                          </span>
+                        </article>
+                      );
+                    })}
                   </div>
                 </>
               ) : null}

@@ -18,9 +18,11 @@ use crate::kernel::computer_use::{
     BRIDGE_TRANSPORT_ENV_VAR,
 };
 use crate::kernel::models::{AccessMode, LargeModelProvider, NetworkSearchSourceModel};
+use crate::kernel::network_sandbox::{send_public_get, validate_public_http_url_syntax};
 use crate::kernel::policy::{
     request_capability_access, CapabilityAccessRequest, CapabilityKind, PolicyDecision,
 };
+use crate::kernel::sandbox::enforce_local_mutation_path;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -370,7 +372,7 @@ pub enum ComputerControlAction {
 }
 
 impl ComputerControlAction {
-    fn audit_summary(&self) -> String {
+    pub fn audit_summary(&self) -> String {
         match self {
             ComputerControlAction::Click { x, y, button } => {
                 format!("click {button:?} at ({x}, {y})")
@@ -876,7 +878,7 @@ pub struct LocalTerminalReadClient {
     max_output_chars: usize,
 }
 
-const TERMINAL_READ_DIRECTORY_LIST_PREFIX: &str = "ds-agent:list-directory ";
+pub const TERMINAL_READ_DIRECTORY_LIST_PREFIX: &str = "ds-agent:list-directory ";
 const TERMINAL_READ_DIRECTORY_ENTRY_LIMIT: usize = 100;
 
 impl LocalTerminalReadClient {
@@ -1447,12 +1449,14 @@ pub struct HttpBrowserPageClient {
     client: reqwest::blocking::Client,
 }
 
+const BROWSER_HTTP_USER_AGENT: &str = "DeepSeek-Agent-OS/0.1.0 browser-capability";
+
 impl HttpBrowserPageClient {
     pub fn new() -> Result<Self, String> {
         let client = reqwest::blocking::Client::builder()
-            .user_agent("DeepSeek-Agent-OS/0.1.0 browser-capability")
+            .user_agent(BROWSER_HTTP_USER_AGENT)
             .timeout(std::time::Duration::from_secs(15))
-            .redirect(reqwest::redirect::Policy::limited(5))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| format!("browser client setup failed: {error}"))?;
 
@@ -1462,12 +1466,9 @@ impl HttpBrowserPageClient {
 
 impl BrowserPageClient for HttpBrowserPageClient {
     fn fetch_page(&self, url: &str) -> Result<BrowserPage, String> {
-        let response = self
-            .client
-            .get(url)
-            .send()
+        let response = send_public_get(&self.client, url, 5)
             .map_err(|error| format!("browser fetch failed: {error}"))?;
-        let final_url = response.url().to_string();
+        let final_url = validate_public_http_url_syntax(response.url().as_str())?.to_string();
         let html = response
             .error_for_status()
             .map_err(|error| format!("browser fetch returned an error status: {error}"))?
@@ -1492,7 +1493,7 @@ impl HttpNetworkSearchClient {
         let client = reqwest::blocking::Client::builder()
             .user_agent("DeepSeek-Agent-OS/0.1.0 network-search")
             .timeout(std::time::Duration::from_secs(15))
-            .redirect(reqwest::redirect::Policy::limited(5))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| format!("network search client setup failed: {error}"))?;
 
@@ -1524,11 +1525,10 @@ impl NetworkSearchClient for HttpNetworkSearchClient {
         )
         .map_err(|error| format!("network search URL could not be built: {error}"))?;
 
-        let response = self
-            .client
-            .get(search_url.clone())
-            .send()
+        let response = send_public_get(&self.client, search_url.as_str(), 5)
             .map_err(|error| format!("network search request failed: {error}"))?;
+        let final_search_url =
+            validate_public_http_url_syntax(response.url().as_str())?.to_string();
         let html = response
             .error_for_status()
             .map_err(|error| format!("network search returned an error status: {error}"))?
@@ -1544,7 +1544,7 @@ impl NetworkSearchClient for HttpNetworkSearchClient {
             provider: self.provider_label().to_string(),
             query: query.to_string(),
             scope: scope.to_string(),
-            search_url: search_url.to_string(),
+            search_url: final_search_url,
             items,
         })
     }
@@ -3428,8 +3428,7 @@ fn reject_root_mutation_path(path: &Path) -> Result<(), String> {
     if path.as_os_str().is_empty() || path.file_name().is_none() {
         return Err("filesystem mutation refuses to target a filesystem root".to_string());
     }
-
-    Ok(())
+    enforce_local_mutation_path(path)
 }
 
 fn filesystem_mutation_operation_label(operation: FileSystemMutationOperation) -> &'static str {
@@ -3474,7 +3473,7 @@ fn normalize_file_path(path: &str) -> Result<String, String> {
     Ok(trimmed.to_string())
 }
 
-fn normalize_terminal_read_command(command: &str) -> Result<String, String> {
+pub fn normalize_terminal_read_command(command: &str) -> Result<String, String> {
     let trimmed = command.trim();
     if trimmed.is_empty() {
         return Err("terminal command is required".to_string());
@@ -3872,6 +3871,7 @@ fn resolve_workspace_file_write_path(workspace_dir: &Path, path: &str) -> Result
     if candidate.file_name().is_none() {
         return Err("file write target must include a file name".to_string());
     }
+    enforce_local_mutation_path(&candidate)?;
 
     Ok(candidate)
 }
@@ -4042,13 +4042,13 @@ mod tests {
         ComputerScreenshotRequest, DriveFolderEntry, DriveReadRequest, DriveWriteExportFile,
         DriveWriteRequest, EmailDraftRequest, EmailReadRequest, EmailSendRequest,
         EvidenceFolderClient, EvidenceFolderFile, EvidenceFolderRequest, FileContent,
-        FileContentClient, FileReadRequest, FileSystemMutationOperation, FileSystemMutationRequest,
-        FileWriteRequest, FileWriteResult, HttpBrowserPageClient, LocalComputerControlClient,
-        LocalComputerControlInputBackend, LocalComputerScreenshotClient, LocalDriveFolderClient,
-        LocalFileSystemMutationClient, LocalScreenshotCaptureBackend,
-        LocalWorkspaceFileWriteClient, NetworkSearchClient, NetworkSearchRequest,
-        NetworkSearchResult, NetworkSearchResultItem, TerminalCommandOutput, TerminalReadClient,
-        TerminalReadRequest, TerminalWriteRequest,
+        FileContentClient, FileReadRequest, FileSystemMutationClient, FileSystemMutationOperation,
+        FileSystemMutationRequest, FileSystemMutationResult, FileWriteRequest, FileWriteResult,
+        HttpBrowserPageClient, LocalComputerControlClient, LocalComputerControlInputBackend,
+        LocalComputerScreenshotClient, LocalDriveFolderClient, LocalFileSystemMutationClient,
+        LocalScreenshotCaptureBackend, LocalWorkspaceFileWriteClient, NetworkSearchClient,
+        NetworkSearchRequest, NetworkSearchResult, NetworkSearchResultItem, TerminalCommandOutput,
+        TerminalReadClient, TerminalReadRequest, TerminalWriteRequest,
     };
     use crate::kernel::codex_bridge_contract::{
         CodexBridgeCapability, CodexBridgeControlResponse, CodexBridgeNetworkSearchItem,
@@ -4064,6 +4064,28 @@ mod tests {
 
     struct FakeFileContentClient {
         calls: Cell<u32>,
+    }
+
+    struct FakeFileSystemMutationClient {
+        calls: Cell<u32>,
+    }
+
+    impl FileSystemMutationClient for FakeFileSystemMutationClient {
+        fn mutate(
+            &self,
+            _operation: FileSystemMutationOperation,
+            path: &str,
+            destination: Option<&str>,
+            content: Option<&str>,
+        ) -> Result<FileSystemMutationResult, String> {
+            self.calls.set(self.calls.get() + 1);
+            Ok(FileSystemMutationResult {
+                path: path.to_string(),
+                destination: destination.map(ToString::to_string),
+                bytes: content.unwrap_or_default().len() as u64,
+                summary: "fake mutation executed".to_string(),
+            })
+        }
     }
 
     struct FakeEvidenceFolderClient {
@@ -6036,19 +6058,11 @@ mod tests {
 
     #[test]
     fn browser_http_client_uses_current_release_user_agent() {
-        let html = "<html><head><title>Ops</title></head><body>Evidence</body></html>";
-        let (endpoint, handle) = serve_one_json_response(html.to_string());
-        let client = HttpBrowserPageClient::new().expect("browser client");
-
-        let page = client.fetch_page(&endpoint).expect("page fetched");
-        let recorded = handle.join().expect("fake browser server joins");
-        let normalized_headers = recorded.raw.to_ascii_lowercase();
-
-        assert_eq!(page.title, "Ops");
-        assert!(recorded.raw.starts_with("GET / HTTP/1.1"));
-        assert!(
-            normalized_headers.contains("user-agent: deepseek-agent-os/0.1.0 browser-capability")
+        assert_eq!(
+            super::BROWSER_HTTP_USER_AGENT,
+            "DeepSeek-Agent-OS/0.1.0 browser-capability"
         );
+        HttpBrowserPageClient::new().expect("browser client");
     }
 
     #[test]
@@ -6400,6 +6414,62 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("workspace")));
+    }
+
+    #[test]
+    fn file_write_boundary_denies_git_metadata_even_in_full_access() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let client = LocalWorkspaceFileWriteClient::new(temp_dir.path().to_path_buf(), 512 * 1024);
+        let target = temp_dir.path().join(".git/config");
+
+        let outcome = run_file_write_boundary(
+            FileWriteRequest {
+                access_mode: AccessMode::FullAccess,
+                path: ".git/config".to_string(),
+                summary: "Attempt protected metadata write.".to_string(),
+                content: "[core]".to_string(),
+                approval_granted: true,
+            },
+            &client,
+        )
+        .expect("denied write is audited");
+
+        assert_eq!(outcome.access_request.decision, PolicyDecision::Allow);
+        assert_eq!(
+            outcome.invocation.status,
+            CapabilityInvocationStatus::Failed
+        );
+        assert!(!target.exists());
+        assert!(outcome
+            .invocation
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("deny-first")));
+    }
+
+    #[test]
+    fn filesystem_mutation_denies_secret_file_before_executor_in_full_access() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let client = FakeFileSystemMutationClient {
+            calls: Cell::new(0),
+        };
+        let target = temp_dir.path().join(".env");
+
+        let error = run_filesystem_mutation_boundary(
+            FileSystemMutationRequest {
+                access_mode: AccessMode::FullAccess,
+                operation: FileSystemMutationOperation::CreateFile,
+                path: target.to_string_lossy().to_string(),
+                destination: None,
+                content: Some("DEEPSEEK_API_KEY=secret".to_string()),
+                approval_granted: true,
+            },
+            &client,
+        )
+        .expect_err("secret file mutation is denied before execution");
+
+        assert!(error.contains("deny-first"));
+        assert_eq!(client.calls.get(), 0);
     }
 
     #[test]

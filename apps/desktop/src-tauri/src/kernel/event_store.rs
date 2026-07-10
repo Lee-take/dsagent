@@ -9,8 +9,11 @@ use uuid::Uuid;
 
 use crate::kernel::agent_context::AgentContextReceipt;
 use crate::kernel::agent_run::{
-    AgentRunArtifactRecord, AgentRunCancelRequest, AgentRunClaim, AgentRunFinish,
-    AgentRunQueuedGuidance, AgentRunRecord, AgentRunStart, AgentRunStatus, AgentRunStepRecord,
+    AgentRunArtifactRecord, AgentRunCancelRequest, AgentRunClaim, AgentRunContinuationQueued,
+    AgentRunExecutionContext, AgentRunFinish, AgentRunGuidanceApplied, AgentRunQueuedGuidance,
+    AgentRunRecord, AgentRunRecovery, AgentRunRecoverySweep, AgentRunResourceAccess,
+    AgentRunResourceClaim, AgentRunResourceRelease, AgentRunStart, AgentRunStatus,
+    AgentRunStepRecord, AgentRunStepStatus, AgentRunTransition,
 };
 use crate::kernel::capability::CapabilityInvocation;
 use crate::kernel::deepseek::DeepSeekChatTelemetry;
@@ -27,9 +30,10 @@ use crate::kernel::policy::{
     CapabilityGrantState, CapabilityKind, PermissionAuditEntry, PermissionResolution, RiskLevel,
 };
 use crate::kernel::skill::{
-    SkillEnablementChange, SkillEnablementStatus, SkillExecutionRecord, SkillInstallationRecord,
-    SkillRecord, SkillTrustLevel, SkillTrustReset, SkillUninstallRecord,
+    SkillActivationContext, SkillEnablementChange, SkillEnablementStatus, SkillExecutionRecord,
+    SkillInstallationRecord, SkillRecord, SkillTrustLevel, SkillTrustReset, SkillUninstallRecord,
 };
+use crate::kernel::tool_runtime::{ToolExecutionStatus, ToolInvocationRecord};
 use crate::kernel::work_package::{
     redact_operations_briefing_run_for_package_export, WorkPackage, WorkPackageImportPreview,
     WorkPackageImportSummary, WorkPackageMemoryCandidateImportPreview,
@@ -44,11 +48,18 @@ pub const CAPABILITY_INVOCATION_RECORDED_EVENT: &str = "capability_invocation.re
 pub const AGENT_CONTEXT_RECEIPT_RECORDED_EVENT: &str = "agent_context_receipt_recorded";
 pub const AGENT_RUN_CANCEL_REQUESTED_EVENT: &str = "agent_run.cancel_requested";
 pub const AGENT_RUN_CLAIMED_EVENT: &str = "agent_run.claimed";
+pub const AGENT_RUN_CONTINUATION_QUEUED_EVENT: &str = "agent_run.continuation_queued";
+pub const AGENT_RUN_EXECUTION_CONTEXT_RECORDED_EVENT: &str = "agent_run.execution_context_recorded";
+pub const AGENT_RUN_RECOVERED_EVENT: &str = "agent_run.recovered";
 pub const AGENT_RUN_FINISHED_EVENT: &str = "agent_run.finished";
+pub const AGENT_RUN_GUIDANCE_APPLIED_EVENT: &str = "agent_run.guidance_applied";
 pub const AGENT_RUN_GUIDANCE_QUEUED_EVENT: &str = "agent_run.guidance_queued";
 pub const AGENT_RUN_STARTED_EVENT: &str = "agent_run.started";
 pub const AGENT_RUN_STEP_RECORDED_EVENT: &str = "agent_run.step_recorded";
 pub const AGENT_RUN_ARTIFACT_RECORDED_EVENT: &str = "agent_run.artifact_recorded";
+pub const AGENT_RUN_TRANSITIONED_EVENT: &str = "agent_run.transitioned";
+pub const AGENT_RUN_RESOURCE_CLAIMED_EVENT: &str = "agent_run.resource_claimed";
+pub const AGENT_RUN_RESOURCE_RELEASED_EVENT: &str = "agent_run.resource_released";
 pub const DEEPSEEK_CHAT_TELEMETRY_RECORDED_EVENT: &str = "deepseek_chat.telemetry_recorded";
 pub const MEMORY_CANDIDATE_PROPOSED_EVENT: &str = "memory_candidate.proposed";
 pub const MEMORY_CANDIDATE_RESOLVED_EVENT: &str = "memory_candidate.resolved";
@@ -68,6 +79,7 @@ pub const SKILL_INSTALLED_EVENT: &str = "skill.installed";
 pub const SKILL_TRUST_RESET_EVENT: &str = "skill.trust_reset";
 pub const SKILL_UNINSTALLED_EVENT: &str = "skill.uninstalled";
 pub const TASK_RECORD_CREATED_EVENT: &str = "task_record.created";
+pub const TOOL_INVOCATION_RECORDED_EVENT: &str = "tool_invocation.recorded";
 pub const WORKFLOW_TEMPLATE_PACKAGE_IMPORTED_EVENT: &str = "workflow_template_package.imported";
 
 #[derive(Debug, Error)]
@@ -225,6 +237,7 @@ impl EventStore {
         worker_id: String,
         lease_seconds: i64,
     ) -> EventStoreResult<Option<AgentRunRecord>> {
+        self.recover_expired_agent_runs(Utc::now())?;
         let Some(next_run) = self
             .list_agent_run_records()?
             .into_iter()
@@ -246,6 +259,7 @@ impl EventStore {
         worker_id: String,
         lease_seconds: i64,
     ) -> EventStoreResult<AgentRunRecord> {
+        self.recover_expired_agent_runs(Utc::now())?;
         let target = self
             .list_agent_run_records()?
             .into_iter()
@@ -273,6 +287,53 @@ impl EventStore {
         self.append(&event)
     }
 
+    pub fn heartbeat_agent_run_lease(
+        &self,
+        run_id: Uuid,
+        worker_id: String,
+        lease_seconds: i64,
+    ) -> EventStoreResult<AgentRunRecord> {
+        let renewed_claim = AgentRunClaim::new(run_id, worker_id, lease_seconds)
+            .map_err(EventStoreError::InvalidState)?;
+        let record = self
+            .list_agent_run_records()?
+            .into_iter()
+            .find(|record| record.id == run_id)
+            .ok_or_else(|| EventStoreError::NotFound(format!("agent run {run_id}")))?;
+        if record.worker_id.as_deref() != Some(renewed_claim.worker_id.as_str()) {
+            return Err(EventStoreError::InvalidState(format!(
+                "agent run {run_id} lease is owned by another worker"
+            )));
+        }
+        if matches!(
+            record.status,
+            AgentRunStatus::Queued
+                | AgentRunStatus::Completed
+                | AgentRunStatus::Failed
+                | AgentRunStatus::Cancelled
+        ) {
+            return Err(EventStoreError::InvalidState(format!(
+                "agent run {run_id} cannot renew its lease from status {:?}",
+                record.status
+            )));
+        }
+        if record
+            .lease_expires_at
+            .is_none_or(|lease_expires_at| lease_expires_at <= renewed_claim.claimed_at)
+        {
+            return Err(EventStoreError::InvalidState(format!(
+                "agent run {run_id} lease expired before its heartbeat"
+            )));
+        }
+
+        self.append_agent_run_claim(&renewed_claim)?;
+        self.renew_agent_run_resources_for_run(run_id, lease_seconds)?;
+        self.list_agent_run_records()?
+            .into_iter()
+            .find(|record| record.id == run_id)
+            .ok_or_else(|| EventStoreError::NotFound(format!("agent run {run_id}")))
+    }
+
     fn list_agent_run_claims(&self) -> EventStoreResult<Vec<AgentRunClaim>> {
         let events = self.list_by_type(AGENT_RUN_CLAIMED_EVENT, 500)?;
         events
@@ -281,6 +342,188 @@ impl EventStore {
                 serde_json::from_str::<AgentRunClaim>(&event.payload_json).map_err(Into::into)
             })
             .collect()
+    }
+
+    pub fn append_agent_run_recovery(&self, recovery: &AgentRunRecovery) -> EventStoreResult<()> {
+        self.ensure_agent_run_exists(recovery.run_id)?;
+        let event = KernelEvent::new(AGENT_RUN_RECOVERED_EVENT, recovery)?;
+        self.append(&event)
+    }
+
+    fn list_agent_run_recoveries(&self) -> EventStoreResult<Vec<AgentRunRecovery>> {
+        let events = self.list_by_type(AGENT_RUN_RECOVERED_EVENT, 500)?;
+        events
+            .into_iter()
+            .map(|event| {
+                serde_json::from_str::<AgentRunRecovery>(&event.payload_json).map_err(Into::into)
+            })
+            .collect()
+    }
+
+    pub fn append_agent_run_execution_context(
+        &self,
+        context: &AgentRunExecutionContext,
+    ) -> EventStoreResult<()> {
+        self.ensure_agent_run_exists(context.run_id)?;
+        let event = KernelEvent::new(AGENT_RUN_EXECUTION_CONTEXT_RECORDED_EVENT, context)?;
+        self.append(&event)
+    }
+
+    fn list_agent_run_execution_contexts(&self) -> EventStoreResult<Vec<AgentRunExecutionContext>> {
+        let events = self.list_by_type(AGENT_RUN_EXECUTION_CONTEXT_RECORDED_EVENT, 500)?;
+        events
+            .into_iter()
+            .map(|event| {
+                serde_json::from_str::<AgentRunExecutionContext>(&event.payload_json)
+                    .map_err(Into::into)
+            })
+            .collect()
+    }
+
+    pub fn append_agent_run_continuation_queued(
+        &self,
+        continuation: &AgentRunContinuationQueued,
+    ) -> EventStoreResult<()> {
+        self.ensure_agent_run_exists(continuation.run_id)?;
+        let invocation_exists = self.list_tool_invocations()?.into_iter().any(|invocation| {
+            invocation.id == continuation.tool_invocation_id
+                && invocation.run_id == Some(continuation.run_id)
+                && invocation.status == ToolExecutionStatus::Succeeded
+        });
+        if !invocation_exists {
+            return Err(EventStoreError::InvalidState(format!(
+                "agent run continuation requires succeeded tool invocation {}",
+                continuation.tool_invocation_id
+            )));
+        }
+        let already_queued = self
+            .list_agent_run_continuations()?
+            .into_iter()
+            .any(|current| current.tool_invocation_id == continuation.tool_invocation_id);
+        if already_queued {
+            return Ok(());
+        }
+        let event = KernelEvent::new(AGENT_RUN_CONTINUATION_QUEUED_EVENT, continuation)?;
+        self.append(&event)
+    }
+
+    fn list_agent_run_continuations(&self) -> EventStoreResult<Vec<AgentRunContinuationQueued>> {
+        let events = self.list_by_type(AGENT_RUN_CONTINUATION_QUEUED_EVENT, 500)?;
+        events
+            .into_iter()
+            .map(|event| {
+                serde_json::from_str::<AgentRunContinuationQueued>(&event.payload_json)
+                    .map_err(Into::into)
+            })
+            .collect()
+    }
+
+    pub fn recover_expired_agent_runs(
+        &self,
+        now: DateTime<Utc>,
+    ) -> EventStoreResult<AgentRunRecoverySweep> {
+        let mut sweep = AgentRunRecoverySweep::default();
+        let invocations = self.list_tool_invocations()?;
+        for record in self.list_agent_run_records()? {
+            let Some(lease_expires_at) = record.lease_expires_at else {
+                continue;
+            };
+            if lease_expires_at > now
+                || !matches!(
+                    record.status,
+                    AgentRunStatus::Running | AgentRunStatus::CancelRequested
+                )
+            {
+                continue;
+            }
+
+            if record.cancel_requested || record.status == AgentRunStatus::CancelRequested {
+                let finish = AgentRunFinish::new(
+                    record.id,
+                    AgentRunStatus::Cancelled,
+                    Some("Cancelled after the previous worker lease expired.".to_string()),
+                    None,
+                )
+                .map_err(EventStoreError::InvalidState)?;
+                self.append_agent_run_finish(&finish)?;
+                sweep.cancelled += 1;
+                continue;
+            }
+
+            let indeterminate = invocations.iter().find(|invocation| {
+                invocation.run_id == Some(record.id)
+                    && invocation.status == ToolExecutionStatus::Running
+            });
+            if let Some(invocation) = indeterminate {
+                let reason = format!(
+                    "Agent run recovery blocked because tool `{}` invocation {} has an indeterminate outcome; DS Agent will not replay a possible side effect automatically.",
+                    invocation.tool_id, invocation.id
+                );
+                let transition = AgentRunTransition::new(
+                    record.id,
+                    AgentRunStatus::Blocked,
+                    reason.clone(),
+                    Some(invocation.id),
+                )
+                .map_err(EventStoreError::InvalidState)?;
+                self.append_agent_run_transition(&transition)?;
+                let sequence = record
+                    .steps
+                    .iter()
+                    .map(|step| step.sequence)
+                    .max()
+                    .unwrap_or(0)
+                    .saturating_add(1);
+                let step = AgentRunStepRecord::new(
+                    record.id,
+                    sequence,
+                    AgentRunStepStatus::Failed,
+                    "agent.recovery".to_string(),
+                    reason,
+                )
+                .map_err(EventStoreError::InvalidState)?;
+                self.append_agent_run_step(&step)?;
+                sweep.blocked += 1;
+                continue;
+            }
+
+            let previous_worker_id = record.worker_id.clone().ok_or_else(|| {
+                EventStoreError::InvalidState(format!(
+                    "expired agent run {} is missing its previous worker id",
+                    record.id
+                ))
+            })?;
+            let reason = format!(
+                "Recovered after worker `{previous_worker_id}` lease expired at {}.",
+                lease_expires_at.to_rfc3339()
+            );
+            let recovery = AgentRunRecovery::new(
+                record.id,
+                previous_worker_id,
+                lease_expires_at,
+                reason.clone(),
+            )
+            .map_err(EventStoreError::InvalidState)?;
+            self.append_agent_run_recovery(&recovery)?;
+            let sequence = record
+                .steps
+                .iter()
+                .map(|step| step.sequence)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1);
+            let step = AgentRunStepRecord::new(
+                record.id,
+                sequence,
+                AgentRunStepStatus::Completed,
+                "agent.recovery".to_string(),
+                reason,
+            )
+            .map_err(EventStoreError::InvalidState)?;
+            self.append_agent_run_step(&step)?;
+            sweep.recovered += 1;
+        }
+        Ok(sweep)
     }
 
     pub fn append_agent_run_queued_guidance(
@@ -292,6 +535,32 @@ impl EventStore {
         self.append(&event)
     }
 
+    pub fn append_agent_run_guidance_applied(
+        &self,
+        applied: &AgentRunGuidanceApplied,
+    ) -> EventStoreResult<bool> {
+        self.ensure_agent_run_exists(applied.run_id)?;
+        let guidance_exists = self.list_agent_run_guidance()?.into_iter().any(|guidance| {
+            guidance.id == applied.guidance_id && guidance.run_id == applied.run_id
+        });
+        if !guidance_exists {
+            return Err(EventStoreError::NotFound(format!(
+                "agent run guidance {}",
+                applied.guidance_id
+            )));
+        }
+        if self
+            .list_agent_run_guidance_applications()?
+            .into_iter()
+            .any(|current| current.guidance_id == applied.guidance_id)
+        {
+            return Ok(false);
+        }
+        let event = KernelEvent::new(AGENT_RUN_GUIDANCE_APPLIED_EVENT, applied)?;
+        self.append(&event)?;
+        Ok(true)
+    }
+
     fn list_agent_run_guidance(&self) -> EventStoreResult<Vec<AgentRunQueuedGuidance>> {
         let events = self.list_by_type(AGENT_RUN_GUIDANCE_QUEUED_EVENT, 500)?;
         events
@@ -301,6 +570,39 @@ impl EventStore {
                     .map_err(Into::into)
             })
             .collect()
+    }
+
+    fn list_agent_run_guidance_applications(
+        &self,
+    ) -> EventStoreResult<Vec<AgentRunGuidanceApplied>> {
+        let events = self.list_by_type(AGENT_RUN_GUIDANCE_APPLIED_EVENT, 500)?;
+        events
+            .into_iter()
+            .map(|event| {
+                serde_json::from_str::<AgentRunGuidanceApplied>(&event.payload_json)
+                    .map_err(Into::into)
+            })
+            .collect()
+    }
+
+    pub fn list_unapplied_agent_run_guidance(
+        &self,
+        run_id: Uuid,
+    ) -> EventStoreResult<Vec<AgentRunQueuedGuidance>> {
+        self.ensure_agent_run_exists(run_id)?;
+        let applied_ids = self
+            .list_agent_run_guidance_applications()?
+            .into_iter()
+            .filter(|applied| applied.run_id == run_id)
+            .map(|applied| applied.guidance_id)
+            .collect::<std::collections::HashSet<_>>();
+        let mut guidance = self
+            .list_agent_run_guidance()?
+            .into_iter()
+            .filter(|guidance| guidance.run_id == run_id && !applied_ids.contains(&guidance.id))
+            .collect::<Vec<_>>();
+        guidance.sort_by_key(|item| item.queued_at);
+        Ok(guidance)
     }
 
     pub fn append_agent_run_cancel_request(
@@ -321,6 +623,229 @@ impl EventStore {
                     .map_err(Into::into)
             })
             .collect()
+    }
+
+    pub fn append_agent_run_transition(
+        &self,
+        transition: &AgentRunTransition,
+    ) -> EventStoreResult<()> {
+        let record = self
+            .list_agent_run_records()?
+            .into_iter()
+            .find(|record| record.id == transition.run_id)
+            .ok_or_else(|| EventStoreError::NotFound(format!("agent run {}", transition.run_id)))?;
+        if record.cancel_requested
+            || matches!(
+                record.status,
+                AgentRunStatus::Completed | AgentRunStatus::Failed | AgentRunStatus::Cancelled
+            )
+        {
+            return Err(EventStoreError::InvalidState(format!(
+                "agent run {} cannot transition from status {:?}",
+                record.id, record.status
+            )));
+        }
+        let event = KernelEvent::new(AGENT_RUN_TRANSITIONED_EVENT, transition)?;
+        self.append(&event)
+    }
+
+    fn list_agent_run_transitions(&self) -> EventStoreResult<Vec<AgentRunTransition>> {
+        let events = self.list_by_type(AGENT_RUN_TRANSITIONED_EVENT, 1000)?;
+        events
+            .into_iter()
+            .map(|event| {
+                serde_json::from_str::<AgentRunTransition>(&event.payload_json).map_err(Into::into)
+            })
+            .collect()
+    }
+
+    pub fn claim_agent_run_resource(
+        &self,
+        claim: AgentRunResourceClaim,
+    ) -> EventStoreResult<AgentRunResourceClaim> {
+        if let Some(run_id) = claim.run_id {
+            let record = self
+                .list_agent_run_records()?
+                .into_iter()
+                .find(|record| record.id == run_id)
+                .ok_or_else(|| EventStoreError::NotFound(format!("agent run {run_id}")))?;
+            if record.cancel_requested
+                || matches!(
+                    record.status,
+                    AgentRunStatus::Completed | AgentRunStatus::Failed | AgentRunStatus::Cancelled
+                )
+            {
+                return Err(EventStoreError::InvalidState(format!(
+                    "agent run {} cannot claim resources from status {:?}",
+                    record.id, record.status
+                )));
+            }
+        }
+
+        let active_claims = self.list_active_agent_run_resource_claims()?;
+        if let Some(existing) = active_claims.iter().find(|existing| {
+            existing.tool_invocation_id == claim.tool_invocation_id
+                && existing.resource_key == claim.resource_key
+                && existing.access == claim.access
+        }) {
+            return Ok(existing.clone());
+        }
+        if let Some(conflict) = active_claims.iter().find(|existing| {
+            existing.resource_key == claim.resource_key
+                && (existing.access == AgentRunResourceAccess::Write
+                    || claim.access == AgentRunResourceAccess::Write)
+        }) {
+            return Err(EventStoreError::InvalidState(format!(
+                "resource `{}` is already claimed by {}",
+                claim.resource_key,
+                conflict
+                    .run_id
+                    .map(|run_id| format!("agent run {run_id}"))
+                    .unwrap_or_else(|| "another tool invocation".to_string())
+            )));
+        }
+
+        let event = KernelEvent::new(AGENT_RUN_RESOURCE_CLAIMED_EVENT, &claim)?;
+        self.append(&event)?;
+        Ok(claim)
+    }
+
+    fn list_agent_run_resource_claims(&self) -> EventStoreResult<Vec<AgentRunResourceClaim>> {
+        let events = self.list_by_type(AGENT_RUN_RESOURCE_CLAIMED_EVENT, 1000)?;
+        events
+            .into_iter()
+            .map(|event| {
+                serde_json::from_str::<AgentRunResourceClaim>(&event.payload_json)
+                    .map_err(Into::into)
+            })
+            .collect()
+    }
+
+    pub fn append_agent_run_resource_release(
+        &self,
+        release: &AgentRunResourceRelease,
+    ) -> EventStoreResult<()> {
+        let claim = self
+            .list_agent_run_resource_claims()?
+            .into_iter()
+            .find(|claim| claim.id == release.claim_id)
+            .ok_or_else(|| {
+                EventStoreError::NotFound(format!("agent run resource claim {}", release.claim_id))
+            })?;
+        if claim.run_id != release.run_id
+            || claim.tool_invocation_id != release.tool_invocation_id
+            || claim.resource_key != release.resource_key
+        {
+            return Err(EventStoreError::InvalidState(
+                "agent run resource release does not match its claim".to_string(),
+            ));
+        }
+        if self
+            .list_agent_run_resource_releases()?
+            .into_iter()
+            .any(|existing| existing.claim_id == release.claim_id)
+        {
+            return Ok(());
+        }
+        let event = KernelEvent::new(AGENT_RUN_RESOURCE_RELEASED_EVENT, release)?;
+        self.append(&event)
+    }
+
+    fn list_agent_run_resource_releases(&self) -> EventStoreResult<Vec<AgentRunResourceRelease>> {
+        let events = self.list_by_type(AGENT_RUN_RESOURCE_RELEASED_EVENT, 1000)?;
+        events
+            .into_iter()
+            .map(|event| {
+                serde_json::from_str::<AgentRunResourceRelease>(&event.payload_json)
+                    .map_err(Into::into)
+            })
+            .collect()
+    }
+
+    pub fn list_active_agent_run_resource_claims(
+        &self,
+    ) -> EventStoreResult<Vec<AgentRunResourceClaim>> {
+        let released_claim_ids = self
+            .list_agent_run_resource_releases()?
+            .into_iter()
+            .map(|release| release.claim_id)
+            .collect::<std::collections::HashSet<_>>();
+        let now = Utc::now();
+        let mut latest_by_resource =
+            std::collections::HashMap::<(Uuid, String, bool), AgentRunResourceClaim>::new();
+        for claim in self
+            .list_agent_run_resource_claims()?
+            .into_iter()
+            .filter(|claim| claim.lease_expires_at > now && !released_claim_ids.contains(&claim.id))
+        {
+            let key = (
+                claim.tool_invocation_id,
+                claim.resource_key.clone(),
+                claim.access == AgentRunResourceAccess::Write,
+            );
+            latest_by_resource
+                .entry(key)
+                .and_modify(|current| {
+                    if claim.claimed_at > current.claimed_at {
+                        *current = claim.clone();
+                    }
+                })
+                .or_insert(claim);
+        }
+        let mut claims = latest_by_resource.into_values().collect::<Vec<_>>();
+        claims.sort_by_key(|claim| claim.claimed_at);
+        Ok(claims)
+    }
+
+    fn renew_agent_run_resources_for_run(
+        &self,
+        run_id: Uuid,
+        lease_seconds: i64,
+    ) -> EventStoreResult<usize> {
+        let claims = self
+            .list_active_agent_run_resource_claims()?
+            .into_iter()
+            .filter(|claim| claim.run_id == Some(run_id))
+            .collect::<Vec<_>>();
+        for claim in &claims {
+            let renewed = AgentRunResourceClaim::new(
+                claim.run_id,
+                claim.tool_invocation_id,
+                claim.resource_key.clone(),
+                claim.access,
+                lease_seconds,
+            )
+            .map_err(EventStoreError::InvalidState)?;
+            let event = KernelEvent::new(AGENT_RUN_RESOURCE_CLAIMED_EVENT, &renewed)?;
+            self.append(&event)?;
+        }
+        Ok(claims.len())
+    }
+
+    pub fn release_agent_run_resources_for_invocation(
+        &self,
+        tool_invocation_id: Uuid,
+        outcome: String,
+    ) -> EventStoreResult<usize> {
+        let released_claim_ids = self
+            .list_agent_run_resource_releases()?
+            .into_iter()
+            .map(|release| release.claim_id)
+            .collect::<std::collections::HashSet<_>>();
+        let claims = self
+            .list_agent_run_resource_claims()?
+            .into_iter()
+            .filter(|claim| {
+                claim.tool_invocation_id == tool_invocation_id
+                    && !released_claim_ids.contains(&claim.id)
+            })
+            .collect::<Vec<_>>();
+        for claim in &claims {
+            let release = AgentRunResourceRelease::new(claim, outcome.clone())
+                .map_err(EventStoreError::InvalidState)?;
+            self.append_agent_run_resource_release(&release)?;
+        }
+        Ok(claims.len())
     }
 
     pub fn append_agent_run_finish(&self, finish: &AgentRunFinish) -> EventStoreResult<()> {
@@ -376,9 +901,25 @@ impl EventStore {
     }
 
     pub fn list_agent_run_records(&self) -> EventStoreResult<Vec<AgentRunRecord>> {
+        let mut applied_by_guidance_id =
+            std::collections::HashMap::<Uuid, AgentRunGuidanceApplied>::new();
+        for applied in self.list_agent_run_guidance_applications()? {
+            applied_by_guidance_id
+                .entry(applied.guidance_id)
+                .and_modify(|current| {
+                    if applied.applied_at > current.applied_at {
+                        *current = applied.clone();
+                    }
+                })
+                .or_insert(applied);
+        }
         let mut guidance_by_run_id =
             std::collections::HashMap::<Uuid, Vec<AgentRunQueuedGuidance>>::new();
-        for guidance in self.list_agent_run_guidance()? {
+        for mut guidance in self.list_agent_run_guidance()? {
+            guidance.applied_at = applied_by_guidance_id
+                .remove(&guidance.id)
+                .filter(|applied| applied.run_id == guidance.run_id)
+                .map(|applied| applied.applied_at);
             guidance_by_run_id
                 .entry(guidance.run_id)
                 .or_default()
@@ -410,6 +951,62 @@ impl EventStore {
                     }
                 })
                 .or_insert(claim);
+        }
+
+        let mut recovery_count_by_run_id = std::collections::HashMap::<Uuid, usize>::new();
+        let mut recovery_by_run_id = std::collections::HashMap::<Uuid, AgentRunRecovery>::new();
+        for recovery in self.list_agent_run_recoveries()? {
+            *recovery_count_by_run_id.entry(recovery.run_id).or_default() += 1;
+            recovery_by_run_id
+                .entry(recovery.run_id)
+                .and_modify(|current| {
+                    if recovery.recovered_at > current.recovered_at {
+                        *current = recovery.clone();
+                    }
+                })
+                .or_insert(recovery);
+        }
+
+        let mut execution_context_by_run_id =
+            std::collections::HashMap::<Uuid, AgentRunExecutionContext>::new();
+        for context in self.list_agent_run_execution_contexts()? {
+            execution_context_by_run_id
+                .entry(context.run_id)
+                .and_modify(|current| {
+                    if context.recorded_at > current.recorded_at {
+                        *current = context.clone();
+                    }
+                })
+                .or_insert(context);
+        }
+
+        let mut continuation_count_by_run_id = std::collections::HashMap::<Uuid, usize>::new();
+        let mut continuation_by_run_id =
+            std::collections::HashMap::<Uuid, AgentRunContinuationQueued>::new();
+        for continuation in self.list_agent_run_continuations()? {
+            *continuation_count_by_run_id
+                .entry(continuation.run_id)
+                .or_default() += 1;
+            continuation_by_run_id
+                .entry(continuation.run_id)
+                .and_modify(|current| {
+                    if continuation.queued_at > current.queued_at {
+                        *current = continuation.clone();
+                    }
+                })
+                .or_insert(continuation);
+        }
+
+        let mut transition_by_run_id = std::collections::HashMap::<Uuid, AgentRunTransition>::new();
+        for transition in self.list_agent_run_transitions()? {
+            transition_by_run_id
+                .entry(transition.run_id)
+                .and_modify(|current| {
+                    if transition.transitioned_at > current.transitioned_at {
+                        *current = transition.clone();
+                    }
+                })
+                .or_insert(transition);
         }
 
         let mut finish_by_run_id = std::collections::HashMap::<Uuid, AgentRunFinish>::new();
@@ -450,15 +1047,56 @@ impl EventStore {
                 let queued_guidance = guidance_by_run_id.remove(&start.id).unwrap_or_default();
                 let latest_cancel = cancel_by_run_id.remove(&start.id);
                 let latest_claim = claim_by_run_id.remove(&start.id);
+                let latest_recovery = recovery_by_run_id.remove(&start.id);
+                let recovery_count = recovery_count_by_run_id.remove(&start.id).unwrap_or(0);
+                let execution_context = execution_context_by_run_id.remove(&start.id);
+                let latest_continuation = continuation_by_run_id.remove(&start.id);
+                let continuation_count =
+                    continuation_count_by_run_id.remove(&start.id).unwrap_or(0);
+                let latest_transition = transition_by_run_id.remove(&start.id);
                 let latest_finish = finish_by_run_id.remove(&start.id);
                 let steps = steps_by_run_id.remove(&start.id).unwrap_or_default();
                 let artifacts = artifacts_by_run_id.remove(&start.id).unwrap_or_default();
                 let mut updated_at = start.started_at;
+                let latest_claim_at = latest_claim.as_ref().map(|claim| claim.claimed_at);
+                let latest_recovery_at = latest_recovery
+                    .as_ref()
+                    .map(|recovery| recovery.recovered_at);
+                let latest_continuation_at = latest_continuation
+                    .as_ref()
+                    .map(|continuation| continuation.queued_at);
+                let latest_queue_at = match (latest_recovery_at, latest_continuation_at) {
+                    (Some(recovered_at), Some(continued_at)) => {
+                        Some(recovered_at.max(continued_at))
+                    }
+                    (Some(recovered_at), None) => Some(recovered_at),
+                    (None, Some(continued_at)) => Some(continued_at),
+                    (None, None) => None,
+                };
+                let latest_transition_at = latest_transition
+                    .as_ref()
+                    .map(|transition| transition.transitioned_at);
+                let transition_is_latest = latest_transition_at.is_some_and(|transitioned_at| {
+                    latest_claim_at.is_none_or(|claimed_at| transitioned_at >= claimed_at)
+                        && latest_queue_at.is_none_or(|queued_at| transitioned_at >= queued_at)
+                });
+                let queue_is_latest = latest_queue_at.is_some_and(|queued_at| {
+                    latest_claim_at.is_none_or(|claimed_at| queued_at >= claimed_at)
+                        && latest_transition_at
+                            .is_none_or(|transitioned_at| queued_at > transitioned_at)
+                });
                 let mut status = latest_finish
                     .as_ref()
                     .map(|finish| finish.status)
                     .unwrap_or_else(|| {
-                        if latest_claim.is_some() {
+                        if transition_is_latest {
+                            latest_transition
+                                .as_ref()
+                                .map(|transition| transition.status)
+                                .unwrap_or(start.initial_status)
+                        } else if queue_is_latest {
+                            AgentRunStatus::Queued
+                        } else if latest_claim.is_some() {
                             AgentRunStatus::Running
                         } else {
                             start.initial_status
@@ -471,12 +1109,41 @@ impl EventStore {
                 let finish_error = latest_finish
                     .as_ref()
                     .and_then(|finish| finish.error.clone());
+                let mut status_reason = if latest_finish.is_none() && transition_is_latest {
+                    latest_transition
+                        .as_ref()
+                        .map(|transition| transition.reason.clone())
+                } else if latest_finish.is_none() && queue_is_latest {
+                    match (&latest_recovery, &latest_continuation) {
+                        (Some(recovery), Some(continuation))
+                            if recovery.recovered_at >= continuation.queued_at =>
+                        {
+                            Some(recovery.reason.clone())
+                        }
+                        (_, Some(continuation)) => Some(continuation.reason.clone()),
+                        (Some(recovery), None) => Some(recovery.reason.clone()),
+                        (None, None) => None,
+                    }
+                } else {
+                    None
+                };
+                let mut waiting_tool_invocation_id =
+                    if latest_finish.is_none() && transition_is_latest {
+                        latest_transition
+                            .as_ref()
+                            .and_then(|transition| transition.tool_invocation_id)
+                    } else {
+                        None
+                    };
 
                 if let Some(finished_at) = finished_at {
                     updated_at = updated_at.max(finished_at);
                 }
                 for guidance in &queued_guidance {
                     updated_at = updated_at.max(guidance.queued_at);
+                    if let Some(applied_at) = guidance.applied_at {
+                        updated_at = updated_at.max(applied_at);
+                    }
                 }
                 for step in &steps {
                     updated_at = updated_at.max(step.recorded_at);
@@ -484,10 +1151,27 @@ impl EventStore {
                 for artifact in &artifacts {
                     updated_at = updated_at.max(artifact.created_at);
                 }
-                let worker_id = latest_claim.as_ref().map(|claim| claim.worker_id.clone());
-                let lease_expires_at = latest_claim.as_ref().map(|claim| claim.lease_expires_at);
+                let active_claim = if queue_is_latest {
+                    None
+                } else {
+                    latest_claim.as_ref()
+                };
+                let worker_id = active_claim.map(|claim| claim.worker_id.clone());
+                let lease_expires_at = active_claim.map(|claim| claim.lease_expires_at);
                 if let Some(claim) = &latest_claim {
                     updated_at = updated_at.max(claim.claimed_at);
+                }
+                if let Some(recovery) = &latest_recovery {
+                    updated_at = updated_at.max(recovery.recovered_at);
+                }
+                if let Some(context) = &execution_context {
+                    updated_at = updated_at.max(context.recorded_at);
+                }
+                if let Some(continuation) = &latest_continuation {
+                    updated_at = updated_at.max(continuation.queued_at);
+                }
+                if let Some(transition) = &latest_transition {
+                    updated_at = updated_at.max(transition.transitioned_at);
                 }
                 let cancel_requested = latest_cancel.is_some();
                 let cancel_reason = latest_cancel.as_ref().map(|cancel| cancel.reason.clone());
@@ -498,6 +1182,8 @@ impl EventStore {
                         Some(AgentRunStatus::Cancelled | AgentRunStatus::Failed)
                     ) {
                         status = AgentRunStatus::CancelRequested;
+                        status_reason = Some(cancel.reason.clone());
+                        waiting_tool_invocation_id = None;
                     }
                 }
 
@@ -505,15 +1191,37 @@ impl EventStore {
                     id: start.id,
                     conversation_id: start.conversation_id,
                     prompt: start.prompt,
+                    execution_prompt: execution_context
+                        .as_ref()
+                        .map(|context| context.execution_prompt.clone()),
+                    execution_context_recorded_at: execution_context
+                        .as_ref()
+                        .map(|context| context.recorded_at),
                     attachment_count: start.attachment_count,
                     status,
                     worker_id,
                     lease_expires_at,
+                    recovery_count,
+                    last_recovered_at: latest_recovery
+                        .as_ref()
+                        .map(|recovery| recovery.recovered_at),
+                    recovery_reason: latest_recovery
+                        .as_ref()
+                        .map(|recovery| recovery.reason.clone()),
+                    continuation_count,
+                    continuation_queued_at: latest_continuation
+                        .as_ref()
+                        .map(|continuation| continuation.queued_at),
+                    continuation_tool_invocation_id: latest_continuation
+                        .as_ref()
+                        .map(|continuation| continuation.tool_invocation_id),
                     queued_guidance,
                     steps,
                     artifacts,
                     cancel_requested,
                     cancel_reason,
+                    status_reason,
+                    waiting_tool_invocation_id,
                     started_at: start.started_at,
                     updated_at,
                     finished_at,
@@ -1845,6 +2553,15 @@ impl EventStore {
             .map(|installation| {
                 let latest_change = latest_change_by_skill_id.remove(&installation.id);
                 let latest_reset = latest_reset_by_skill_id.remove(&installation.id);
+                let entry_available = installation
+                    .entry_content
+                    .as_ref()
+                    .is_some_and(|content| !content.trim().is_empty())
+                    && installation
+                        .entry_sha256
+                        .as_ref()
+                        .is_some_and(|hash| !hash.trim().is_empty());
+                let entry_sha256 = installation.entry_sha256.clone();
                 let mut manifest = installation.manifest;
                 let mut enablement_status = latest_change
                     .as_ref()
@@ -1870,9 +2587,30 @@ impl EventStore {
                     enablement_status,
                     last_audit_note,
                     updated_at,
+                    entry_available,
+                    entry_sha256,
                 })
             })
             .collect()
+    }
+
+    pub fn prepare_skill_activation(
+        &self,
+        skill_id: Uuid,
+        input_summary: String,
+    ) -> EventStoreResult<SkillActivationContext> {
+        let record = self
+            .list_skill_records()?
+            .into_iter()
+            .find(|record| record.id == skill_id)
+            .ok_or_else(|| EventStoreError::NotFound(format!("skill installation {skill_id}")))?;
+        let installation = self
+            .list_skill_installations()?
+            .into_iter()
+            .find(|installation| installation.id == skill_id)
+            .ok_or_else(|| EventStoreError::NotFound(format!("skill installation {skill_id}")))?;
+        SkillActivationContext::for_installation(&record, &installation, input_summary)
+            .map_err(EventStoreError::InvalidState)
     }
 
     pub fn prepare_skill_execution(
@@ -2076,13 +2814,36 @@ impl EventStore {
 
     pub fn list_capability_invocations(&self) -> EventStoreResult<Vec<CapabilityInvocation>> {
         let events = self.list_by_type(CAPABILITY_INVOCATION_RECORDED_EVENT, 100)?;
-        events
-            .into_iter()
-            .map(|event| {
-                serde_json::from_str::<CapabilityInvocation>(&event.payload_json)
-                    .map_err(Into::into)
-            })
-            .collect()
+        let mut seen = std::collections::HashSet::new();
+        let mut invocations = Vec::new();
+        for event in events {
+            let invocation = serde_json::from_str::<CapabilityInvocation>(&event.payload_json)?;
+            if seen.insert(invocation.id) {
+                invocations.push(invocation);
+            }
+        }
+        Ok(invocations)
+    }
+
+    pub fn append_tool_invocation(
+        &self,
+        invocation: &ToolInvocationRecord,
+    ) -> EventStoreResult<()> {
+        let event = KernelEvent::new(TOOL_INVOCATION_RECORDED_EVENT, invocation)?;
+        self.append(&event)
+    }
+
+    pub fn list_tool_invocations(&self) -> EventStoreResult<Vec<ToolInvocationRecord>> {
+        let events = self.list_by_type(TOOL_INVOCATION_RECORDED_EVENT, 500)?;
+        let mut seen = std::collections::HashSet::new();
+        let mut invocations = Vec::new();
+        for event in events {
+            let invocation = serde_json::from_str::<ToolInvocationRecord>(&event.payload_json)?;
+            if seen.insert(invocation.id) {
+                invocations.push(invocation);
+            }
+        }
+        Ok(invocations)
     }
 
     pub fn append_operations_briefing_run(
@@ -2271,6 +3032,9 @@ fn memory_candidate_conflicts_with_record(
     if memory.source_id == Some(candidate.id) {
         return false;
     }
+    if candidate.source_id == Some(memory.id) {
+        return true;
+    }
 
     let candidate_title = normalize_memory_text(&candidate.title);
     let memory_title = normalize_memory_text(&memory.title);
@@ -2302,7 +3066,10 @@ fn capability_grant_state(
         return CapabilityGrantState::NotGranted;
     }
 
-    if capability_risk(request.capability) != RiskLevel::Critical {
+    let risk = capability_risk(request.capability);
+    let one_shot = request.access_mode == crate::kernel::models::AccessMode::AskEveryStep
+        || matches!(risk, RiskLevel::High | RiskLevel::Critical);
+    if !one_shot {
         return CapabilityGrantState::Reusable;
     }
 
@@ -2319,7 +3086,7 @@ fn capability_grant_state(
 
         match invocation.approval_request_id {
             Some(approval_request_id) => approval_request_id == request.id,
-            None => true,
+            None => false,
         }
     });
 
@@ -2333,27 +3100,34 @@ fn capability_grant_state(
 #[cfg(test)]
 mod tests {
     use chrono::{Duration, Utc};
+    use serde_json::json;
     use uuid::Uuid;
 
     use super::{EventStore, EventStoreError, MEMORY_RECORD_LINKED_EVENT};
     use crate::kernel::agent_context::AgentContextReceipt;
     use crate::kernel::agent_run::{
-        AgentRunArtifactRecord, AgentRunCancelRequest, AgentRunFinish, AgentRunQueuedGuidance,
-        AgentRunStart, AgentRunStatus, AgentRunStepRecord, AgentRunStepStatus,
+        AgentRunArtifactRecord, AgentRunCancelRequest, AgentRunClaim, AgentRunContinuationQueued,
+        AgentRunExecutionContext, AgentRunFinish, AgentRunGuidanceApplied, AgentRunQueuedGuidance,
+        AgentRunResourceAccess, AgentRunResourceClaim, AgentRunResourceRelease, AgentRunStart,
+        AgentRunStatus, AgentRunStepRecord, AgentRunStepStatus, AgentRunTransition,
     };
     use crate::kernel::capability::{CapabilityInvocation, CapabilityInvocationStatus};
     use crate::kernel::deepseek::{DeepSeekChatCacheStatus, DeepSeekChatTelemetry};
     use crate::kernel::models::{AccessMode, FoundationState};
     use crate::kernel::models::{
         KernelEvent, MemoryCandidate, MemoryCandidateSource, MemoryCandidateStatus,
-        MemoryLifecycle, MemoryRecord, MemoryRecordLink, MemoryRecordLinkSummary,
-        MemoryRecordSource, MemoryRelationKind, MemoryScope, MemorySearchMatch,
-        MemorySearchMatchSource, MemorySelectedFeedbackKind, MemorySensitivity, MemoryType,
-        TaskRecord,
+        MemoryCandidateSuggestedAction, MemoryLifecycle, MemoryRecord, MemoryRecordLink,
+        MemoryRecordLinkSummary, MemoryRecordSource, MemoryRelationKind, MemoryScope,
+        MemorySearchMatch, MemorySearchMatchSource, MemorySelectedFeedbackKind, MemorySensitivity,
+        MemoryType, TaskRecord,
     };
     use crate::kernel::policy::{
         request_capability_access, CapabilityAccessStatus, CapabilityGrantState, CapabilityKind,
         PermissionAuditEntry, PolicyDecision,
+    };
+    use crate::kernel::tool_runtime::{
+        prepare_tool_execution, ToolEvidence, ToolExecutionRequest, ToolInvocationRecord,
+        ToolVerificationResult, APP_UPDATE_CHECK_TOOL_ID,
     };
     use crate::kernel::work_package::export_work_package;
     use crate::kernel::workflow::WorkflowTemplatePackage;
@@ -2476,6 +3250,58 @@ mod tests {
     }
 
     #[test]
+    fn agent_run_guidance_application_is_durable_without_deleting_guidance_history() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let start = AgentRunStart::queued(
+            "conversation-guidance".to_string(),
+            "Prepare a verified result.".to_string(),
+            0,
+        )
+        .expect("run start is valid");
+        store
+            .append_agent_run_start(&start)
+            .expect("run start appends");
+        let first =
+            AgentRunQueuedGuidance::new(start.id, "Use the latest source only.".to_string())
+                .expect("first guidance is valid");
+        let second = AgentRunQueuedGuidance::new(start.id, "Keep the output concise.".to_string())
+            .expect("second guidance is valid");
+        store
+            .append_agent_run_queued_guidance(&first)
+            .expect("first guidance appends");
+        store
+            .append_agent_run_queued_guidance(&second)
+            .expect("second guidance appends");
+        let applied = AgentRunGuidanceApplied::new(start.id, first.id)
+            .expect("guidance application is valid");
+        store
+            .append_agent_run_guidance_applied(&applied)
+            .expect("guidance application appends");
+
+        let record = store
+            .list_agent_run_records()
+            .expect("run records load")
+            .into_iter()
+            .find(|record| record.id == start.id)
+            .expect("run record exists");
+
+        assert_eq!(record.queued_guidance.len(), 2);
+        assert_eq!(record.queued_guidance[0].id, first.id);
+        assert_eq!(
+            record.queued_guidance[0].applied_at,
+            Some(applied.applied_at)
+        );
+        assert_eq!(record.queued_guidance[1].id, second.id);
+        assert!(record.queued_guidance[1].applied_at.is_none());
+        assert_eq!(
+            store
+                .list_unapplied_agent_run_guidance(start.id)
+                .expect("unapplied guidance loads"),
+            vec![second]
+        );
+    }
+
+    #[test]
     fn agent_run_queue_claims_oldest_pending_and_skips_cancel_requested() {
         let store = EventStore::open_memory().expect("memory store opens");
         let first = AgentRunStart::queued(
@@ -2557,6 +3383,221 @@ mod tests {
     }
 
     #[test]
+    fn agent_run_expired_lease_is_recovered_once_and_claimed_by_a_new_worker() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let start = AgentRunStart::queued(
+            "conversation-recovery".to_string(),
+            "Continue after a desktop restart.".to_string(),
+            0,
+        )
+        .expect("run is valid");
+        store.append_agent_run_start(&start).expect("run appends");
+        let expired_at = Utc::now() - Duration::seconds(5);
+        store
+            .append_agent_run_claim(&AgentRunClaim {
+                id: Uuid::new_v4(),
+                run_id: start.id,
+                worker_id: "worker-before-restart".to_string(),
+                claimed_at: expired_at - Duration::seconds(30),
+                lease_expires_at: expired_at,
+            })
+            .expect("expired claim appends");
+
+        let claimed = store
+            .claim_next_agent_run("worker-after-restart".to_string(), 30)
+            .expect("recovery claim succeeds")
+            .expect("expired run is reclaimed");
+
+        assert_eq!(claimed.id, start.id);
+        assert_eq!(claimed.status, AgentRunStatus::Running);
+        assert_eq!(claimed.worker_id.as_deref(), Some("worker-after-restart"));
+        assert_eq!(claimed.recovery_count, 1);
+        assert!(claimed.last_recovered_at.is_some());
+        assert!(claimed
+            .recovery_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("expired")));
+
+        let sweep = store
+            .recover_expired_agent_runs(Utc::now())
+            .expect("second recovery sweep succeeds");
+        assert_eq!(sweep.recovered, 0);
+        assert_eq!(sweep.blocked, 0);
+        assert_eq!(sweep.cancelled, 0);
+    }
+
+    #[test]
+    fn agent_run_execution_context_is_durable_and_latest_value_is_projected() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let start = AgentRunStart::queued(
+            "conversation-context".to_string(),
+            "Visible user prompt.".to_string(),
+            1,
+        )
+        .expect("run is valid");
+        store.append_agent_run_start(&start).expect("run appends");
+        let first = AgentRunExecutionContext::new(
+            start.id,
+            "Conversation context v1 with attachment evidence.".to_string(),
+        )
+        .expect("first execution context is valid");
+        store
+            .append_agent_run_execution_context(&first)
+            .expect("first execution context appends");
+        let second = AgentRunExecutionContext::new(
+            start.id,
+            "Conversation context v2 after bounded compression.".to_string(),
+        )
+        .expect("second execution context is valid");
+        store
+            .append_agent_run_execution_context(&second)
+            .expect("second execution context appends");
+
+        let record = store
+            .list_agent_run_records()
+            .expect("records load")
+            .into_iter()
+            .find(|record| record.id == start.id)
+            .expect("run exists");
+
+        assert_eq!(
+            record.execution_prompt.as_deref(),
+            Some("Conversation context v2 after bounded compression.")
+        );
+        assert_eq!(
+            record.execution_context_recorded_at,
+            Some(second.recorded_at)
+        );
+    }
+
+    #[test]
+    fn agent_run_active_lease_is_not_recovered_or_claimed() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let start = AgentRunStart::queued(
+            "conversation-active-lease".to_string(),
+            "Keep the active worker isolated.".to_string(),
+            0,
+        )
+        .expect("run is valid");
+        store.append_agent_run_start(&start).expect("run appends");
+        store
+            .claim_agent_run(start.id, "active-worker".to_string(), 120)
+            .expect("run claims");
+
+        let claimed = store
+            .claim_next_agent_run("competing-worker".to_string(), 30)
+            .expect("claim scan succeeds");
+
+        assert!(claimed.is_none());
+        let record = store
+            .list_agent_run_records()
+            .expect("records load")
+            .into_iter()
+            .find(|record| record.id == start.id)
+            .expect("run exists");
+        assert_eq!(record.worker_id.as_deref(), Some("active-worker"));
+        assert_eq!(record.recovery_count, 0);
+    }
+
+    #[test]
+    fn agent_run_expired_lease_with_cancel_request_finishes_cancelled() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let start = AgentRunStart::queued(
+            "conversation-cancel-recovery".to_string(),
+            "Stop this run even if the worker vanished.".to_string(),
+            0,
+        )
+        .expect("run is valid");
+        store.append_agent_run_start(&start).expect("run appends");
+        let expired_at = Utc::now() - Duration::seconds(5);
+        store
+            .append_agent_run_claim(&AgentRunClaim {
+                id: Uuid::new_v4(),
+                run_id: start.id,
+                worker_id: "lost-worker".to_string(),
+                claimed_at: expired_at - Duration::seconds(30),
+                lease_expires_at: expired_at,
+            })
+            .expect("expired claim appends");
+        store
+            .append_agent_run_cancel_request(
+                &AgentRunCancelRequest::new(
+                    start.id,
+                    "User cancelled while the worker was offline.".to_string(),
+                )
+                .expect("cancel request is valid"),
+            )
+            .expect("cancel request appends");
+
+        let sweep = store
+            .recover_expired_agent_runs(Utc::now())
+            .expect("recovery sweep succeeds");
+
+        assert_eq!(sweep.cancelled, 1);
+        let record = store
+            .list_agent_run_records()
+            .expect("records load")
+            .into_iter()
+            .find(|record| record.id == start.id)
+            .expect("run exists");
+        assert_eq!(record.status, AgentRunStatus::Cancelled);
+        assert_eq!(record.recovery_count, 0);
+    }
+
+    #[test]
+    fn agent_run_expired_lease_with_indeterminate_tool_is_blocked_without_replay() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let start = AgentRunStart::queued(
+            "conversation-indeterminate".to_string(),
+            "Do not duplicate an interrupted side effect.".to_string(),
+            0,
+        )
+        .expect("run is valid");
+        store.append_agent_run_start(&start).expect("run appends");
+        let expired_at = Utc::now() - Duration::seconds(5);
+        store
+            .append_agent_run_claim(&AgentRunClaim {
+                id: Uuid::new_v4(),
+                run_id: start.id,
+                worker_id: "lost-worker".to_string(),
+                claimed_at: expired_at - Duration::seconds(30),
+                lease_expires_at: expired_at,
+            })
+            .expect("expired claim appends");
+        let plan = prepare_tool_execution(&ToolExecutionRequest {
+            tool_id: APP_UPDATE_CHECK_TOOL_ID.to_string(),
+            input: json!({}),
+            access_mode: AccessMode::FullAccess,
+            run_id: Some(start.id),
+        })
+        .expect("tool plan prepares");
+        store
+            .append_tool_invocation(&ToolInvocationRecord::running(&plan, None))
+            .expect("running invocation appends");
+
+        let sweep = store
+            .recover_expired_agent_runs(Utc::now())
+            .expect("recovery sweep succeeds");
+
+        assert_eq!(sweep.blocked, 1);
+        assert!(store
+            .claim_next_agent_run("replacement-worker".to_string(), 30)
+            .expect("claim scan succeeds")
+            .is_none());
+        let record = store
+            .list_agent_run_records()
+            .expect("records load")
+            .into_iter()
+            .find(|record| record.id == start.id)
+            .expect("run exists");
+        assert_eq!(record.status, AgentRunStatus::Blocked);
+        assert!(record
+            .status_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("indeterminate")));
+    }
+
+    #[test]
     fn agent_run_records_step_stream_and_artifacts() {
         let store = EventStore::open_memory().expect("memory store opens");
         let start = AgentRunStart::queued(
@@ -2599,6 +3640,268 @@ mod tests {
         assert_eq!(record.steps, vec![step]);
         assert_eq!(record.artifacts, vec![artifact]);
         assert_eq!(record.status, AgentRunStatus::Running);
+    }
+
+    #[test]
+    fn agent_run_transition_projects_waiting_state_and_tool_reference() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let start = AgentRunStart::queued(
+            "conversation-1".to_string(),
+            "Download the approved update in the background.".to_string(),
+            0,
+        )
+        .expect("run is valid");
+        store.append_agent_run_start(&start).expect("run appends");
+        store
+            .claim_agent_run(start.id, "worker-a".to_string(), 30)
+            .expect("run claims");
+        let tool_invocation_id = Uuid::new_v4();
+        let transition = AgentRunTransition::new(
+            start.id,
+            AgentRunStatus::WaitingForConfirmation,
+            "Waiting for local approval before downloading the update.".to_string(),
+            Some(tool_invocation_id),
+        )
+        .expect("transition is valid");
+        store
+            .append_agent_run_transition(&transition)
+            .expect("transition appends");
+
+        let record = store
+            .list_agent_run_records()
+            .expect("records load")
+            .into_iter()
+            .find(|record| record.id == start.id)
+            .expect("record exists");
+
+        assert_eq!(record.status, AgentRunStatus::WaitingForConfirmation);
+        assert_eq!(
+            record.status_reason.as_deref(),
+            Some("Waiting for local approval before downloading the update.")
+        );
+        assert_eq!(record.waiting_tool_invocation_id, Some(tool_invocation_id));
+        assert_eq!(record.updated_at, transition.transitioned_at);
+    }
+
+    #[test]
+    fn agent_run_approved_tool_continuation_requeues_same_run_and_clears_worker_lease() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let start = AgentRunStart::queued(
+            "conversation-continuation".to_string(),
+            "Continue planning after the approved tool succeeds.".to_string(),
+            0,
+        )
+        .expect("run is valid");
+        store.append_agent_run_start(&start).expect("run appends");
+        store
+            .claim_agent_run(start.id, "worker-before-approval".to_string(), 60)
+            .expect("run claims");
+        let plan = prepare_tool_execution(&ToolExecutionRequest {
+            tool_id: APP_UPDATE_CHECK_TOOL_ID.to_string(),
+            input: json!({}),
+            access_mode: AccessMode::FullAccess,
+            run_id: Some(start.id),
+        })
+        .expect("tool plan prepares");
+        let invocation = ToolInvocationRecord::succeeded(
+            &plan,
+            json!({"current_version": "0.1.2", "update_available": false}),
+            vec![ToolEvidence {
+                kind: "release_status".to_string(),
+                reference: "app-update://current".to_string(),
+                summary: "Update status checked.".to_string(),
+            }],
+            ToolVerificationResult::passed("Update status verified."),
+            None,
+            1,
+        )
+        .expect("succeeded invocation is valid");
+        store
+            .append_tool_invocation(&invocation)
+            .expect("succeeded invocation appends");
+        let invocation_id = invocation.id;
+        store
+            .append_agent_run_transition(
+                &AgentRunTransition::new(
+                    start.id,
+                    AgentRunStatus::WaitingForConfirmation,
+                    "Waiting for exact local approval.".to_string(),
+                    Some(invocation_id),
+                )
+                .expect("waiting transition is valid"),
+            )
+            .expect("waiting transition appends");
+        let continuation = AgentRunContinuationQueued::new(
+            start.id,
+            invocation_id,
+            "Approved tool succeeded; continue DeepSeek planning from verified evidence."
+                .to_string(),
+        )
+        .expect("continuation is valid");
+        store
+            .append_agent_run_continuation_queued(&continuation)
+            .expect("continuation appends");
+
+        let record = store
+            .list_agent_run_records()
+            .expect("records load")
+            .into_iter()
+            .find(|record| record.id == start.id)
+            .expect("run exists");
+
+        assert_eq!(record.status, AgentRunStatus::Queued);
+        assert!(record.worker_id.is_none());
+        assert!(record.lease_expires_at.is_none());
+        assert!(record.waiting_tool_invocation_id.is_none());
+        assert_eq!(record.continuation_count, 1);
+        assert_eq!(record.continuation_tool_invocation_id, Some(invocation_id));
+        assert_eq!(record.continuation_queued_at, Some(continuation.queued_at));
+    }
+
+    #[test]
+    fn agent_run_resource_write_claim_blocks_conflict_until_release() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let first = AgentRunStart::new(
+            "conversation-1".to_string(),
+            "Download an update.".to_string(),
+            0,
+        )
+        .expect("first run is valid");
+        let second = AgentRunStart::new(
+            "conversation-2".to_string(),
+            "Install an update.".to_string(),
+            0,
+        )
+        .expect("second run is valid");
+        store
+            .append_agent_run_start(&first)
+            .expect("first run appends");
+        store
+            .append_agent_run_start(&second)
+            .expect("second run appends");
+
+        let first_claim = store
+            .claim_agent_run_resource(
+                AgentRunResourceClaim::new(
+                    first.id,
+                    Uuid::new_v4(),
+                    "app_update://installer".to_string(),
+                    AgentRunResourceAccess::Write,
+                    30,
+                )
+                .expect("first claim is valid"),
+            )
+            .expect("first claim succeeds");
+        let second_claim = AgentRunResourceClaim::new(
+            second.id,
+            Uuid::new_v4(),
+            "app_update://installer".to_string(),
+            AgentRunResourceAccess::Write,
+            30,
+        )
+        .expect("second claim is valid");
+
+        let conflict = store.claim_agent_run_resource(second_claim.clone());
+        assert!(matches!(conflict, Err(EventStoreError::InvalidState(_))));
+
+        let release = AgentRunResourceRelease::new(
+            &first_claim,
+            "verified tool execution completed".to_string(),
+        )
+        .expect("release is valid");
+        store
+            .append_agent_run_resource_release(&release)
+            .expect("release appends");
+
+        let claimed = store
+            .claim_agent_run_resource(second_claim.clone())
+            .expect("second claim succeeds after release");
+        assert_eq!(claimed, second_claim);
+        assert_eq!(
+            store
+                .list_active_agent_run_resource_claims()
+                .expect("active claims load"),
+            vec![second_claim]
+        );
+    }
+
+    #[test]
+    fn agent_run_heartbeat_renews_worker_and_resource_leases() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let start = AgentRunStart::queued(
+            "conversation-heartbeat".to_string(),
+            "Run a long verified workspace mutation.".to_string(),
+            0,
+        )
+        .expect("run is valid");
+        store.append_agent_run_start(&start).expect("run appends");
+        let claimed = store
+            .claim_agent_run(start.id, "worker-heartbeat".to_string(), 1)
+            .expect("run claim succeeds");
+        let invocation_id = Uuid::new_v4();
+        let resource = store
+            .claim_agent_run_resource(
+                AgentRunResourceClaim::new(
+                    start.id,
+                    invocation_id,
+                    "workspace://mutation".to_string(),
+                    AgentRunResourceAccess::Write,
+                    1,
+                )
+                .expect("resource claim is valid"),
+            )
+            .expect("resource claim succeeds");
+
+        let wrong_worker =
+            store.heartbeat_agent_run_lease(start.id, "worker-other".to_string(), 60);
+        assert!(matches!(
+            wrong_worker,
+            Err(EventStoreError::InvalidState(_))
+        ));
+
+        let renewed = store
+            .heartbeat_agent_run_lease(start.id, "worker-heartbeat".to_string(), 60)
+            .expect("owning worker renews the run");
+        let active_resources = store
+            .list_active_agent_run_resource_claims()
+            .expect("active resources load");
+
+        assert_eq!(renewed.worker_id.as_deref(), Some("worker-heartbeat"));
+        assert!(renewed.lease_expires_at > claimed.lease_expires_at);
+        assert_eq!(active_resources.len(), 1);
+        assert_eq!(active_resources[0].tool_invocation_id, invocation_id);
+        assert!(active_resources[0].lease_expires_at > resource.lease_expires_at);
+
+        let sweep = store
+            .recover_expired_agent_runs(
+                claimed
+                    .lease_expires_at
+                    .expect("original worker lease exists")
+                    + Duration::seconds(1),
+            )
+            .expect("recovery sweep succeeds");
+        assert_eq!(sweep, Default::default());
+        assert_eq!(
+            store
+                .list_agent_run_records()
+                .expect("runs load after recovery boundary")
+                .into_iter()
+                .find(|record| record.id == start.id)
+                .expect("run exists")
+                .status,
+            AgentRunStatus::Running
+        );
+
+        store
+            .release_agent_run_resources_for_invocation(
+                invocation_id,
+                "verified long-running tool completed".to_string(),
+            )
+            .expect("all renewed resource claims release");
+        assert!(store
+            .list_active_agent_run_resource_claims()
+            .expect("active resources load after release")
+            .is_empty());
     }
 
     #[test]
@@ -4471,6 +5774,36 @@ mod tests {
     }
 
     #[test]
+    fn memory_candidate_source_id_keeps_a_rewritten_update_bound_to_its_target() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let task = TaskRecord::new(
+            "Previous workflow wording".to_string(),
+            "Use the previous workflow instructions.".to_string(),
+        )
+        .expect("task is valid");
+        let memory = MemoryRecord::from_task_record(&task);
+        let mut candidate = MemoryCandidate::new(
+            "Replacement operating principle".to_string(),
+            "A fully rewritten instruction with no shared phrasing.".to_string(),
+            MemoryCandidateSource::Manual,
+            Some(memory.id),
+            "Model-assisted maintenance rewrite.".to_string(),
+        )
+        .expect("candidate is valid");
+        candidate.suggested_action = MemoryCandidateSuggestedAction::Update;
+
+        store.append_memory_record(&memory).expect("memory appends");
+        store
+            .append_memory_candidate(&candidate)
+            .expect("candidate appends");
+        let records = store
+            .list_memory_candidate_records()
+            .expect("candidates load");
+
+        assert_eq!(records[0].conflicting_memory_ids, vec![memory.id]);
+    }
+
+    #[test]
     fn memory_candidate_conflicts_ignore_deleted_memories() {
         let store = EventStore::open_memory().expect("memory store opens");
         let task = TaskRecord::new(
@@ -4925,6 +6258,40 @@ mod tests {
     }
 
     #[test]
+    fn appends_and_lists_verified_tool_invocations() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let plan = prepare_tool_execution(&ToolExecutionRequest {
+            tool_id: APP_UPDATE_CHECK_TOOL_ID.to_string(),
+            input: json!({}),
+            access_mode: AccessMode::AskOnRisk,
+            run_id: None,
+        })
+        .expect("tool execution plan");
+        let invocation = ToolInvocationRecord::succeeded(
+            &plan,
+            json!({"current_version": "0.1.2", "update_available": false}),
+            vec![ToolEvidence {
+                kind: "release_status".to_string(),
+                reference: "github:Lee-take/deepseek-agent-os/releases".to_string(),
+                summary: "Release status was parsed.".to_string(),
+            }],
+            ToolVerificationResult::passed("release status verified"),
+            None,
+            18,
+        )
+        .expect("verified tool invocation");
+
+        store
+            .append_tool_invocation(&invocation)
+            .expect("tool invocation appends");
+        let invocations = store
+            .list_tool_invocations()
+            .expect("tool invocations load");
+
+        assert_eq!(invocations, vec![invocation]);
+    }
+
+    #[test]
     fn appends_and_lists_operations_briefing_runs() {
         let store = EventStore::open_memory().expect("memory store opens");
         let run = OperationsBriefingRun {
@@ -5142,7 +6509,7 @@ mod tests {
                 capability: CapabilityKind::EmailSend,
                 status: CapabilityInvocationStatus::Failed,
                 policy_decision: crate::kernel::policy::PolicyDecision::Ask,
-                approval_request_id: None,
+                approval_request_id: Some(request.id),
                 requested_resource: Some("ops@example.com".to_string()),
                 evidence_ref: Some("ops@example.com".to_string()),
                 requested_url: None,

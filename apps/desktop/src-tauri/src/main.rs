@@ -8,7 +8,7 @@ use commands::{
     capture_computer_screenshot, check_app_update, claim_agent_run_record,
     claim_next_agent_run_record, clear_deepseek_chat_cache, control_computer_boundary,
     create_email_draft_boundary, create_task_record, delete_memory_record, download_app_update,
-    enqueue_agent_run_record, export_operations_briefing_html_report,
+    enqueue_agent_run_record, execute_agent_tool, export_operations_briefing_html_report,
     export_operations_briefing_pdf_report, export_operations_briefing_report, export_work_package,
     finish_agent_run_record, get_agent_soul_profile, get_computer_control_unlock_status,
     get_computer_use_backend_status, get_computer_use_backend_status_for_model,
@@ -17,8 +17,9 @@ use commands::{
     get_model_driven_tool_strategy, get_network_search_route_status,
     get_network_search_route_status_for_model, import_work_package, ingest_evidence_folder,
     install_app_update, install_local_skill_manifest, install_local_skill_zip_package,
-    link_memory_candidate_to_conflicts, link_memory_records, list_agent_context_receipts,
-    list_agent_run_records, list_capability_access_records, list_capability_catalog,
+    install_remote_skill_zip_package, link_memory_candidate_to_conflicts, link_memory_records,
+    list_agent_context_receipts, list_agent_run_records, list_agent_tool_contracts,
+    list_agent_tool_invocations, list_capability_access_records, list_capability_catalog,
     list_capability_invocations, list_deepseek_chat_telemetry, list_memory_candidate_records,
     list_memory_maintenance_reviews, list_memory_records, list_operations_briefing_runs,
     list_pending_capability_access_records, list_permission_audit_entries,
@@ -45,6 +46,45 @@ use kernel::event_store::EventStore;
 use tauri::{image::Image, Manager};
 
 const APP_ICON_BYTES: &[u8] = include_bytes!("../icons/icon.ico");
+#[cfg(windows)]
+const UI_SMOKE_REMOTE_DEBUGGING_PORT_ENV: &str = "DS_AGENT_UI_SMOKE_REMOTE_DEBUGGING_PORT";
+
+#[cfg(windows)]
+fn configure_ui_smoke_remote_debugging(context: &mut tauri::Context<tauri::Wry>) {
+    let Some(arguments) = ui_smoke_browser_arguments(
+        std::env::var(UI_SMOKE_REMOTE_DEBUGGING_PORT_ENV)
+            .ok()
+            .as_deref(),
+    ) else {
+        return;
+    };
+
+    if let Some(window) = context
+        .config_mut()
+        .app
+        .windows
+        .iter_mut()
+        .find(|window| window.label == "main")
+    {
+        window.additional_browser_args = Some(arguments);
+    }
+}
+
+#[cfg(windows)]
+fn ui_smoke_browser_arguments(raw_port: Option<&str>) -> Option<String> {
+    let port = raw_port?.trim().parse::<u16>().ok()?;
+    if port == 0 {
+        return None;
+    }
+
+    Some(format!(
+        "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
+         --autoplay-policy=no-user-gesture-required \
+         --remote-debugging-address=127.0.0.1 \
+         --remote-debugging-port={port} \
+         --remote-allow-origins=*"
+    ))
+}
 
 fn apply_main_window_icon(window: &tauri::WebviewWindow) -> Result<(), Box<dyn std::error::Error>> {
     window.set_icon(Image::from_bytes(APP_ICON_BYTES)?)?;
@@ -147,6 +187,10 @@ fn read_u32_le(bytes: &[u8], offset: usize) -> Option<u32> {
 }
 
 fn main() {
+    let mut context = tauri::generate_context!();
+    #[cfg(windows)]
+    configure_ui_smoke_remote_debugging(&mut context);
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
@@ -164,6 +208,9 @@ fn main() {
             check_app_update,
             download_app_update,
             install_app_update,
+            list_agent_tool_contracts,
+            list_agent_tool_invocations,
+            execute_agent_tool,
             get_deepseek_credential_status,
             get_network_search_route_status,
             get_computer_use_backend_status,
@@ -258,6 +305,7 @@ fn main() {
             verify_skill_source,
             install_local_skill_manifest,
             install_local_skill_zip_package,
+            install_remote_skill_zip_package,
             reset_skill_trust,
             uninstall_skill,
             set_skill_enabled,
@@ -266,13 +314,27 @@ fn main() {
             import_work_package,
             preview_work_package_import
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("failed to run DS Agent desktop app");
 }
 
 #[cfg(test)]
 mod tests {
     use super::{select_ico_resource, APP_ICON_BYTES};
+
+    #[cfg(windows)]
+    use super::ui_smoke_browser_arguments;
+
+    #[cfg(windows)]
+    #[test]
+    fn ui_smoke_remote_debugging_accepts_only_a_local_numeric_port() {
+        let arguments = ui_smoke_browser_arguments(Some("49351")).expect("valid port");
+        assert!(arguments.contains("--remote-debugging-address=127.0.0.1"));
+        assert!(arguments.contains("--remote-debugging-port=49351"));
+        assert!(ui_smoke_browser_arguments(Some("0")).is_none());
+        assert!(ui_smoke_browser_arguments(Some("not-a-port")).is_none());
+        assert!(ui_smoke_browser_arguments(None).is_none());
+    }
 
     #[test]
     fn app_icon_embeds_windows_shell_sizes() {

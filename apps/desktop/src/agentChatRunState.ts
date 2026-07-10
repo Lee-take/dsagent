@@ -1,4 +1,4 @@
-export type AgentChatComposerAction = "send" | "stop" | "send_guidance";
+export type AgentChatComposerAction = "send" | "send_new_task" | "stop" | "send_guidance";
 
 export type AgentChatGuidanceStatus = "idle" | "queued" | "guiding";
 
@@ -7,6 +7,9 @@ export type AgentChatLoopStepState = "done" | "current" | "waiting";
 export type AgentChatRunStatus =
   | "queued"
   | "running"
+  | "waiting_for_prerequisite"
+  | "waiting_for_confirmation"
+  | "blocked"
   | "cancel_requested"
   | "completed"
   | "failed"
@@ -52,7 +55,50 @@ export function agentChatComposerAction(input: {
     return "stop";
   }
 
-  return input.guidanceMode ? "send_guidance" : "send";
+  if (input.guidanceMode) {
+    return "send_guidance";
+  }
+
+  return input.pending ? "send_new_task" : "send";
+}
+
+export function shouldShowAgentStopControl(input: {
+  pending: boolean;
+  composerAction: AgentChatComposerAction;
+}): boolean {
+  return input.pending && input.composerAction !== "stop";
+}
+
+export function hasOpenAgentRunRecords(
+  records: Array<{ status: AgentChatRunStatus }>,
+): boolean {
+  return records.some(
+    (record) =>
+      record.status === "queued" ||
+      record.status === "running" ||
+      record.status === "waiting_for_prerequisite" ||
+      record.status === "waiting_for_confirmation" ||
+      record.status === "blocked" ||
+      record.status === "cancel_requested",
+  );
+}
+
+export function shouldRunDurableAgentWorker(input: {
+  desktopRuntime: boolean;
+  setupNeeded: boolean;
+  workerBusy: boolean;
+  chatPending: boolean;
+  queuedLocalCount: number;
+  credentialReady: boolean;
+}): boolean {
+  return (
+    input.desktopRuntime &&
+    !input.setupNeeded &&
+    !input.workerBusy &&
+    !input.chatPending &&
+    input.queuedLocalCount === 0 &&
+    input.credentialReady
+  );
 }
 
 export function createAgentChatRun(input: {

@@ -2887,6 +2887,9 @@ dd {
 
 .risk.medium,
 .access-status.pending_approval,
+.access-status.waiting_for_confirmation,
+.access-status.waiting_for_prerequisite,
+.access-status.running,
 .access-status.one_shot_available,
 .access-status.pending {
   border-color: color-mix(in srgb, #f1c477 55%, var(--border));
@@ -2898,6 +2901,8 @@ dd {
 .access-status.rejected,
 .access-status.denied,
 .access-status.one_shot_consumed,
+.access-status.blocked,
+.access-status.cancel_requested,
 .access-status.failed {
   border-color: color-mix(in srgb, #f08f8f 55%, var(--border));
   color: #f08f8f;

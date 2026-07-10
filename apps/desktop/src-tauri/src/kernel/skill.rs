@@ -1,10 +1,12 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
 pub const SKILL_MANIFEST_SCHEMA_VERSION: &str = "ds-agent.skill.v1";
 pub const MAX_REMOTE_SKILL_PACKAGE_BYTES: usize = 10 * 1024 * 1024;
+pub const MAX_SKILL_ENTRY_BYTES: usize = 32 * 1024;
 
 #[derive(Debug, Error)]
 pub enum SkillManifestError {
@@ -40,6 +42,9 @@ pub enum SkillManifestError {
 
     #[error("invalid skill package archive: {0}")]
     InvalidPackage(String),
+
+    #[error("skill entry integrity mismatch: expected {expected}, got {actual}")]
+    IntegrityMismatch { expected: String, actual: String },
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -111,6 +116,10 @@ pub struct SkillInstallationRecord {
     pub manifest: SkillManifest,
     pub installed_from: String,
     pub installed_at: DateTime<Utc>,
+    #[serde(default)]
+    pub entry_content: Option<String>,
+    #[serde(default)]
+    pub entry_sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -147,6 +156,10 @@ pub struct SkillRecord {
     pub enablement_status: SkillEnablementStatus,
     pub last_audit_note: Option<String>,
     pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub entry_available: bool,
+    #[serde(default)]
+    pub entry_sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -156,6 +169,24 @@ pub struct SkillPackagePreflight {
     pub blocked_files: Vec<String>,
     pub warnings: Vec<String>,
     pub audit_summary: String,
+    #[serde(skip)]
+    pub entry_content: Option<String>,
+    #[serde(default)]
+    pub entry_sha256: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SkillActivationContext {
+    pub skill_id: Uuid,
+    pub skill_name: String,
+    pub skill_version: String,
+    pub entry_kind: String,
+    pub entry_path: String,
+    pub entry_sha256: String,
+    pub input_summary: String,
+    pub instructions: String,
+    pub capability_summary: String,
+    pub permission_summary: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -174,6 +205,7 @@ pub struct SkillSourceVerification {
 pub enum SkillExecutionStatus {
     Planned,
     Blocked,
+    Activated,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -188,6 +220,14 @@ pub struct SkillExecutionRecord {
     pub execution_plan: String,
     pub blocked_reason: Option<String>,
     pub requested_at: DateTime<Utc>,
+    #[serde(default)]
+    pub tool_invocation_id: Option<Uuid>,
+    #[serde(default)]
+    pub run_id: Option<Uuid>,
+    #[serde(default)]
+    pub evidence_ref: Option<String>,
+    #[serde(default)]
+    pub completed_at: Option<DateTime<Utc>>,
 }
 
 impl SkillManifest {
@@ -263,7 +303,25 @@ impl SkillInstallationRecord {
             manifest,
             installed_from,
             installed_at: Utc::now(),
+            entry_content: None,
+            entry_sha256: None,
         })
+    }
+
+    pub fn from_preflight(
+        preflight: SkillPackagePreflight,
+        installed_from: String,
+    ) -> Result<Self, String> {
+        let entry_content = preflight.entry_content.ok_or_else(|| {
+            "skill package entry content is required for installation".to_string()
+        })?;
+        let entry_sha256 = preflight
+            .entry_sha256
+            .ok_or_else(|| "skill package entry hash is required for installation".to_string())?;
+        let mut installation = Self::new(preflight.manifest, installed_from)?;
+        installation.entry_content = Some(entry_content);
+        installation.entry_sha256 = Some(entry_sha256);
+        Ok(installation)
     }
 }
 
@@ -343,6 +401,8 @@ impl SkillPackagePreflight {
             blocked_files,
             warnings,
             audit_summary,
+            entry_content: None,
+            entry_sha256: None,
         })
     }
 
@@ -373,7 +433,34 @@ impl SkillPackagePreflight {
         }
 
         let manifest_json = manifest_json.ok_or(SkillManifestError::MissingPackageManifest)?;
-        Self::from_manifest_and_files(&manifest_json, &package_files)
+        let mut preflight = Self::from_manifest_and_files(&manifest_json, &package_files)?;
+        let entry_path = normalize_package_path(&preflight.manifest.entry.path);
+        let mut entry_content = None;
+        for index in 0..archive.len() {
+            let mut file = archive
+                .by_index(index)
+                .map_err(|error| SkillManifestError::InvalidPackage(error.to_string()))?;
+            if normalize_package_path(file.name()) != entry_path {
+                continue;
+            }
+            if file.size() > MAX_SKILL_ENTRY_BYTES as u64 {
+                return Err(SkillManifestError::InvalidPackage(format!(
+                    "skill entry is too large: {} bytes",
+                    file.size()
+                )));
+            }
+            let mut value = String::new();
+            file.read_to_string(&mut value)
+                .map_err(|error| SkillManifestError::InvalidPackage(error.to_string()))?;
+            entry_content = Some(value);
+            break;
+        }
+        let entry_content = entry_content.ok_or_else(|| {
+            SkillManifestError::MissingEntryFile(preflight.manifest.entry.path.clone())
+        })?;
+        preflight.entry_sha256 = Some(sha256_hex(entry_content.as_bytes()));
+        preflight.entry_content = Some(entry_content);
+        Ok(preflight)
     }
 
     pub fn from_remote_zip_bytes(
@@ -404,6 +491,22 @@ impl SkillPackagePreflight {
                 "{}:{}",
                 preflight.manifest.source.kind, preflight.manifest.source.url
             )));
+        }
+        let expected_hash = preflight
+            .manifest
+            .source
+            .integrity
+            .as_ref()
+            .map(|integrity| integrity.hash.trim().to_ascii_lowercase())
+            .ok_or(SkillManifestError::MissingIntegrity)?;
+        let actual_hash = preflight.entry_sha256.as_ref().cloned().ok_or_else(|| {
+            SkillManifestError::MissingEntryFile(preflight.manifest.entry.path.clone())
+        })?;
+        if expected_hash != actual_hash {
+            return Err(SkillManifestError::IntegrityMismatch {
+                expected: expected_hash,
+                actual: actual_hash,
+            });
         }
 
         preflight.warnings.push(
@@ -457,6 +560,100 @@ impl SkillExecutionRecord {
             execution_plan,
             blocked_reason,
             requested_at: Utc::now(),
+            tool_invocation_id: None,
+            run_id: None,
+            evidence_ref: None,
+            completed_at: None,
+        })
+    }
+
+    pub fn activated(
+        activation: &SkillActivationContext,
+        tool_invocation_id: Uuid,
+        run_id: Option<Uuid>,
+        evidence_ref: String,
+    ) -> Result<Self, String> {
+        let now = Utc::now();
+        Ok(Self {
+            id: Uuid::new_v4(),
+            skill_id: activation.skill_id,
+            skill_name: activation.skill_name.clone(),
+            status: SkillExecutionStatus::Activated,
+            entry_kind: activation.entry_kind.clone(),
+            entry_path: activation.entry_path.clone(),
+            input_summary: activation.input_summary.clone(),
+            execution_plan: format!(
+                "Activated hash-verified declarative entry {} for the bounded DS Agent loop; subsequent tools remain independently permissioned and verified.",
+                activation.entry_path
+            ),
+            blocked_reason: None,
+            requested_at: now,
+            tool_invocation_id: Some(tool_invocation_id),
+            run_id,
+            evidence_ref: Some(required_string(evidence_ref, "skill activation evidence ref")?),
+            completed_at: Some(now),
+        })
+    }
+}
+
+impl SkillActivationContext {
+    pub fn for_installation(
+        record: &SkillRecord,
+        installation: &SkillInstallationRecord,
+        input_summary: String,
+    ) -> Result<Self, String> {
+        if record.id != installation.id {
+            return Err("skill activation record does not match installation".to_string());
+        }
+        if let Some(reason) = skill_execution_blocked_reason(record) {
+            return Err(reason);
+        }
+        let input_summary = required_string(input_summary, "skill activation input summary")?;
+        let instructions = installation
+            .entry_content
+            .as_ref()
+            .filter(|content| !content.trim().is_empty())
+            .ok_or_else(|| "skill activation requires installed entry content".to_string())?
+            .clone();
+        let entry_sha256 = installation
+            .entry_sha256
+            .as_ref()
+            .filter(|hash| !hash.trim().is_empty())
+            .ok_or_else(|| "skill activation requires an installed entry hash".to_string())?
+            .to_ascii_lowercase();
+        let actual_sha256 = sha256_hex(instructions.as_bytes());
+        if actual_sha256 != entry_sha256 {
+            return Err(format!(
+                "skill entry integrity check failed: expected {entry_sha256}, got {actual_sha256}"
+            ));
+        }
+        let capability_summary = if record.manifest.capabilities.is_empty() {
+            "none".to_string()
+        } else {
+            record.manifest.capabilities.join(", ")
+        };
+        let permission_summary = if record.manifest.permissions.is_empty() {
+            "none".to_string()
+        } else {
+            record
+                .manifest
+                .permissions
+                .iter()
+                .map(|permission| format!("{}:{}", permission.kind, permission.scope))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        Ok(Self {
+            skill_id: record.id,
+            skill_name: record.manifest.name.clone(),
+            skill_version: record.manifest.version.clone(),
+            entry_kind: record.manifest.entry.kind.clone(),
+            entry_path: record.manifest.entry.path.clone(),
+            entry_sha256,
+            input_summary,
+            instructions,
+            capability_summary,
+            permission_summary,
         })
     }
 }
@@ -522,6 +719,10 @@ fn required_string(value: String, field: &'static str) -> Result<String, String>
         return Err(format!("{field} is required"));
     }
     Ok(value)
+}
+
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
 }
 
 fn validate_integrity(source: &SkillSource) -> Result<(), SkillManifestError> {
@@ -733,7 +934,7 @@ mod tests {
         .to_string()
     }
 
-    fn github_manifest_json(source_url: &str) -> String {
+    fn github_manifest_json(source_url: &str, entry_content: &str) -> String {
         serde_json::json!({
             "schema_version": "ds-agent.skill.v1",
             "name": "github-workflow-pack",
@@ -746,7 +947,7 @@ mod tests {
                 "url": source_url,
                 "integrity": {
                     "algorithm": "sha256",
-                    "hash": "8f14e45fceea167a5a36dedd4bea2543"
+                    "hash": sha256_hex(entry_content.as_bytes())
                 }
             },
             "capabilities": ["workflow_template"],
@@ -963,6 +1164,12 @@ mod tests {
                 "README.md".to_string()
             ]
         );
+        assert_eq!(preflight.entry_content.as_deref(), Some("{}"));
+        let expected_entry_sha256 = sha256_hex(b"{}");
+        assert_eq!(
+            preflight.entry_sha256.as_deref(),
+            Some(expected_entry_sha256.as_str())
+        );
     }
 
     #[test]
@@ -982,9 +1189,13 @@ mod tests {
     #[test]
     fn remote_package_preflight_accepts_verified_github_zip_without_installing() {
         let source_url = "https://github.com/example/ds-agent-skills/releases/download/v1.2.3/github-workflow-pack.zip";
+        let entry_content = "{}";
         let zip_bytes = skill_zip_bytes(vec![
-            ("skill.json", github_manifest_json(source_url)),
-            ("workflow.json", "{}".to_string()),
+            (
+                "skill.json",
+                github_manifest_json(source_url, entry_content),
+            ),
+            ("workflow.json", entry_content.to_string()),
             ("README.md", "safe remote declarative skill".to_string()),
         ]);
 
@@ -999,16 +1210,32 @@ mod tests {
     }
 
     #[test]
+    fn remote_package_preflight_rejects_tampered_entry_content() {
+        let source_url = "https://github.com/example/ds-agent-skills/releases/download/v1.2.3/github-workflow-pack.zip";
+        let zip_bytes = skill_zip_bytes(vec![
+            ("skill.json", github_manifest_json(source_url, "{}")),
+            ("workflow.json", "{\"tampered\":true}".to_string()),
+        ]);
+
+        let error = SkillPackagePreflight::from_remote_zip_bytes(source_url, &zip_bytes)
+            .expect_err("tampered entry is rejected");
+
+        assert!(error.to_string().contains("integrity mismatch"));
+    }
+
+    #[test]
     fn remote_package_preflight_rejects_manifest_source_mismatch() {
         let source_url = "https://github.com/example/ds-agent-skills/releases/download/v1.2.3/github-workflow-pack.zip";
+        let entry_content = "{}";
         let zip_bytes = skill_zip_bytes(vec![
             (
                 "skill.json",
                 github_manifest_json(
                     "https://github.com/example/other/releases/download/v1.0.0/other.zip",
+                    entry_content,
                 ),
             ),
-            ("workflow.json", "{}".to_string()),
+            ("workflow.json", entry_content.to_string()),
         ]);
 
         let error = SkillPackagePreflight::from_remote_zip_bytes(source_url, &zip_bytes)
@@ -1150,6 +1377,56 @@ mod tests {
                 .map(|record| record.id),
             Some(execution.id)
         );
+    }
+
+    #[test]
+    fn skill_activation_loads_only_hash_verified_installed_entry_content() {
+        let store = EventStore::open_memory().expect("store opens");
+        let entry_content = r#"{"steps":[{"tool":"network.search"}]}"#;
+        let zip_bytes = skill_zip_bytes(vec![
+            ("skill.json", safe_manifest_json()),
+            ("workflow.json", entry_content.to_string()),
+        ]);
+        let preflight =
+            SkillPackagePreflight::from_zip_bytes(&zip_bytes).expect("package preflights");
+        let installed =
+            SkillInstallationRecord::from_preflight(preflight, "local verified zip".to_string())
+                .expect("installation retains entry evidence");
+        store
+            .append_skill_installation(&installed)
+            .expect("installation records");
+
+        let activation = store
+            .prepare_skill_activation(
+                installed.id,
+                "Use the workflow to collect public evidence.".to_string(),
+            )
+            .expect("trusted installed entry activates");
+
+        assert_eq!(activation.skill_id, installed.id);
+        assert_eq!(activation.instructions, entry_content);
+        assert_eq!(
+            activation.entry_sha256,
+            sha256_hex(entry_content.as_bytes())
+        );
+        assert_eq!(activation.entry_kind, "declarative_workflow");
+    }
+
+    #[test]
+    fn skill_activation_blocks_manifest_only_installation_without_entry_evidence() {
+        let store = EventStore::open_memory().expect("store opens");
+        let manifest = SkillManifest::from_json(&safe_manifest_json()).expect("manifest validates");
+        let installed =
+            SkillInstallationRecord::new(manifest, "manifest only".to_string()).expect("record");
+        store
+            .append_skill_installation(&installed)
+            .expect("installation records");
+
+        let error = store
+            .prepare_skill_activation(installed.id, "Run it".to_string())
+            .expect_err("entry evidence is required");
+
+        assert!(error.to_string().contains("entry content"));
     }
 
     #[test]

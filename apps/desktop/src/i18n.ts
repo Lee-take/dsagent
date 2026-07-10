@@ -1,5 +1,6 @@
 import type {
   AccessMode,
+  AgentRunStatus,
   CapabilityAccessStatus,
   CapabilityFamily,
   CapabilityGrantState,
@@ -24,6 +25,7 @@ import type {
   MemoryCandidateStatus,
   MemoryType,
   ModelRoute,
+  ToolExecutionStatus,
   NetworkSearchBackend,
   NetworkSearchEvidencePolicy,
   NetworkSearchExecutionMode,
@@ -67,6 +69,7 @@ type TranslationSet = {
     install: string;
     installing: string;
     downloadReady: (version: string) => string;
+    approvalRequired: string;
     downloadFailed: string;
     installStarted: (version: string) => string;
     installFailed: string;
@@ -227,6 +230,7 @@ type TranslationSet = {
     quickDraft: string;
     quickAnalyze: string;
     saveTask: string;
+    queueTask: string;
     stopTask: string;
     queueGuidance: string;
     addAttachment: string;
@@ -287,6 +291,7 @@ type TranslationSet = {
     installManifest: string;
     installZip: string;
     previewRemote: string;
+    installRemote: string;
     installing: string;
     empty: string;
     enable: string;
@@ -334,10 +339,13 @@ type TranslationSet = {
     permissionsAndTools: string;
     routeDetails: string;
     recentRuns: string;
+    recentTools: string;
     queuedRuns: string;
     runStepsLabel: (count: number) => string;
     runArtifactsLabel: (count: number) => string;
     workerLabel: (worker: string) => string;
+    agentRunStatus: Record<AgentRunStatus, string>;
+    toolStatus: Record<ToolExecutionStatus, string>;
     steps: {
       understand: string;
       attachments: string;
@@ -889,6 +897,7 @@ export const translations: Record<Language, TranslationSet> = {
       install: "安装更新",
       installing: "正在更新",
       downloadReady: (version) => `${version} 已下载，点击安装更新`,
+      approvalRequired: "请先在右侧批准此更新步骤，然后再次点击更新。",
       downloadFailed: "更新下载失败",
       installStarted: (version) => `正在静默安装 ${version} 并重启 DS Agent`,
       installFailed: "更新启动失败",
@@ -1127,6 +1136,8 @@ export const translations: Record<Language, TranslationSet> = {
       drive: "本地文件夹",
       terminal: "终端",
       computer_use: "电脑控制",
+      app_update: "应用更新",
+      skill: "Skill",
     },
     capabilityOptions: {
       file_read: "读取文件",
@@ -1143,6 +1154,10 @@ export const translations: Record<Language, TranslationSet> = {
       terminal_write: "写入终端",
       computer_screenshot: "屏幕截图",
       computer_control: "控制电脑",
+      app_update_check: "检查应用更新",
+      app_update_download: "下载应用更新",
+      app_update_install: "安装应用更新",
+      skill_use: "使用声明式 Skill",
     },
     capabilitySummaries: {
       file_read: "读取工作区内经授权的本地文件。",
@@ -1159,6 +1174,10 @@ export const translations: Record<Language, TranslationSet> = {
       terminal_write: "运行可能修改文件或系统状态的命令。",
       computer_screenshot: "截取或检查当前屏幕。",
       computer_control: "执行鼠标和键盘动作，每步审批。",
+      app_update_check: "读取可信发布信息并与当前版本比较。",
+      app_update_download: "把可信安装包下载到隔离的更新目录。",
+      app_update_install: "经明确审批后启动已验证安装包并重启应用。",
+      skill_use: "加载已安装、已启用且通过哈希校验的声明式 Skill 入口。",
     },
     riskOptions: {
       low: "低风险",
@@ -1207,6 +1226,7 @@ export const translations: Record<Language, TranslationSet> = {
       quickDraft: "把这段会议纪要整理成行动项、责任部门、截止时间和风险提示。",
       quickAnalyze: "继续上次的项目，先说明你用了哪些记忆，再给我下一步建议。",
       saveTask: "发送",
+      queueTask: "加入后台队列",
       stopTask: "停止",
       queueGuidance: "补充到当前任务",
       addAttachment: "添加文件",
@@ -1272,10 +1292,11 @@ export const translations: Record<Language, TranslationSet> = {
       operationsDescription: "读取本地证据，调用 DeepSeek 生成可复核的经营管理简报。",
       installedTitle: "本地 Skill Registry",
       manifestPlaceholder: "粘贴 ds-agent.skill.v1 manifest JSON。本版本只登记声明式 skill，不执行脚本或二进制。",
-      remotePackageUrlPlaceholder: "GitHub/Hugging Face skill zip URL（仅预检，不安装）",
+      remotePackageUrlPlaceholder: "GitHub/Hugging Face Skill zip URL",
       installManifest: "安装 manifest",
       installZip: "导入 zip",
       previewRemote: "预检远程包",
+      installRemote: "安装远程包",
       installing: "正在校验",
       empty: "还没有安装本地 skill。",
       enable: "启用",
@@ -1323,10 +1344,29 @@ export const translations: Record<Language, TranslationSet> = {
       permissionsAndTools: "权限与工具",
       routeDetails: "模型与路线详情",
       recentRuns: "最近运行",
+      recentTools: "最近工具执行",
       queuedRuns: "排队中",
       runStepsLabel: (count) => `${count} 个步骤`,
       runArtifactsLabel: (count) => `${count} 个产物`,
       workerLabel: (worker) => `Worker：${worker}`,
+      agentRunStatus: {
+        queued: "排队中",
+        running: "执行中",
+        waiting_for_prerequisite: "等待前置条件",
+        waiting_for_confirmation: "等待确认",
+        blocked: "已阻止",
+        cancel_requested: "正在取消",
+        completed: "已完成",
+        failed: "失败",
+        cancelled: "已取消",
+      },
+      toolStatus: {
+        waiting_for_confirmation: "待批准",
+        running: "执行中",
+        succeeded: "已验证",
+        failed: "失败",
+        blocked: "已阻止",
+      },
       steps: {
         understand: "理解任务",
         attachments: "附件证据",
@@ -1985,6 +2025,7 @@ export const translations: Record<Language, TranslationSet> = {
       install: "Install update",
       installing: "Updating",
       downloadReady: (version) => `${version} downloaded. Click to install.`,
+      approvalRequired: "Approve this update step in the right panel, then click update again.",
       downloadFailed: "Update download failed",
       installStarted: (version) => `Installing ${version} silently and restarting DS Agent`,
       installFailed: "Update failed to start",
@@ -2224,6 +2265,8 @@ export const translations: Record<Language, TranslationSet> = {
       drive: "Drive",
       terminal: "Terminal",
       computer_use: "Computer Use",
+      app_update: "App Update",
+      skill: "Skill",
     },
     capabilityOptions: {
       file_read: "Read files",
@@ -2240,6 +2283,10 @@ export const translations: Record<Language, TranslationSet> = {
       terminal_write: "Write terminal",
       computer_screenshot: "Screenshot",
       computer_control: "Control computer",
+      app_update_check: "Check app update",
+      app_update_download: "Download app update",
+      app_update_install: "Install app update",
+      skill_use: "Use declarative skill",
     },
     capabilitySummaries: {
       file_read: "Read approved local files in the workspace.",
@@ -2256,6 +2303,10 @@ export const translations: Record<Language, TranslationSet> = {
       terminal_write: "Run commands that can change files or system state.",
       computer_screenshot: "Capture or inspect the visible desktop.",
       computer_control: "Use mouse and keyboard actions with per-step approval.",
+      app_update_check: "Read trusted release metadata and compare installed versions.",
+      app_update_download: "Download a trusted installer into the isolated update directory.",
+      app_update_install: "Start a verified installer and restart after explicit approval.",
+      skill_use: "Load an installed, enabled, hash-verified declarative skill entry.",
     },
     riskOptions: {
       low: "Low risk",
@@ -2304,6 +2355,7 @@ export const translations: Record<Language, TranslationSet> = {
       quickDraft: "Turn these meeting notes into actions, owners, deadlines, and risks.",
       quickAnalyze: "Continue the previous project, first explain which memories you used.",
       saveTask: "Send",
+      queueTask: "Queue new task",
       stopTask: "Stop",
       queueGuidance: "Add to current task",
       addAttachment: "Add files",
@@ -2370,10 +2422,11 @@ export const translations: Record<Language, TranslationSet> = {
       installedTitle: "Local Skill Registry",
       manifestPlaceholder:
         "Paste a ds-agent.skill.v1 manifest JSON. This version registers declarative skills only; scripts and binaries are not executed.",
-      remotePackageUrlPlaceholder: "GitHub/Hugging Face skill zip URL (preview only; no install)",
+      remotePackageUrlPlaceholder: "GitHub/Hugging Face Skill zip URL",
       installManifest: "Install manifest",
       installZip: "Import zip",
       previewRemote: "Preview remote",
+      installRemote: "Install remote",
       installing: "Validating",
       empty: "No local skills installed yet.",
       enable: "Enable",
@@ -2424,10 +2477,29 @@ export const translations: Record<Language, TranslationSet> = {
       permissionsAndTools: "Permissions and tools",
       routeDetails: "Model and route details",
       recentRuns: "Recent runs",
+      recentTools: "Recent tool executions",
       queuedRuns: "Queued",
       runStepsLabel: (count: number) => `${count} steps`,
       runArtifactsLabel: (count: number) => `${count} artifacts`,
       workerLabel: (worker: string) => `Worker: ${worker}`,
+      agentRunStatus: {
+        queued: "Queued",
+        running: "Running",
+        waiting_for_prerequisite: "Waiting for prerequisite",
+        waiting_for_confirmation: "Awaiting confirmation",
+        blocked: "Blocked",
+        cancel_requested: "Cancelling",
+        completed: "Completed",
+        failed: "Failed",
+        cancelled: "Cancelled",
+      },
+      toolStatus: {
+        waiting_for_confirmation: "Awaiting approval",
+        running: "Running",
+        succeeded: "Verified",
+        failed: "Failed",
+        blocked: "Blocked",
+      },
       steps: {
         understand: "Understand task",
         attachments: "Attachment evidence",
