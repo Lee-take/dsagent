@@ -18349,7 +18349,7 @@ mod tests {
         store
             .lock()
             .expect("store lock")
-            .claim_agent_run(run.id, "worker-before-restart".to_string(), 1)
+            .claim_agent_run(run.id, "worker-before-restart".to_string(), 30)
             .expect("run claim succeeds");
         let request = ToolExecutionRequest {
             tool_id: FILE_WRITE_TOOL_ID.to_string(),
@@ -18380,7 +18380,7 @@ mod tests {
             &store,
             run.id,
             "worker-before-restart",
-            1,
+            30,
             StdDuration::from_millis(5),
             || {
                 std::thread::sleep(StdDuration::from_millis(20));
