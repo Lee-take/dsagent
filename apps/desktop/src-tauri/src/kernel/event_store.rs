@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 mod artifact;
+mod computer_use;
 mod read_execution;
 mod revocation;
 
@@ -1527,6 +1528,7 @@ impl EventStore {
             "ALTER TABLE automation_runs ADD COLUMN definition_revision INTEGER NOT NULL DEFAULT 0",
         )?;
         artifact::migrate(self)?;
+        computer_use::migrate(self)?;
         revocation::migrate(self)?;
         read_execution::migrate(self)?;
         ensure_sqlite_column(

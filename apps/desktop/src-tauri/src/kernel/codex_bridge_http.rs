@@ -21,6 +21,7 @@ impl CodexBridgeHttpClient {
         let endpoint = normalize_http_endpoint(endpoint)?;
         let client = reqwest::blocking::Client::builder()
             .user_agent("DeepSeek-Agent-OS/0.1.0 external-bridge")
+            .no_proxy()
             .timeout(timeout)
             .build()
             .map_err(|error| format!("local bridge service HTTP client setup failed: {error}"))?;

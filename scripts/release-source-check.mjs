@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
-const expectedVersion = "0.5.0";
+const expectedVersion = "0.8.0";
 const maxSourceFileBytes = 2 * 1024 * 1024;
 const binaryReleaseExtensions = new Set([
   ".appimage",
@@ -47,6 +47,7 @@ const allowedSourceBinaryFiles = new Set([
 const requiredDocs = [
   "README.md",
   "docs/INSTALLATION.md",
+  "docs/RELEASE_NOTES_v0.8.0-rc.1.md",
   "docs/RELEASE_NOTES_v0.5.0.md",
   "docs/RELEASE_NOTES_v0.4.1.md",
   "docs/RELEASE_NOTES_v0.4.0.md",
@@ -70,6 +71,7 @@ const publicReleaseCopyFiles = [
   "apps/desktop/package.json",
   "docs/INSTALLATION.md",
   "docs/OPEN_SOURCE_RELEASE.md",
+  "docs/RELEASE_NOTES_v0.8.0-rc.1.md",
   "docs/RELEASE_NOTES_v0.5.0.md",
   "docs/RELEASE_NOTES_v0.4.1.md",
   "docs/RELEASE_NOTES_v0.4.0.md",
@@ -716,8 +718,8 @@ function checkRequiredDocs() {
       "README.md searchable DSAgent aliases",
     ],
     [
-      "Latest release: [DS Agent v0.5.0]",
-      "README.md latest release link",
+      "Latest prerelease: [DS Agent v0.8.0-rc.1]",
+      "README.md latest prerelease link",
     ],
     [
       "Background Agent runs keep the composer usable while work is queued, claimed, executed, cancelled, and audited.",
@@ -896,7 +898,7 @@ function checkRequiredDocs() {
   }
 
   for (const phrase of [
-    "The current 0.5.0 preview includes the permission loop",
+    "The current 0.8.0 release candidate includes the permission loop",
     "Harness architecture v1",
     "runs through a stable Agent OS Kernel plus Workflow Packs",
     "uses permissioned tool boundaries, source-linked evidence, bounded workflow runs, selective context assembly, and token-efficient DeepSeek routing",
@@ -1755,8 +1757,20 @@ function checkPublicReleaseCopyPositioning() {
   checkTextIncludes(
     "apps/desktop/src-tauri/src/kernel/app_update.rs",
     readText("apps/desktop/src-tauri/src/kernel/app_update.rs"),
-    'APP_UPDATE_CURRENT_RELEASE_TAG: &str = "v0.5.0"',
-    "app updater current release tag v0.5.0",
+    'APP_UPDATE_CURRENT_RELEASE_TAG: &str = "v0.8.0-rc.1"',
+    "app updater current release tag v0.8.0-rc.1",
+  );
+  checkTextIncludesCollapsed(
+    "docs/RELEASE_NOTES_v0.8.0-rc.1.md",
+    readText("docs/RELEASE_NOTES_v0.8.0-rc.1.md"),
+    "Bumps the package, desktop, Tauri and Cargo metadata to `0.8.0`, while the updater identity is `v0.8.0-rc.1`, so installed Windows clients can detect and test this release candidate as newer than `v0.5.0`.",
+    "v0.8.0-rc.1 release notes updater version bump",
+  );
+  checkTextIncludesCollapsed(
+    "docs/RELEASE_NOTES_v0.8.0-rc.1.md",
+    readText("docs/RELEASE_NOTES_v0.8.0-rc.1.md"),
+    "Durable Verified Computer Use",
+    "v0.8.0-rc.1 release notes computer use positioning",
   );
   checkTextIncludesCollapsed(
     "docs/RELEASE_NOTES_v0.5.0.md",

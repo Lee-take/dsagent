@@ -37,6 +37,7 @@ run(["node", "scripts/settings-panel.test.mjs"]);
 run(["node", "scripts/plugin-catalog.test.mjs"]);
 run(["node", "scripts/app-update-flow.test.mjs"]);
 run(["node", "scripts/approval-visibility.test.mjs"]);
+run(["node", "scripts/durable-computer-use-ui.test.mjs"]);
 run(["node", "scripts/memory-candidate-gate.test.mjs"]);
 run(["cargo", "test", "--manifest-path", "apps/desktop/src-tauri/Cargo.toml"]);
 

@@ -3,7 +3,9 @@
 Local-first DeepSeek AI work platform for background tasks, permissioned tools,
 auditable evidence, and verifiable local execution.
 
-Latest release: [DS Agent v0.5.0](https://github.com/Lee-take/dsagent/releases/tag/v0.5.0)
+Latest stable: [DS Agent v0.5.0](https://github.com/Lee-take/dsagent/releases/tag/v0.5.0)
+
+Latest prerelease: [DS Agent v0.8.0-rc.1](https://github.com/Lee-take/dsagent/releases/tag/v0.8.0-rc.1)
 
 Search aliases: DS Agent, DSAgent, dsagent, DeepSeek Agent OS.
 
@@ -204,19 +206,31 @@ engineering inspiration, with respect for their licenses and maintainers.
 本仓库不应复制任何私有、泄露或未授权代码。公开开源项目仅作为学习材料和工程参考，
 并尊重原项目许可证和维护者权益。
 
-## 0.5.0 Status / 0.5.0 状态
+## 0.8.0-rc.1 Status / 0.8.0-rc.1 状态
 
-Version `0.5.0` is the current Windows-first formal release. It adds durable
-Automation state and a reviewable Artifact Engine for Word, Excel, PowerPoint
-and PDF. Office outputs now pass through generation, structure checking, actual
-rendering, bounded revision and delivery, with restart-safe evidence and
-recovery. Provider-neutral connected-account foundations are included, while
-live provider execution remains disabled until explicitly configured.
+Version `0.8.0-rc.1` is the current Windows-first release candidate for update
+testing. It adds Durable Verified Computer Use: DS Agent observes and binds the
+exact window, target, action and approval; revalidates immediately before one
+input effect; captures post-action evidence; and claims success only when a
+deterministic semantic postcondition passes. Restart uncertainty becomes
+`EffectUnknown` and is never replayed automatically. User takeover stops control
+and requires a fresh observation before work can continue.
 
-`0.5.0` 是当前 Windows 优先正式发布版本。它新增了持久化自动化状态，以及可检查的
-Word、Excel、PowerPoint 和 PDF 产物引擎。办公文件会经过生成、结构检查、实际渲染、
-有限修订和交付流程，并保留可恢复、可审计的证据。版本同时包含供应商中立的连接器基础，
-但不会在未经明确配置时连接真实账户。
+`0.8.0-rc.1` 是当前用于升级测试的 Windows 优先候选版本。它新增持久、可验证的
+Computer Use 闭环：DS Agent 绑定准确窗口、目标、动作和批准，执行前再次校验，只产生
+一次输入副作用，随后自动取证，并且只有确定性语义后置条件成立时才声明成功。重启后的
+不确定副作用会进入 `EffectUnknown`，不会自动重放；用户接管会立即停止控制，继续前必须
+重新观察。
+
+## 0.5.0 Historical Status / 0.5.0 历史状态
+
+Version `0.5.0` remains the current stable Windows release. It introduced the
+durable Automation and Artifact Engine foundation. The v0.6 and v0.7 labels were
+internal roadmap milestones already consolidated into v0.5.0; no retroactive
+public tags are created for them.
+
+`0.5.0` 仍是当前 Windows 稳定版本，包含持久化 Automation 和 Artifact Engine 基础。
+v0.6、v0.7 是已合并进入 v0.5.0 的内部路线图里程碑，不会补建公开标签。
 
 ## 0.4.1 Historical Status / 0.4.1 历史状态
 
@@ -373,18 +387,18 @@ release tag 和安装包资产，所以补丁发布必须使用新的公开 tag�
 
 License: Apache-2.0.
 
-The public `v0.0.1` through `v0.4.1` releases remain unchanged. The `v0.5.0`
-release is the current Windows installer line for colleague testing.
+The public `v0.0.1` through `v0.5.0` stable releases remain unchanged.
+`v0.8.0-rc.1` is the current Windows prerelease line for update testing.
 The installer is unsigned, so Windows may show an unknown-publisher warning,
 but the NSIS package is built with the Microsoft WebView2 bootstrapper embedded
 and run silently so ordinary Windows users do not need a developer toolchain.
 
-`v0.5.0` keeps the verifiable Windows Agent foundation: install DS Agent, connect
+`v0.8.0-rc.1` keeps the verifiable Windows Agent foundation: install DS Agent, connect
 DeepSeek through a local environment variable, choose a workspace, keep tasks
 moving in the background, and let a permissioned runtime execute and verify
 local work with evidence.
 
-`v0.5.0` 延续可验证的 Windows Agent 工作：安装 DS Agent，通过本地环境变量连接
+`v0.8.0-rc.1` 延续可验证的 Windows Agent 工作：安装 DS Agent，通过本地环境变量连接
 DeepSeek，选择一个本地工作目录，让任务在后台推进，并由权限化 runtime 执行、留证和
 验证本地工作。
 
@@ -518,6 +532,7 @@ Read first:
 
 - `docs/INSTALLATION.md`
 - `docs/OPEN_SOURCE_RELEASE.md`
+- `docs/RELEASE_NOTES_v0.8.0-rc.1.md`
 - `docs/RELEASE_NOTES_v0.5.0.md`
 - `docs/RELEASE_NOTES_v0.4.1.md`
 - `docs/RELEASE_NOTES_v0.4.0.md`
@@ -654,7 +669,7 @@ npx pnpm@9.15.9 test:windows-installed-ui -- --workflow
 
 Windows builds automatically merge `apps/desktop/src-tauri/tauri.windows.conf.json`
 and produce an NSIS installer under the configured Cargo target directory, for
-example `release/bundle/nsis/DS Agent_0.5.0_x64-setup.exe`. The Windows config
+example `release/bundle/nsis/DS Agent_0.8.0_x64-setup.exe`. The Windows config
 embeds the Microsoft WebView2 bootstrapper and runs it silently during install
 when the target machine needs the WebView2 runtime.
 
@@ -716,7 +731,7 @@ the composer available and enqueue the next Agent run instead of blocking the
 whole workspace. Completed or partially completed results can include one
 short, task-grounded next-better suggestion.
 
-The current 0.5.0 preview includes the permission loop for built-in local tools,
+The current 0.8.0 release candidate includes the permission loop for built-in local tools,
 durable background Agent runs, the generic tool runtime, resource coordination,
 and trusted declarative skill execution.
 Built-in local tools cover file, network, browser, email approval records,

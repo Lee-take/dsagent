@@ -9,6 +9,8 @@ pub mod capability;
 pub mod codex_bridge_contract;
 pub mod codex_bridge_http;
 pub mod computer_use;
+pub mod computer_use_runtime;
+pub mod computer_use_session;
 pub mod connectors;
 pub mod deepseek;
 pub mod deepseek_pricing;

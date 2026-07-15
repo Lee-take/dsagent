@@ -667,6 +667,72 @@ export type ComputerControlUnlockStatus = {
   unlocked_until: string | null;
 };
 
+export type ComputerUseStepStatus =
+  | "observed"
+  | "awaiting_approval"
+  | "ready"
+  | "action_started"
+  | "awaiting_verification"
+  | "verified"
+  | "needs_replan"
+  | "user_taken_over"
+  | "effect_unknown"
+  | "verification_failed"
+  | "cancelled";
+
+export type ComputerUseUndoCapability = "none" | "compensation_required";
+
+export type ComputerUseVerificationOutcome = "verified" | "evidence_only" | "failed";
+
+export type ComputerUseSessionView = {
+  id: string;
+  run_id: string | null;
+  safe_goal_summary: string;
+  active_step_id: string | null;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ComputerUseStepView = {
+  id: string;
+  session_id: string;
+  sequence: number;
+  status: ComputerUseStepStatus;
+  revision: number;
+  pre_observation_fingerprint: string;
+  window_fingerprint: string;
+  target_fingerprint: string | null;
+  pre_semantic_fingerprint: string | null;
+  pre_screenshot_evidence_ref: string;
+  pre_safe_summary: string;
+  action_display: string | null;
+  action_safe_summary: string | null;
+  action_fingerprint: string | null;
+  approval_request_id: string | null;
+  post_observation_fingerprint: string | null;
+  post_semantic_fingerprint: string | null;
+  post_screenshot_evidence_ref: string | null;
+  verification_outcome: ComputerUseVerificationOutcome | null;
+  verification_safe_summary: string | null;
+  undo_capability: ComputerUseUndoCapability;
+  status_reason: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ComputerUseSessionStartResult = {
+  session: ComputerUseSessionView;
+  step: ComputerUseStepView;
+};
+
+export type ComputerUseRunResult = {
+  step: ComputerUseStepView;
+  capability_invocation: CapabilityInvocation | null;
+  execution_summary: string | null;
+  safe_error: string | null;
+};
+
 export type NetworkSearchSourceModelOption = {
   value: NetworkSearchSourceModel;
   label: string;

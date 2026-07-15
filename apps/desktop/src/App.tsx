@@ -94,6 +94,10 @@ import type {
   CapabilityInvocation,
   CapabilityKind,
   ComputerControlUnlockStatus,
+  ComputerUseRunResult,
+  ComputerUseSessionStartResult,
+  ComputerUseSessionView,
+  ComputerUseStepView,
   DeepSeekChatCacheState,
   DeepSeekChatTelemetry,
   DeepSeekPricingState,
@@ -854,6 +858,8 @@ export function App() {
     useState<ComputerUseBackendStatus>(fallbackComputerUseBackendStatus);
   const [computerControlUnlockStatus, setComputerControlUnlockStatus] =
     useState<ComputerControlUnlockStatus>(fallbackComputerControlUnlockStatus);
+  const [computerUseSessions, setComputerUseSessions] = useState<ComputerUseSessionView[]>([]);
+  const [computerUseSteps, setComputerUseSteps] = useState<ComputerUseStepView[]>([]);
   const [modelToolStrategy, setModelToolStrategy] =
     useState<ModelDrivenToolStrategy>(fallbackModelDrivenToolStrategy);
   const [localDirectoryState, setLocalDirectoryState] =
@@ -948,6 +954,9 @@ export function App() {
   const [computerControlTarget, setComputerControlTarget] = useState("");
   const [computerControlAction, setComputerControlAction] = useState("");
   const [computerControlUnlockToken, setComputerControlUnlockToken] = useState("");
+  const [computerUseActionDraft, setComputerUseActionDraft] = useState("type:DS Agent verified");
+  const [lastComputerScreenshotInvocationId, setLastComputerScreenshotInvocationId] =
+    useState<string | null>(null);
   const [setupWorkspaceName, setSetupWorkspaceName] = useState("");
   const [setupWorkspaceDir, setSetupWorkspaceDir] = useState("");
   const [soulProfileDraft, setSoulProfileDraft] = useState("");
@@ -1040,6 +1049,8 @@ export function App() {
   const [computerControlError, setComputerControlError] = useState("");
   const [computerControlUnlockNotice, setComputerControlUnlockNotice] = useState("");
   const [computerControlUnlockError, setComputerControlUnlockError] = useState("");
+  const [computerUseStepNotice, setComputerUseStepNotice] = useState("");
+  const [computerUseStepError, setComputerUseStepError] = useState("");
   const [briefingNotice, setBriefingNotice] = useState("");
   const [briefingError, setBriefingError] = useState("");
   const [memoryFeedbackNotice, setMemoryFeedbackNotice] = useState("");
@@ -1080,6 +1091,7 @@ export function App() {
   const [computerPending, setComputerPending] = useState(false);
   const [computerControlPending, setComputerControlPending] = useState(false);
   const [computerControlUnlockPending, setComputerControlUnlockPending] = useState(false);
+  const [computerUseStepPending, setComputerUseStepPending] = useState(false);
   const [briefingPending, setBriefingPending] = useState(false);
   const [setupPending, setSetupPending] = useState(false);
   const [soulProfilePending, setSoulProfilePending] = useState(false);
@@ -1289,6 +1301,68 @@ export function App() {
     computerControlUnlockStatus.unlocked && computerControlUnlockStatus.unlocked_until
       ? formatTaskDate(computerControlUnlockStatus.unlocked_until, language)
       : "";
+  const activeComputerUseSession = computerUseSessions[0] ?? null;
+  const activeComputerUseStep = activeComputerUseSession
+    ? (computerUseSteps.find((step) => step.id === activeComputerUseSession.active_step_id) ??
+      computerUseSteps[computerUseSteps.length - 1] ??
+      null)
+    : null;
+  const computerUseStepCopy =
+    language === "zh"
+      ? {
+          title: "耐久可验证的电脑操作",
+          empty: "先完成一次已授权截图，再创建隔离记事本步骤。",
+          start: "用本次截图创建步骤",
+          starting: "正在创建…",
+          action: "单次结构化动作",
+          bind: "绑定动作",
+          binding: "正在绑定…",
+          confirmRun: "确认并运行",
+          requesting: "正在请求…",
+          takeover: "我来接管",
+          cancel: "取消步骤",
+          reobserve: "用新截图重新观察",
+          observed: "已观察",
+          awaiting_approval: "等待精确审批",
+          ready: "已就绪",
+          action_started: "动作已开始",
+          awaiting_verification: "等待验证",
+          verified: "已验证",
+          needs_replan: "需要重新规划",
+          user_taken_over: "用户已接管",
+          effect_unknown: "效果未知",
+          verification_failed: "验证失败",
+          cancelled: "已取消",
+          unlockHint: "运行前还需要上方的本地解锁。",
+          screenshotHint: "重新观察前，请先在电脑操作工具中拍摄一张新截图。",
+        }
+      : {
+          title: "Durable verified Computer Use",
+          empty: "Capture one permission-checked screenshot, then create an isolated Notepad step.",
+          start: "Create step from screenshot",
+          starting: "Creating…",
+          action: "One structured action",
+          bind: "Bind action",
+          binding: "Binding…",
+          confirmRun: "Confirm and run",
+          requesting: "Requesting…",
+          takeover: "Take over",
+          cancel: "Cancel step",
+          reobserve: "Re-observe from new screenshot",
+          observed: "Observed",
+          awaiting_approval: "Awaiting exact approval",
+          ready: "Ready",
+          action_started: "Action started",
+          awaiting_verification: "Awaiting verification",
+          verified: "Verified",
+          needs_replan: "Needs replan",
+          user_taken_over: "User took over",
+          effect_unknown: "Effect unknown",
+          verification_failed: "Verification failed",
+          cancelled: "Cancelled",
+          unlockHint: "The local unlock above is also required before execution.",
+          screenshotHint: "Capture a fresh screenshot in Computer Use tools before re-observing.",
+        };
   const deepSeekBalanceStatus = deepSeekBalance
     ? deepSeekBalance.is_available
       ? copy.settingsPanel.balanceAvailable
@@ -1395,6 +1469,10 @@ export function App() {
     void invoke<ComputerControlUnlockStatus>("get_computer_control_unlock_status")
       .then(setComputerControlUnlockStatus)
       .catch(() => setComputerControlUnlockStatus(fallbackComputerControlUnlockStatus));
+    void refreshDurableComputerUseState().catch(() => {
+      setComputerUseSessions([]);
+      setComputerUseSteps([]);
+    });
     void invoke<LocalDirectoryState>("get_local_directory_state")
       .then((directoryState) => {
         setLocalDirectoryState(directoryState);
@@ -2403,6 +2481,22 @@ export function App() {
     setToolInvocations(tools);
   }
 
+  async function refreshDurableComputerUseState() {
+    const sessions = await invoke<ComputerUseSessionView[]>(
+      "list_durable_computer_use_sessions",
+    );
+    setComputerUseSessions(sessions);
+    const session = sessions[0];
+    if (!session) {
+      setComputerUseSteps([]);
+      return;
+    }
+    const steps = await invoke<ComputerUseStepView[]>("list_durable_computer_use_steps", {
+      sessionId: session.id,
+    });
+    setComputerUseSteps(steps);
+  }
+
   const refreshComputerControlUnlockStatus = async () => {
     const unlockStatus = await invoke<ComputerControlUnlockStatus>(
       "get_computer_control_unlock_status",
@@ -3404,6 +3498,7 @@ export function App() {
     setComputerPending(true);
     setComputerError("");
     setComputerNotice("");
+    setLastComputerScreenshotInvocationId(null);
 
     try {
       const invocation = await invoke<CapabilityInvocation>("capture_computer_screenshot", {
@@ -3415,6 +3510,7 @@ export function App() {
       if (invocation.status === "pending_approval") {
         setComputerNotice(copy.computerTool.pendingHint);
       } else if (invocation.status === "succeeded") {
+        setLastComputerScreenshotInvocationId(invocation.id);
         setComputerNotice(copy.computerTool.captured);
       } else {
         setComputerNotice(copy.computerTool.unavailable);
@@ -3423,6 +3519,161 @@ export function App() {
       setComputerError(String(error) || copy.computerTool.failed);
     } finally {
       setComputerPending(false);
+    }
+  };
+
+  const startDurableComputerUseStep = async () => {
+    if (!lastComputerScreenshotInvocationId) {
+      setComputerUseStepError(computerUseStepCopy.empty);
+      return;
+    }
+    setComputerUseStepPending(true);
+    setComputerUseStepError("");
+    setComputerUseStepNotice("");
+    try {
+      const result = await invoke<ComputerUseSessionStartResult>(
+        "start_durable_computer_use_session",
+        {
+          screenshotInvocationId: lastComputerScreenshotInvocationId,
+          runId: null,
+          safeGoalSummary:
+            language === "zh"
+              ? "在隔离的记事本类应用中执行一个可验证动作。"
+              : "Execute one verifiable action in an isolated Notepad-like app.",
+          undoCapability: "none",
+        },
+      );
+      setComputerUseSessions([result.session]);
+      setComputerUseSteps([result.step]);
+      setComputerUseStepNotice(result.step.status_reason ?? computerUseStepCopy.observed);
+    } catch (error) {
+      setComputerUseStepError(String(error) || computerUseStepCopy.empty);
+    } finally {
+      setComputerUseStepPending(false);
+    }
+  };
+
+  const bindDurableComputerUseAction = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!activeComputerUseStep || !computerUseActionDraft.trim()) {
+      return;
+    }
+    setComputerUseStepPending(true);
+    setComputerUseStepError("");
+    setComputerUseStepNotice("");
+    try {
+      const step = await invoke<ComputerUseStepView>("bind_durable_computer_use_action", {
+        stepId: activeComputerUseStep.id,
+        actionContract: computerUseActionDraft.trim(),
+        safeSummary:
+          language === "zh"
+            ? "在隔离的前台编辑器中执行这一项已显示的结构化动作。"
+            : "Execute this displayed structured action in the isolated foreground editor.",
+        postcondition: { kind: "semantic_changed" },
+      });
+      await refreshDurableComputerUseState();
+      setComputerUseStepNotice(step.status_reason ?? computerUseStepCopy.awaiting_approval);
+    } catch (error) {
+      setComputerUseStepError(String(error));
+    } finally {
+      setComputerUseStepPending(false);
+    }
+  };
+
+  const runDurableComputerUseStep = async () => {
+    if (!activeComputerUseStep) {
+      return;
+    }
+    setComputerUseStepPending(true);
+    setComputerUseStepError("");
+    setComputerUseStepNotice("");
+    try {
+      const result = await invoke<ComputerUseRunResult>("run_durable_computer_use_step", {
+        stepId: activeComputerUseStep.id,
+        accessMode: state.access_mode,
+      });
+      await Promise.all([refreshDurableComputerUseState(), refreshCapabilityState()]);
+      if (result.safe_error) {
+        setComputerUseStepError(result.safe_error);
+      } else if (result.capability_invocation?.status === "pending_approval") {
+        setComputerUseStepNotice(
+          language === "zh"
+            ? "精确动作已进入审批队列；批准后再次点击“确认并运行”。"
+            : "The exact action is in the approval queue. Approve it, then confirm and run again.",
+        );
+      } else {
+        setComputerUseStepNotice(result.step.status_reason ?? result.execution_summary ?? "");
+      }
+    } catch (error) {
+      setComputerUseStepError(String(error));
+    } finally {
+      setComputerUseStepPending(false);
+    }
+  };
+
+  const takeOverDurableComputerUseStep = async () => {
+    if (!activeComputerUseStep) {
+      return;
+    }
+    setComputerUseStepPending(true);
+    setComputerUseStepError("");
+    try {
+      const step = await invoke<ComputerUseStepView>("take_over_durable_computer_use_step", {
+        stepId: activeComputerUseStep.id,
+        reason:
+          language === "zh" ? "用户从界面主动接管。" : "User took over from the interface.",
+      });
+      await refreshDurableComputerUseState();
+      setComputerUseStepNotice(step.status_reason ?? computerUseStepCopy.user_taken_over);
+    } catch (error) {
+      setComputerUseStepError(String(error));
+    } finally {
+      setComputerUseStepPending(false);
+    }
+  };
+
+  const cancelDurableComputerUseStep = async () => {
+    if (!activeComputerUseStep) {
+      return;
+    }
+    setComputerUseStepPending(true);
+    setComputerUseStepError("");
+    try {
+      const step = await invoke<ComputerUseStepView>("cancel_durable_computer_use_step", {
+        stepId: activeComputerUseStep.id,
+        reason: language === "zh" ? "用户取消了动作前步骤。" : "User cancelled the pre-action step.",
+      });
+      await refreshDurableComputerUseState();
+      setComputerUseStepNotice(step.status_reason ?? computerUseStepCopy.cancelled);
+    } catch (error) {
+      setComputerUseStepError(String(error));
+    } finally {
+      setComputerUseStepPending(false);
+    }
+  };
+
+  const reobserveDurableComputerUseStep = async () => {
+    if (!activeComputerUseSession || !lastComputerScreenshotInvocationId) {
+      setComputerUseStepError(computerUseStepCopy.screenshotHint);
+      return;
+    }
+    setComputerUseStepPending(true);
+    setComputerUseStepError("");
+    try {
+      const step = await invoke<ComputerUseStepView>(
+        "reobserve_durable_computer_use_session",
+        {
+          sessionId: activeComputerUseSession.id,
+          screenshotInvocationId: lastComputerScreenshotInvocationId,
+          undoCapability: "none",
+        },
+      );
+      await refreshDurableComputerUseState();
+      setComputerUseStepNotice(step.status_reason ?? computerUseStepCopy.observed);
+    } catch (error) {
+      setComputerUseStepError(String(error));
+    } finally {
+      setComputerUseStepPending(false);
     }
   };
 
@@ -7033,12 +7284,169 @@ export function App() {
               </>
             ) : null}
           </div>
-          {shouldShowRunInspector ? (
+          {shouldShowRunInspector || activeComputerUseStep ? (
           <aside className="inspector run-inspector">
             <div className="inspector-header">
               <ClipboardList size={18} aria-hidden="true" />
               <strong>{copy.runStatus.title}</strong>
             </div>
+            {activeComputerUseStep ? (
+              <section className="computer-use-step-panel" aria-labelledby="computer-use-step-title">
+                <header>
+                  <div>
+                    <span>v0.8</span>
+                    <strong id="computer-use-step-title">{computerUseStepCopy.title}</strong>
+                  </div>
+                  <span
+                    className={`computer-use-step-status ${activeComputerUseStep.status}`}
+                    data-status={activeComputerUseStep.status}
+                  >
+                    {computerUseStepCopy[activeComputerUseStep.status]}
+                  </span>
+                </header>
+                <ol className="computer-use-step-timeline" aria-label={computerUseStepCopy.title}>
+                  <li className="complete">
+                    <span>1</span>
+                    <small>{computerUseStepCopy.observed}</small>
+                  </li>
+                  <li
+                    className={
+                      activeComputerUseStep.status === "awaiting_approval" ? "current" : "complete"
+                    }
+                  >
+                    <span>2</span>
+                    <small>{computerUseStepCopy.awaiting_approval}</small>
+                  </li>
+                  <li
+                    className={
+                      ["observed", "awaiting_approval", "ready"].includes(
+                        activeComputerUseStep.status,
+                      )
+                        ? activeComputerUseStep.status === "ready"
+                          ? "current"
+                          : ""
+                        : "complete"
+                    }
+                  >
+                    <span>3</span>
+                    <small>{computerUseStepCopy.action_started}</small>
+                  </li>
+                  <li
+                    className={
+                      activeComputerUseStep.status === "verified"
+                        ? "complete"
+                        : activeComputerUseStep.status === "awaiting_verification"
+                          ? "current"
+                          : ""
+                    }
+                  >
+                    <span>4</span>
+                    <small>{computerUseStepCopy.verified}</small>
+                  </li>
+                </ol>
+                <p>{activeComputerUseStep.status_reason ?? activeComputerUseStep.pre_safe_summary}</p>
+                <dl>
+                  <div>
+                    <dt>Window</dt>
+                    <dd>{activeComputerUseStep.window_fingerprint.slice(0, 12)}</dd>
+                  </div>
+                  <div>
+                    <dt>Target</dt>
+                    <dd>{activeComputerUseStep.target_fingerprint?.slice(0, 12) ?? "—"}</dd>
+                  </div>
+                  <div>
+                    <dt>Undo</dt>
+                    <dd>{activeComputerUseStep.undo_capability}</dd>
+                  </div>
+                </dl>
+                {activeComputerUseStep.action_safe_summary ? (
+                  <div className="computer-use-action-receipt">
+                    <strong>{activeComputerUseStep.action_display}</strong>
+                    <span>{activeComputerUseStep.action_safe_summary}</span>
+                  </div>
+                ) : null}
+                {activeComputerUseStep.status === "observed" ? (
+                  <form onSubmit={bindDurableComputerUseAction}>
+                    <label htmlFor="computer-use-action-draft">{computerUseStepCopy.action}</label>
+                    <input
+                      id="computer-use-action-draft"
+                      value={computerUseActionDraft}
+                      onChange={(event) => setComputerUseActionDraft(event.target.value)}
+                    />
+                    <button type="submit" disabled={computerUseStepPending}>
+                      {computerUseStepPending
+                        ? computerUseStepCopy.binding
+                        : computerUseStepCopy.bind}
+                    </button>
+                  </form>
+                ) : null}
+                {["awaiting_approval", "ready"].includes(activeComputerUseStep.status) ? (
+                  <div className="computer-use-step-actions">
+                    <button
+                      type="button"
+                      disabled={computerUseStepPending || !computerControlUnlockStatus.unlocked}
+                      onClick={() => void runDurableComputerUseStep()}
+                    >
+                      <Play size={14} aria-hidden="true" />
+                      {computerUseStepPending
+                        ? computerUseStepCopy.requesting
+                        : computerUseStepCopy.confirmRun}
+                    </button>
+                    {!computerControlUnlockStatus.unlocked ? (
+                      <small>{computerUseStepCopy.unlockHint}</small>
+                    ) : null}
+                  </div>
+                ) : null}
+                {["awaiting_approval", "ready", "action_started", "awaiting_verification"].includes(
+                  activeComputerUseStep.status,
+                ) ? (
+                  <button
+                    className="computer-use-takeover"
+                    type="button"
+                    disabled={computerUseStepPending}
+                    onClick={() => void takeOverDurableComputerUseStep()}
+                  >
+                    <CircleStop size={14} aria-hidden="true" />
+                    {computerUseStepCopy.takeover}
+                  </button>
+                ) : null}
+                {["needs_replan", "user_taken_over", "verification_failed", "cancelled", "verified"].includes(
+                  activeComputerUseStep.status,
+                ) ? (
+                  <div className="computer-use-step-actions">
+                    <button
+                      type="button"
+                      disabled={computerUseStepPending || !lastComputerScreenshotInvocationId}
+                      onClick={() => void reobserveDurableComputerUseStep()}
+                    >
+                      <RefreshCw size={14} aria-hidden="true" />
+                      {computerUseStepCopy.reobserve}
+                    </button>
+                    {!lastComputerScreenshotInvocationId ? (
+                      <small>{computerUseStepCopy.screenshotHint}</small>
+                    ) : null}
+                  </div>
+                ) : null}
+                {["observed", "awaiting_approval", "ready", "needs_replan", "user_taken_over", "verification_failed"].includes(
+                  activeComputerUseStep.status,
+                ) ? (
+                  <button
+                    className="computer-use-cancel"
+                    type="button"
+                    disabled={computerUseStepPending}
+                    onClick={() => void cancelDurableComputerUseStep()}
+                  >
+                    {computerUseStepCopy.cancel}
+                  </button>
+                ) : null}
+                {computerUseStepNotice ? (
+                  <p className="package-message">{computerUseStepNotice}</p>
+                ) : null}
+                {computerUseStepError ? (
+                  <p className="package-error">{computerUseStepError}</p>
+                ) : null}
+              </section>
+            ) : null}
             <section className="run-status-panel" aria-labelledby="run-status-title">
               <div className={`run-status-callout ${runStatusTone}`}>
                 <span>{copy.runStatus.current}</span>
@@ -7679,6 +8087,18 @@ export function App() {
                     <MousePointerClick size={14} aria-hidden="true" />
                     {computerPending ? copy.computerTool.capturing : copy.computerTool.capture}
                   </button>
+                  {lastComputerScreenshotInvocationId && !activeComputerUseSession ? (
+                    <button
+                      type="button"
+                      disabled={computerUseStepPending}
+                      onClick={() => void startDurableComputerUseStep()}
+                    >
+                      <Play size={14} aria-hidden="true" />
+                      {computerUseStepPending
+                        ? computerUseStepCopy.starting
+                        : computerUseStepCopy.start}
+                    </button>
+                  ) : null}
                 </div>
                 {computerNotice ? <p className="package-message">{computerNotice}</p> : null}
                 {computerError ? <p className="package-error">{computerError}</p> : null}

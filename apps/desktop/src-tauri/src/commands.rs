@@ -33,24 +33,36 @@ use crate::kernel::artifacts::{
 };
 use crate::kernel::attachments::{stage_agent_attachment_paths, AgentAttachment};
 use crate::kernel::capability::{
-    normalize_terminal_read_command, parse_computer_control_action, run_browser_submit_boundary,
-    run_drive_read_boundary, run_drive_write_boundary, run_email_draft_boundary,
-    run_email_read_boundary, run_email_send_boundary, run_evidence_folder_ingest,
-    run_terminal_write_boundary, BrowserPageClient, BrowserSubmitRequest, CapabilityInvocation,
-    CapabilityInvocationStatus, CodexBridgeComputerControlClient,
-    CodexBridgeComputerScreenshotClient, CodexBridgeNetworkSearchClient, ComputerControlClient,
-    ComputerScreenshotClient, DriveReadRequest, DriveWriteExportFile, DriveWriteRequest,
-    EmailDraftRequest, EmailReadRequest, EmailSendRequest, EvidenceFolderClient,
-    EvidenceFolderRequest, FileContentClient, FileSystemMutationClient,
-    FileSystemMutationOperation, FileWriteClient, FileWriteResult, HttpBrowserPageClient,
-    HttpNetworkSearchClient, LocalComputerControlClient, LocalComputerScreenshotClient,
-    LocalDriveFolderClient, LocalEvidenceFolderClient, LocalFileContentClient,
-    LocalFileSystemMutationClient, LocalTerminalReadClient, LocalWorkspaceFileWriteClient,
-    NetworkSearchClient, NetworkSearchResult, NetworkSearchResultItem, TerminalReadClient,
-    TerminalWriteRequest, TERMINAL_READ_DIRECTORY_LIST_PREFIX,
+    computer_control_action_contract_string, normalize_terminal_read_command,
+    parse_computer_control_action, run_browser_submit_boundary, run_drive_read_boundary,
+    run_drive_write_boundary, run_email_draft_boundary, run_email_read_boundary,
+    run_email_send_boundary, run_evidence_folder_ingest, run_terminal_write_boundary,
+    BrowserPageClient, BrowserSubmitRequest, CapabilityInvocation, CapabilityInvocationStatus,
+    CodexBridgeComputerControlClient, CodexBridgeComputerScreenshotClient,
+    CodexBridgeNetworkSearchClient, ComputerControlClient, ComputerScreenshotClient,
+    DriveReadRequest, DriveWriteExportFile, DriveWriteRequest, EmailDraftRequest, EmailReadRequest,
+    EmailSendRequest, EvidenceFolderClient, EvidenceFolderRequest, FileContentClient,
+    FileSystemMutationClient, FileSystemMutationOperation, FileWriteClient, FileWriteResult,
+    HttpBrowserPageClient, HttpNetworkSearchClient, LocalComputerControlClient,
+    LocalComputerScreenshotClient, LocalDriveFolderClient, LocalEvidenceFolderClient,
+    LocalFileContentClient, LocalFileSystemMutationClient, LocalTerminalReadClient,
+    LocalWorkspaceFileWriteClient, NetworkSearchClient, NetworkSearchResult,
+    NetworkSearchResultItem, TerminalReadClient, TerminalWriteRequest,
+    TERMINAL_READ_DIRECTORY_LIST_PREFIX,
 };
 use crate::kernel::computer_use::{
     computer_use_backend_status_for_strategy, ComputerUseBackendStatus,
+};
+use crate::kernel::computer_use_runtime::{
+    accessibility_value_semantic_fingerprint, execute_ready_computer_use_step,
+    take_over_computer_use_step, ComputerUseAccessibilityClient, ComputerUseExecutionPermit,
+    ComputerUseSessionView, ComputerUseStepView, LocalComputerUseAccessibilityClient,
+    RedactedComputerUseState,
+};
+use crate::kernel::computer_use_session::{
+    ComputerUseActionBinding, ComputerUseObservation, ComputerUseObservationPhase,
+    ComputerUsePostcondition, ComputerUseSession, ComputerUseStep, ComputerUseStepStatus,
+    ComputerUseUndoCapability,
 };
 use crate::kernel::connectors::reconciliation::ConnectorReconcilerRegistry;
 use crate::kernel::connectors::runtime_registry::{
@@ -170,6 +182,9 @@ impl AppState {
         event_store: EventStore,
         #[cfg(windows)] connector_vault_root: impl AsRef<Path>,
     ) -> Result<Self, String> {
+        event_store
+            .recover_computer_use_steps_after_restart(Utc::now())
+            .map_err(event_store_error)?;
         Ok(Self {
             event_store: Arc::new(Mutex::new(event_store)),
             connector_registries: Arc::new(ConnectorRuntimeRegistries::empty()),
@@ -233,6 +248,7 @@ impl AppState {
 }
 
 const COMPUTER_CONTROL_UNLOCK_TTL_MINUTES: i64 = 5;
+const COMPUTER_USE_SCREENSHOT_MAX_AGE_SECONDS: i64 = 60;
 const COMPUTER_CONTROL_UNLOCK_CHALLENGE_LENGTH: usize = 6;
 const AGENT_TOOL_LOOP_MAX_ROUNDS: usize = 4;
 const AGENT_RUN_GUIDANCE_MAX_ITEMS_PER_ROUND: usize = 8;
@@ -715,6 +731,27 @@ pub struct ComputerControlUnlockStatus {
     pub unlocked_until: Option<DateTime<Utc>>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ComputerUsePostconditionRequest {
+    SemanticEqualsText { expected_text: String },
+    SemanticChanged,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ComputerUseSessionStartResult {
+    pub session: ComputerUseSessionView,
+    pub step: ComputerUseStepView,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ComputerUseRunResult {
+    pub step: ComputerUseStepView,
+    pub capability_invocation: Option<CapabilityInvocation>,
+    pub execution_summary: Option<String>,
+    pub safe_error: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 struct ComputerControlUnlockState {
     challenge: String,
@@ -740,6 +777,120 @@ enum AgentComputerControlClient {
 struct AgentComputerUseClient {
     screenshot: AgentComputerScreenshotClient,
     control: AgentComputerControlClient,
+}
+
+struct AuthorizedComputerUseControlClient<'a, C> {
+    authorized: Mutex<Option<AuthorizedAgentToolExecution>>,
+    client: &'a C,
+    store: &'a Mutex<EventStore>,
+    step_id: Uuid,
+    invocation: Mutex<Option<ToolInvocationRecord>>,
+}
+
+impl<'a, C> AuthorizedComputerUseControlClient<'a, C> {
+    fn new(
+        authorized: AuthorizedAgentToolExecution,
+        client: &'a C,
+        store: &'a Mutex<EventStore>,
+        step_id: Uuid,
+    ) -> Self {
+        Self {
+            authorized: Mutex::new(Some(authorized)),
+            client,
+            store,
+            step_id,
+            invocation: Mutex::new(None),
+        }
+    }
+
+    fn take_invocation(&self) -> Result<ToolInvocationRecord, String> {
+        self.invocation
+            .lock()
+            .map_err(|_| "computer use invocation receipt lock is unavailable".to_string())?
+            .take()
+            .ok_or_else(|| "computer use control produced no tool invocation receipt".to_string())
+    }
+
+    fn finish_without_execution(&self, reason: String) -> Result<ToolInvocationRecord, String> {
+        let authorized = self
+            .authorized
+            .lock()
+            .map_err(|_| "computer use authorization lock is unavailable".to_string())?
+            .take()
+            .ok_or_else(|| "computer use authorization was already consumed".to_string())?;
+        Ok(ToolInvocationRecord::blocked(&authorized.plan, reason))
+    }
+}
+
+impl<C: ComputerControlClient> ComputerControlClient for AuthorizedComputerUseControlClient<'_, C> {
+    fn execute_control(
+        &self,
+        target: &str,
+        action: &crate::kernel::capability::ComputerControlAction,
+    ) -> Result<crate::kernel::capability::ComputerControlExecution, String> {
+        let authorized = self
+            .authorized
+            .lock()
+            .map_err(|_| "computer use authorization lock is unavailable".to_string())?
+            .take()
+            .ok_or_else(|| "computer use authorization was already consumed".to_string())?;
+        let authorized_target = authorized.plan.request.input["target"]
+            .as_str()
+            .ok_or_else(|| "authorized computer use target is invalid".to_string())?;
+        let authorized_action = authorized.plan.request.input["action"]
+            .as_str()
+            .ok_or_else(|| "authorized computer use action is invalid".to_string())?;
+        if authorized_target != target
+            || parse_computer_control_action(authorized_action)? != *action
+        {
+            return Err(
+                "durable computer use action does not match its exact tool authorization"
+                    .to_string(),
+            );
+        }
+        let current_status = self
+            .store
+            .lock()
+            .map_err(|_| "computer use event store lock is unavailable".to_string())?
+            .get_computer_use_step(self.step_id)
+            .map_err(event_store_error)?
+            .status;
+        if current_status != ComputerUseStepStatus::ActionStarted {
+            let invocation = ToolInvocationRecord::blocked(
+                &authorized.plan,
+                "Durable Computer Use lost its ActionStarted lease before input dispatch.",
+            );
+            *self
+                .invocation
+                .lock()
+                .map_err(|_| "computer use invocation receipt lock is unavailable".to_string())? =
+                Some(invocation);
+            return Err(
+                "computer use stopped because the user took over or the step state changed"
+                    .to_string(),
+            );
+        }
+        let executor = ComputerControlAgentToolExecutor {
+            client: self.client,
+        };
+        let invocation = run_authorized_agent_tool_execution(authorized, &executor);
+        let result = if invocation.status == ToolExecutionStatus::Succeeded {
+            Ok(crate::kernel::capability::ComputerControlExecution {
+                summary: action.audit_summary(),
+            })
+        } else {
+            Err(invocation
+                .error
+                .clone()
+                .unwrap_or_else(|| "authorized computer use control failed".to_string()))
+        };
+        *self
+            .invocation
+            .lock()
+            .map_err(|_| "computer use invocation receipt lock is unavailable".to_string())? =
+            Some(invocation);
+        result
+    }
 }
 
 struct UnavailableAgentComputerUseClient;
@@ -13072,6 +13223,408 @@ pub fn unlock_computer_control(
     unlock_state.unlock(&token, Utc::now())
 }
 
+fn resolved_computer_use_screenshot(
+    store: &EventStore,
+    invocation_id: Uuid,
+) -> Result<(String, DateTime<Utc>), String> {
+    let invocation = store
+        .list_capability_invocations()
+        .map_err(event_store_error)?
+        .into_iter()
+        .find(|invocation| invocation.id == invocation_id)
+        .ok_or_else(|| "computer use screenshot invocation does not exist".to_string())?;
+    if invocation.capability != CapabilityKind::ComputerScreenshot
+        || invocation.status != CapabilityInvocationStatus::Succeeded
+    {
+        return Err(
+            "computer use requires a succeeded, permission-checked screenshot invocation"
+                .to_string(),
+        );
+    }
+    if Utc::now()
+        .signed_duration_since(invocation.created_at)
+        .num_seconds()
+        > COMPUTER_USE_SCREENSHOT_MAX_AGE_SECONDS
+    {
+        return Err(
+            "computer use screenshot is stale; capture a new permission-checked screenshot"
+                .to_string(),
+        );
+    }
+    let evidence_ref = invocation
+        .evidence_ref
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            "computer use screenshot invocation has no local evidence handle".to_string()
+        })?;
+    Ok((evidence_ref, invocation.created_at))
+}
+
+fn computer_use_observation_from_redacted_state(
+    phase: ComputerUseObservationPhase,
+    state: RedactedComputerUseState,
+    screenshot_evidence_ref: String,
+    screenshot_captured_at: DateTime<Utc>,
+) -> Result<ComputerUseObservation, String> {
+    state.validate()?;
+    ComputerUseObservation::new(
+        phase,
+        state.window_fingerprint,
+        state.window_title_fingerprint,
+        Some(state.target_fingerprint),
+        state.semantic_fingerprint,
+        screenshot_evidence_ref,
+        state.safe_summary,
+        Utc::now().max(screenshot_captured_at),
+    )
+}
+
+fn computer_use_postcondition_from_request(
+    request: ComputerUsePostconditionRequest,
+) -> Result<ComputerUsePostcondition, String> {
+    match request {
+        ComputerUsePostconditionRequest::SemanticEqualsText { expected_text } => {
+            Ok(ComputerUsePostcondition::TargetSemanticFingerprintEquals {
+                expected: accessibility_value_semantic_fingerprint(&expected_text)?,
+            })
+        }
+        ComputerUsePostconditionRequest::SemanticChanged => {
+            Ok(ComputerUsePostcondition::TargetSemanticFingerprintChanged)
+        }
+    }
+}
+
+fn durable_computer_use_tool_request(
+    step: &ComputerUseStep,
+    access_mode: AccessMode,
+) -> Result<ToolExecutionRequest, String> {
+    if step.status != ComputerUseStepStatus::AwaitingApproval {
+        return Err(format!(
+            "computer use step in {:?} cannot request exact execution approval",
+            step.status
+        ));
+    }
+    let action = step
+        .action
+        .as_ref()
+        .ok_or_else(|| "computer use step has no exact action to authorize".to_string())?;
+    Ok(ToolExecutionRequest {
+        tool_id: COMPUTER_CONTROL_TOOL_ID.to_string(),
+        input: serde_json::json!({
+            "target": "foreground accessibility target",
+            "action": computer_control_action_contract_string(&action.action),
+            "summary": format!(
+                "Durable Computer Use step {}: {} Automatic post-action screenshot and bounded accessibility verification are included. Action fingerprint {}.",
+                step.id,
+                action.safe_summary,
+                action.action_fingerprint,
+            ),
+        }),
+        access_mode,
+        run_id: None,
+    })
+}
+
+#[tauri::command]
+pub fn start_durable_computer_use_session(
+    screenshot_invocation_id: Uuid,
+    run_id: Option<Uuid>,
+    safe_goal_summary: String,
+    undo_capability: ComputerUseUndoCapability,
+    state: State<'_, AppState>,
+) -> Result<ComputerUseSessionStartResult, String> {
+    let (evidence_ref, screenshot_captured_at) = {
+        let store = state.event_store.lock().map_err(|_| lock_error())?;
+        resolved_computer_use_screenshot(&store, screenshot_invocation_id)?
+    };
+    let accessibility = LocalComputerUseAccessibilityClient;
+    let redacted = accessibility.capture_redacted_state()?;
+    let observation = computer_use_observation_from_redacted_state(
+        ComputerUseObservationPhase::PreAction,
+        redacted,
+        evidence_ref,
+        screenshot_captured_at,
+    )?;
+    let now = observation.captured_at;
+    let mut session = ComputerUseSession::new(run_id, safe_goal_summary, now)?;
+    let step = ComputerUseStep::new_observed(session.id, 1, observation, undo_capability, now)?;
+    {
+        let store = state.event_store.lock().map_err(|_| lock_error())?;
+        store
+            .insert_computer_use_session(&session)
+            .map_err(event_store_error)?;
+        store
+            .insert_computer_use_step(&step)
+            .map_err(event_store_error)?;
+    }
+    session.activate_step(step.id, now)?;
+    Ok(ComputerUseSessionStartResult {
+        session: ComputerUseSessionView::from(&session),
+        step: ComputerUseStepView::from(&step),
+    })
+}
+
+#[tauri::command]
+pub fn reobserve_durable_computer_use_session(
+    session_id: Uuid,
+    screenshot_invocation_id: Uuid,
+    undo_capability: ComputerUseUndoCapability,
+    state: State<'_, AppState>,
+) -> Result<ComputerUseStepView, String> {
+    let (evidence_ref, screenshot_captured_at, sequence) = {
+        let store = state.event_store.lock().map_err(|_| lock_error())?;
+        let (evidence_ref, screenshot_captured_at) =
+            resolved_computer_use_screenshot(&store, screenshot_invocation_id)?;
+        let sequence = store
+            .list_computer_use_steps(session_id)
+            .map_err(event_store_error)?
+            .into_iter()
+            .map(|step| step.sequence)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| "computer use step sequence is exhausted".to_string())?;
+        (evidence_ref, screenshot_captured_at, sequence)
+    };
+    let accessibility = LocalComputerUseAccessibilityClient;
+    let redacted = accessibility.capture_redacted_state()?;
+    let observation = computer_use_observation_from_redacted_state(
+        ComputerUseObservationPhase::PreAction,
+        redacted,
+        evidence_ref,
+        screenshot_captured_at,
+    )?;
+    let step = ComputerUseStep::new_observed(
+        session_id,
+        sequence,
+        observation.clone(),
+        undo_capability,
+        observation.captured_at,
+    )?;
+    let store = state.event_store.lock().map_err(|_| lock_error())?;
+    store
+        .insert_computer_use_step(&step)
+        .map_err(event_store_error)?;
+    Ok(ComputerUseStepView::from(&step))
+}
+
+#[tauri::command]
+pub fn bind_durable_computer_use_action(
+    step_id: Uuid,
+    action_contract: String,
+    safe_summary: String,
+    postcondition: ComputerUsePostconditionRequest,
+    state: State<'_, AppState>,
+) -> Result<ComputerUseStepView, String> {
+    let action = parse_computer_control_action(&action_contract)?;
+    let postcondition = computer_use_postcondition_from_request(postcondition)?;
+    let store = state.event_store.lock().map_err(|_| lock_error())?;
+    let mut step = store
+        .get_computer_use_step(step_id)
+        .map_err(event_store_error)?;
+    let expected_revision = step.revision;
+    let binding =
+        ComputerUseActionBinding::new(&step.pre_observation, action, safe_summary, postcondition)?;
+    step.bind_action(binding, Utc::now())?;
+    store
+        .update_computer_use_step(&step, expected_revision)
+        .map_err(event_store_error)?;
+    Ok(ComputerUseStepView::from(&step))
+}
+
+#[tauri::command]
+pub fn run_durable_computer_use_step(
+    app: AppHandle,
+    step_id: Uuid,
+    access_mode: AccessMode,
+    state: State<'_, AppState>,
+) -> Result<ComputerUseRunResult, String> {
+    {
+        let unlock_state = state
+            .computer_control_unlock
+            .lock()
+            .map_err(|_| computer_control_unlock_lock_error())?;
+        if !unlock_state.is_unlocked(Utc::now()) {
+            return Err("computer use requires local unlock before confirm and run".to_string());
+        }
+    }
+    let step = {
+        let store = state.event_store.lock().map_err(|_| lock_error())?;
+        store
+            .get_computer_use_step(step_id)
+            .map_err(event_store_error)?
+    };
+    let request = durable_computer_use_tool_request(&step, access_mode)?;
+    let authorization = {
+        let store = state.event_store.lock().map_err(|_| lock_error())?;
+        authorize_agent_tool_execution(&store, request)?
+    };
+    let authorized = match authorization {
+        AgentToolAuthorization::Finished(invocation) => {
+            return Ok(ComputerUseRunResult {
+                step: ComputerUseStepView::from(&step),
+                capability_invocation: Some(capability_invocation_from_tool_record(&invocation)),
+                execution_summary: None,
+                safe_error: invocation.error,
+            });
+        }
+        AgentToolAuthorization::Ready(authorized) => authorized,
+    };
+    let approval_request_id = authorized.approval_request_id.ok_or_else(|| {
+        "durable computer use requires an exact one-shot computer.control approval".to_string()
+    })?;
+    let approved_action_fingerprint = step
+        .action
+        .as_ref()
+        .map(|action| action.action_fingerprint.clone())
+        .ok_or_else(|| "computer use step has no exact action".to_string())?;
+    {
+        let store = state.event_store.lock().map_err(|_| lock_error())?;
+        let mut current = store
+            .get_computer_use_step(step_id)
+            .map_err(event_store_error)?;
+        let expected_revision = current.revision;
+        current.approve(
+            approval_request_id,
+            &approved_action_fingerprint,
+            Utc::now(),
+        )?;
+        store
+            .update_computer_use_step(&current, expected_revision)
+            .map_err(event_store_error)?;
+    }
+
+    let app_data_dir = app.path().app_data_dir().map_err(event_store_error)?;
+    let directory_state = load_local_directory_state(&app_data_dir).map_err(event_store_error)?;
+    let screenshot_client = LocalComputerScreenshotClient::new(
+        computer_screenshot_evidence_base_dir(&app_data_dir, &directory_state),
+    );
+    let accessibility_client = LocalComputerUseAccessibilityClient;
+    let control_client = LocalComputerControlClient::new();
+    let authorized_client = AuthorizedComputerUseControlClient::new(
+        authorized,
+        &control_client,
+        state.event_store.as_ref(),
+        step_id,
+    );
+    let execution = execute_ready_computer_use_step(
+        state.event_store.as_ref(),
+        step_id,
+        ComputerUseExecutionPermit {
+            approval_request_id,
+            local_unlock_confirmed: true,
+        },
+        &screenshot_client,
+        &accessibility_client,
+        &authorized_client,
+    );
+    let invocation = match authorized_client.take_invocation() {
+        Ok(invocation) => invocation,
+        Err(_) => authorized_client.finish_without_execution(
+            "Durable Computer Use stopped before sending desktop input.".to_string(),
+        )?,
+    };
+    {
+        let store = state.event_store.lock().map_err(|_| lock_error())?;
+        record_completed_agent_tool_execution(&store, &invocation)?;
+    }
+    let capability_invocation = Some(capability_invocation_from_tool_record(&invocation));
+    match execution {
+        Ok(result) => Ok(ComputerUseRunResult {
+            step: ComputerUseStepView::from(&result.step),
+            capability_invocation,
+            execution_summary: result.execution_summary,
+            safe_error: result.safe_error,
+        }),
+        Err(error) => {
+            let current = {
+                let store = state.event_store.lock().map_err(|_| lock_error())?;
+                store
+                    .get_computer_use_step(step_id)
+                    .map_err(event_store_error)?
+            };
+            Ok(ComputerUseRunResult {
+                step: ComputerUseStepView::from(&current),
+                capability_invocation,
+                execution_summary: None,
+                safe_error: Some(error),
+            })
+        }
+    }
+}
+
+#[tauri::command]
+pub fn take_over_durable_computer_use_step(
+    step_id: Uuid,
+    reason: String,
+    state: State<'_, AppState>,
+) -> Result<ComputerUseStepView, String> {
+    let store = state.event_store.lock().map_err(|_| lock_error())?;
+    let step = take_over_computer_use_step(&store, step_id, reason)?;
+    if let Some(approval_request_id) = step.approval_request_id {
+        if let Some(invocation_id) = store
+            .list_tool_invocations()
+            .map_err(event_store_error)?
+            .into_iter()
+            .find(|invocation| {
+                invocation.tool_id == COMPUTER_CONTROL_TOOL_ID
+                    && invocation.status == ToolExecutionStatus::Running
+                    && invocation.approval_request_id == Some(approval_request_id)
+            })
+            .map(|invocation| invocation.id)
+        {
+            store
+                .release_agent_run_resources_for_invocation(
+                    invocation_id,
+                    "User took over the durable Computer Use step.".to_string(),
+                )
+                .map_err(event_store_error)?;
+        }
+    }
+    Ok(ComputerUseStepView::from(&step))
+}
+
+#[tauri::command]
+pub fn cancel_durable_computer_use_step(
+    step_id: Uuid,
+    reason: String,
+    state: State<'_, AppState>,
+) -> Result<ComputerUseStepView, String> {
+    let store = state.event_store.lock().map_err(|_| lock_error())?;
+    let mut step = store
+        .get_computer_use_step(step_id)
+        .map_err(event_store_error)?;
+    let expected_revision = step.revision;
+    step.cancel(reason, Utc::now())?;
+    store
+        .update_computer_use_step(&step, expected_revision)
+        .map_err(event_store_error)?;
+    Ok(ComputerUseStepView::from(&step))
+}
+
+#[tauri::command]
+pub fn list_durable_computer_use_sessions(
+    state: State<'_, AppState>,
+) -> Result<Vec<ComputerUseSessionView>, String> {
+    let store = state.event_store.lock().map_err(|_| lock_error())?;
+    store
+        .list_computer_use_sessions()
+        .map_err(event_store_error)
+        .map(|sessions| sessions.iter().map(ComputerUseSessionView::from).collect())
+}
+
+#[tauri::command]
+pub fn list_durable_computer_use_steps(
+    session_id: Uuid,
+    state: State<'_, AppState>,
+) -> Result<Vec<ComputerUseStepView>, String> {
+    let store = state.event_store.lock().map_err(|_| lock_error())?;
+    store
+        .list_computer_use_steps(session_id)
+        .map_err(event_store_error)
+        .map(|steps| steps.iter().map(ComputerUseStepView::from).collect())
+}
+
 #[tauri::command]
 pub fn get_network_search_route_status_for_model(
     large_model_provider: LargeModelProvider,
@@ -15558,9 +16111,10 @@ mod tests {
         agent_app_update_tool_request, agent_terminal_read_command_from_target,
         agent_tool_run_id_for_action, apply_agent_local_completion_summary,
         apply_tool_invocation_to_agent_action, authorize_agent_tool_execution,
-        block_agent_run_after_action_resolution, execute_agent_tool_with_executor,
-        finish_agent_run_after_resumed_tool, load_agent_skill_catalog,
-        record_completed_agent_tool_execution,
+        block_agent_run_after_action_resolution, durable_computer_use_tool_request,
+        execute_agent_tool_with_executor, finish_agent_run_after_resumed_tool,
+        load_agent_skill_catalog, record_completed_agent_tool_execution,
+        resolved_computer_use_screenshot,
         run_agent_chat_with_clients_and_api_keys_and_computer_use,
         run_authorized_agent_tool_execution,
         run_queued_agent_chat_with_clients_and_api_keys_and_computer_use,
@@ -15612,13 +16166,17 @@ mod tests {
         AgentRunStepStatus,
     };
     use crate::kernel::capability::{
-        BrowserPage, BrowserPageClient, CapabilityInvocationStatus, ComputerControlAction,
-        ComputerControlClient, ComputerControlExecution, ComputerScreenshot,
+        BrowserPage, BrowserPageClient, CapabilityInvocation, CapabilityInvocationStatus,
+        ComputerControlAction, ComputerControlClient, ComputerControlExecution, ComputerScreenshot,
         ComputerScreenshotClient, EvidenceFolderClient, EvidenceFolderFile, FileContent,
         FileContentClient, FileWriteClient, FileWriteResult, LocalEvidenceFolderClient,
         LocalFileContentClient, LocalFileSystemMutationClient, LocalWorkspaceFileWriteClient,
         NetworkSearchClient, NetworkSearchResult, NetworkSearchResultItem, TerminalCommandOutput,
         TerminalReadClient,
+    };
+    use crate::kernel::computer_use_session::{
+        ComputerUseActionBinding, ComputerUseObservation, ComputerUseObservationPhase,
+        ComputerUsePostcondition, ComputerUseStep, ComputerUseUndoCapability,
     };
     use crate::kernel::deepseek::{
         DeepSeekChatCacheStatus, DeepSeekChatCompletionRequest, DeepSeekChatCompletionResponse,
@@ -17602,6 +18160,108 @@ mod tests {
             .as_deref()
             .is_some_and(|error| error.contains("structured")));
         assert!(client.recorded_calls().is_empty());
+    }
+
+    #[test]
+    fn durable_computer_use_tool_request_is_exact_and_discloses_post_verification() {
+        let now = Utc::now();
+        let pre = ComputerUseObservation::new(
+            ComputerUseObservationPhase::PreAction,
+            "a".repeat(64),
+            "e".repeat(64),
+            Some("b".repeat(64)),
+            Some("c".repeat(64)),
+            "computer-screenshots/pre.png".to_string(),
+            "Isolated editor is foreground and focused.".to_string(),
+            now,
+        )
+        .unwrap();
+        let binding = ComputerUseActionBinding::new(
+            &pre,
+            ComputerControlAction::TypeText {
+                text: "private approved text".to_string(),
+            },
+            "Type the exact approved text into the isolated editor.".to_string(),
+            ComputerUsePostcondition::TargetSemanticFingerprintEquals {
+                expected: "d".repeat(64),
+            },
+        )
+        .unwrap();
+        let action_fingerprint = binding.action_fingerprint.clone();
+        let mut step = ComputerUseStep::new_observed(
+            Uuid::new_v4(),
+            1,
+            pre,
+            ComputerUseUndoCapability::None,
+            now,
+        )
+        .unwrap();
+        step.bind_action(binding, now).unwrap();
+
+        let request = durable_computer_use_tool_request(&step, AccessMode::FullAccess).unwrap();
+        assert_eq!(request.tool_id, COMPUTER_CONTROL_TOOL_ID);
+        assert_eq!(
+            request.input["target"],
+            json!("foreground accessibility target")
+        );
+        assert_eq!(request.input["action"], json!("type:private approved text"));
+        let summary = request.input["summary"].as_str().unwrap();
+        assert!(summary.contains(&action_fingerprint));
+        assert!(summary.contains("Automatic post-action screenshot"));
+    }
+
+    #[test]
+    fn durable_computer_use_accepts_only_recent_succeeded_screenshot_evidence() {
+        let store = EventStore::open_memory().expect("memory store opens");
+        let valid_id = Uuid::new_v4();
+        store
+            .append_capability_invocation(&CapabilityInvocation {
+                id: valid_id,
+                capability: CapabilityKind::ComputerScreenshot,
+                status: CapabilityInvocationStatus::Succeeded,
+                policy_decision: PolicyDecision::Ask,
+                approval_request_id: Some(Uuid::new_v4()),
+                requested_resource: Some("visible desktop screenshot".to_string()),
+                evidence_ref: Some("computer-screenshots/recent.png".to_string()),
+                requested_url: None,
+                evidence_url: None,
+                title: Some("Recent screenshot".to_string()),
+                excerpt: None,
+                warnings: Vec::new(),
+                elapsed_ms: 1,
+                created_at: Utc::now(),
+            })
+            .unwrap();
+        assert_eq!(
+            resolved_computer_use_screenshot(&store, valid_id)
+                .unwrap()
+                .0,
+            "computer-screenshots/recent.png"
+        );
+
+        let stale_id = Uuid::new_v4();
+        store
+            .append_capability_invocation(&CapabilityInvocation {
+                id: stale_id,
+                capability: CapabilityKind::ComputerScreenshot,
+                status: CapabilityInvocationStatus::Succeeded,
+                policy_decision: PolicyDecision::Ask,
+                approval_request_id: Some(Uuid::new_v4()),
+                requested_resource: Some("visible desktop screenshot".to_string()),
+                evidence_ref: Some("computer-screenshots/stale.png".to_string()),
+                requested_url: None,
+                evidence_url: None,
+                title: Some("Stale screenshot".to_string()),
+                excerpt: None,
+                warnings: Vec::new(),
+                elapsed_ms: 1,
+                created_at: Utc::now()
+                    - Duration::seconds(super::COMPUTER_USE_SCREENSHOT_MAX_AGE_SECONDS + 1),
+            })
+            .unwrap();
+        assert!(resolved_computer_use_screenshot(&store, stale_id)
+            .unwrap_err()
+            .contains("stale"));
     }
 
     #[test]

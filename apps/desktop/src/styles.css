@@ -2206,6 +2206,193 @@ button:disabled {
   min-height: 0;
 }
 
+.computer-use-step-panel {
+  display: grid;
+  gap: 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--border));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--surface-accent) 34%, var(--surface-bg));
+  padding: 12px;
+}
+
+.computer-use-step-panel > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.computer-use-step-panel > header > div {
+  display: grid;
+  gap: 3px;
+}
+
+.computer-use-step-panel > header > div > span {
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.computer-use-step-panel > header strong {
+  font-size: 14px;
+  line-height: 1.25;
+}
+
+.computer-use-step-status {
+  border: 1px solid var(--border-active);
+  border-radius: 999px;
+  color: var(--accent);
+  padding: 3px 7px;
+  font-size: 10px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.computer-use-step-status.needs_replan,
+.computer-use-step-status.awaiting_approval,
+.computer-use-step-status.awaiting_verification {
+  border-color: color-mix(in srgb, #f1c477 55%, var(--border));
+  color: #d7a94e;
+}
+
+.computer-use-step-status.effect_unknown,
+.computer-use-step-status.verification_failed {
+  border-color: color-mix(in srgb, #f08f8f 60%, var(--border));
+  color: #e57777;
+}
+
+.computer-use-step-timeline {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.computer-use-step-timeline li {
+  display: grid;
+  justify-items: center;
+  gap: 4px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.computer-use-step-timeline li > span {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.computer-use-step-timeline li.complete > span,
+.computer-use-step-timeline li.current > span {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+  color: var(--accent);
+}
+
+.computer-use-step-timeline li.current > span {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.computer-use-step-timeline small {
+  font-size: 9px;
+  line-height: 1.25;
+}
+
+.computer-use-step-panel > p,
+.computer-use-action-receipt span,
+.computer-use-step-actions small {
+  margin: 0;
+  color: var(--body-text);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.computer-use-step-panel > dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.computer-use-step-panel > dl > div {
+  display: grid;
+  justify-content: initial;
+  gap: 3px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px;
+}
+
+.computer-use-step-panel dt {
+  font-size: 9px;
+  text-transform: uppercase;
+}
+
+.computer-use-step-panel dd {
+  overflow: hidden;
+  font-size: 10px;
+  text-overflow: ellipsis;
+}
+
+.computer-use-action-receipt {
+  display: grid;
+  gap: 3px;
+  border-left: 2px solid var(--accent);
+  padding-left: 8px;
+}
+
+.computer-use-action-receipt strong {
+  font-size: 12px;
+}
+
+.computer-use-step-panel form,
+.computer-use-step-actions {
+  display: grid;
+  gap: 6px;
+}
+
+.computer-use-step-panel label {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.computer-use-step-panel input {
+  width: 100%;
+}
+
+.computer-use-step-panel button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 32px;
+}
+
+.computer-use-takeover,
+.computer-use-cancel {
+  background: transparent;
+}
+
+.computer-use-takeover {
+  border-color: color-mix(in srgb, #f1c477 42%, var(--border));
+}
+
+.computer-use-cancel {
+  color: var(--muted);
+}
+
+:root[data-theme="porcelain"] .computer-use-step-panel {
+  border-color: color-mix(in srgb, var(--porcelain-blue) 40%, var(--border));
+}
+
 .run-status-callout {
   display: grid;
   gap: 7px;

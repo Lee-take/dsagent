@@ -1040,9 +1040,7 @@ impl LocalScreenshotCaptureBackend for XcapLocalScreenshotCaptureBackend {
             .friendly_name()
             .or_else(|_| monitor.name())
             .unwrap_or_else(|_| "Primary display".to_string());
-        let image = monitor
-            .capture_image()
-            .map_err(|error| format!("local screen inspection failed: {error}"))?;
+        let image = capture_primary_display_image(monitor)?;
         let width = image.width();
         let height = image.height();
         let dynamic_image = xcap::image::DynamicImage::ImageRgba8(image);
@@ -1058,6 +1056,196 @@ impl LocalScreenshotCaptureBackend for XcapLocalScreenshotCaptureBackend {
             png_bytes: buffer.into_inner(),
         })
     }
+}
+
+#[cfg(not(windows))]
+fn capture_primary_display_image(
+    monitor: &xcap::Monitor,
+) -> Result<xcap::image::RgbaImage, String> {
+    monitor
+        .capture_image()
+        .map_err(|error| format!("local screen inspection failed: {error}"))
+}
+
+#[cfg(windows)]
+fn capture_primary_display_image(
+    monitor: &xcap::Monitor,
+) -> Result<xcap::image::RgbaImage, String> {
+    match capture_primary_display_with_windows_dxgi() {
+        Ok(image) => Ok(image),
+        Err(dxgi_error) => match monitor.capture_image() {
+            Ok(image) => Ok(image),
+            Err(xcap_error) => capture_primary_display_with_windows_screen_dc(monitor).map_err(
+                |screen_dc_error| {
+                    format!(
+                        "local screen inspection failed: DXGI Desktop Duplication: {dxgi_error}; xcap GDI fallback: {xcap_error}; screen DC fallback: {screen_dc_error}"
+                    )
+                },
+            ),
+        },
+    }
+}
+
+#[cfg(windows)]
+fn capture_primary_display_with_windows_screen_dc(
+    monitor: &xcap::Monitor,
+) -> Result<xcap::image::RgbaImage, String> {
+    use std::ffi::c_void;
+    use std::mem;
+    use windows::Win32::Graphics::Gdi::{
+        BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
+        GetDIBits, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, CAPTUREBLT,
+        DIB_RGB_COLORS, SRCCOPY,
+    };
+
+    let x = monitor
+        .x()
+        .map_err(|error| format!("could not read primary display x coordinate: {error}"))?;
+    let y = monitor
+        .y()
+        .map_err(|error| format!("could not read primary display y coordinate: {error}"))?;
+    let width = monitor
+        .width()
+        .map_err(|error| format!("could not read primary display width: {error}"))?;
+    let height = monitor
+        .height()
+        .map_err(|error| format!("could not read primary display height: {error}"))?;
+    let width_i32 =
+        i32::try_from(width).map_err(|_| "primary display width exceeds GDI limits".to_string())?;
+    let height_i32 = i32::try_from(height)
+        .map_err(|_| "primary display height exceeds GDI limits".to_string())?;
+    if width_i32 <= 0 || height_i32 <= 0 {
+        return Err(format!(
+            "primary display returned invalid dimensions: {width_i32}x{height_i32}"
+        ));
+    }
+    let buffer_len = usize::try_from(width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "primary display pixel buffer size overflowed".to_string())?;
+    let buffer_len_u32 = u32::try_from(buffer_len)
+        .map_err(|_| "primary display pixel buffer exceeds GDI limits".to_string())?;
+
+    unsafe {
+        let screen_dc = GetDC(None);
+        if screen_dc.is_invalid() {
+            return Err("GetDC(NULL) returned an invalid screen device context".to_string());
+        }
+
+        let memory_dc = CreateCompatibleDC(Some(screen_dc));
+        if memory_dc.is_invalid() {
+            ReleaseDC(None, screen_dc);
+            return Err("CreateCompatibleDC returned an invalid device context".to_string());
+        }
+
+        let bitmap = CreateCompatibleBitmap(screen_dc, width_i32, height_i32);
+        if bitmap.is_invalid() {
+            let _ = DeleteDC(memory_dc);
+            ReleaseDC(None, screen_dc);
+            return Err("CreateCompatibleBitmap returned an invalid bitmap".to_string());
+        }
+
+        let previous_object = SelectObject(memory_dc, bitmap.into());
+        if previous_object.is_invalid() {
+            let _ = DeleteObject(bitmap.into());
+            let _ = DeleteDC(memory_dc);
+            ReleaseDC(None, screen_dc);
+            return Err("SelectObject could not bind the capture bitmap".to_string());
+        }
+
+        let bit_blt_result = BitBlt(
+            memory_dc,
+            0,
+            0,
+            width_i32,
+            height_i32,
+            Some(screen_dc),
+            x,
+            y,
+            SRCCOPY | CAPTUREBLT,
+        )
+        .map_err(|error| format!("BitBlt failed: {error}"));
+        SelectObject(memory_dc, previous_object);
+
+        let result = bit_blt_result.and_then(|()| {
+            let mut bitmap_info = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: width_i32,
+                    biHeight: -height_i32,
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: 0,
+                    biSizeImage: buffer_len_u32,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut pixels = vec![0_u8; buffer_len];
+            let copied_lines = GetDIBits(
+                memory_dc,
+                bitmap,
+                0,
+                height,
+                Some(pixels.as_mut_ptr().cast::<c_void>()),
+                &mut bitmap_info,
+                DIB_RGB_COLORS,
+            );
+            if copied_lines != height_i32 {
+                return Err(format!(
+                    "GetDIBits copied {copied_lines} of {height_i32} display lines"
+                ));
+            }
+            for pixel in pixels.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
+                pixel[3] = 255;
+            }
+            xcap::image::RgbaImage::from_raw(width, height, pixels)
+                .ok_or_else(|| "screen DC pixels did not match display dimensions".to_string())
+        });
+
+        let _ = DeleteObject(bitmap.into());
+        let _ = DeleteDC(memory_dc);
+        ReleaseDC(None, screen_dc);
+        result
+    }
+}
+
+#[cfg(windows)]
+fn capture_primary_display_with_windows_dxgi() -> Result<xcap::image::RgbaImage, String> {
+    use dxgi_capture_rs::DXGIManager;
+
+    let mut manager = DXGIManager::new(1_500)
+        .map_err(|error| format!("could not initialize primary output capture: {error}"))?;
+    manager.set_capture_source_index(0);
+    let (mut pixels, (width, height)) = manager
+        .capture_frame_components()
+        .map_err(|error| format!("could not acquire primary output frame: {error}"))?;
+    let expected_len = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "primary output pixel buffer size overflowed".to_string())?;
+    if width == 0 || height == 0 || pixels.len() != expected_len {
+        return Err(format!(
+            "primary output returned invalid dimensions or pixel bytes: {width}x{height}, {} bytes",
+            pixels.len()
+        ));
+    }
+    let width =
+        u32::try_from(width).map_err(|_| "primary output width exceeds PNG limits".to_string())?;
+    let height = u32::try_from(height)
+        .map_err(|_| "primary output height exceeds PNG limits".to_string())?;
+    for pixel in pixels.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+        pixel[3] = 255;
+    }
+    xcap::image::RgbaImage::from_raw(width, height, pixels)
+        .ok_or_else(|| "primary output pixels did not match its dimensions".to_string())
 }
 
 enum CodexBridgeClientRuntime {
@@ -3158,7 +3346,7 @@ pub fn parse_computer_control_action(value: &str) -> Result<ComputerControlActio
     }
 }
 
-fn computer_control_action_contract_string(action: &ComputerControlAction) -> String {
+pub fn computer_control_action_contract_string(action: &ComputerControlAction) -> String {
     match action {
         ComputerControlAction::Click { x, y, button } => {
             format!("click:{x},{y},{}", mouse_button_contract_name(*button))
@@ -5287,6 +5475,46 @@ mod tests {
 
         assert!(error.contains("empty PNG bytes"));
         assert!(!temp_dir.path().join("computer-screenshots").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires a visible interactive Windows desktop"]
+    fn windows_primary_display_capture_smoke_writes_real_png_evidence() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let client = LocalComputerScreenshotClient::new(temp_dir.path().to_path_buf());
+
+        let screenshot = client
+            .capture_screenshot()
+            .expect("interactive desktop screenshot succeeds");
+
+        assert!(screenshot.width > 0);
+        assert!(screenshot.height > 0);
+        let evidence_path = temp_dir.path().join(&screenshot.evidence_ref);
+        let metadata = std::fs::metadata(evidence_path).expect("PNG evidence exists");
+        assert!(metadata.len() > 8);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires a visible interactive Windows desktop"]
+    fn windows_screen_dc_fallback_captures_real_primary_display() {
+        let monitors = xcap::Monitor::all().expect("enumerates visible displays");
+        let monitor = monitors
+            .iter()
+            .find(|monitor| monitor.is_primary().unwrap_or(false))
+            .or_else(|| monitors.first())
+            .expect("finds a visible primary display");
+
+        let image = super::capture_primary_display_with_windows_screen_dc(monitor)
+            .expect("screen DC fallback captures the primary display");
+
+        assert!(image.width() > 0);
+        assert!(image.height() > 0);
+        assert_eq!(
+            image.as_raw().len(),
+            image.width() as usize * image.height() as usize * 4
+        );
     }
 
     #[test]
