@@ -46,6 +46,7 @@ const allowedSourceBinaryFiles = new Set([
 ]);
 const requiredDocs = [
   "README.md",
+  "README.zh-CN.md",
   "docs/INSTALLATION.md",
   "docs/RELEASE_NOTES_v1.0.0.md",
   "docs/DS_AGENT_V1_COMPLETION_AUDIT.md",
@@ -70,6 +71,7 @@ const publicReleaseCopyFiles = [
   ".github/pull_request_template.md",
   "CONTRIBUTING.md",
   "README.md",
+  "README.zh-CN.md",
   "SECURITY.md",
   "apps/desktop/index.html",
   "apps/desktop/package.json",
@@ -93,6 +95,7 @@ const publicReleaseCopyFiles = [
   "docs/RELEASE_NOTES_v0.1-alpha.md",
   "package.json",
 ];
+const detailedValidationDocs = requiredDocs.filter((docPath) => docPath.startsWith("docs/"));
 const publicUiCopyFiles = ["apps/desktop/src/i18n.ts"];
 const publicPeerProductTerms = [
   "ChatGPT",
@@ -692,80 +695,60 @@ function checkRequiredDocs() {
   }
 
   const readme = readText("README.md");
-  checkTextIncludesCollapsed(
-    "README.md",
-    readme,
-    "Desktop source commands",
-    "README.md desktop source commands wording",
-  );
-  if (readme.includes("Foundation MVP desktop commands")) {
-    failures.push("README.md must not use stale Foundation MVP desktop commands wording");
-  } else {
-    checks.push("README.md no stale Foundation MVP desktop commands wording");
-  }
-
+  const readmeZh = readText("README.zh-CN.md");
   const collapsedReadme = readme.replace(/\s+/g, " ").trim();
-  const staleReadmeEnglishToolSurface =
-    "Permissioned tool surfaces for file, network, browser, terminal, drive, email, and Computer Use operations.";
-  if (collapsedReadme.includes(staleReadmeEnglishToolSurface)) {
-    failures.push(
-      `README.md must not describe current tool surfaces with stale drive/email connector wording: ${staleReadmeEnglishToolSurface}`,
-    );
-  } else {
-    checks.push("README.md no stale English drive/email tool wording");
-  }
-  checkTextIncludesCollapsed(
-    "README.md",
-    readme,
-    "Permissioned tool surfaces for file, network, browser, terminal, local-folder read/export, email read/draft/send approval records, and Computer Use operations.",
-    "README.md current English tool surface wording",
-  );
   for (const [phrase, label] of [
-    [
-      "Search aliases: DS Agent, DSAgent, dsagent, DeepSeek Agent OS.",
-      "README.md searchable DSAgent aliases",
-    ],
-    [
-      "Current source candidate: `DS Agent v1.0.0` (not published or installed)",
-      "README.md current source candidate v1.0.0 status",
-    ],
-    [
-      "Latest published stable: [DS Agent v0.9.0]",
-      "README.md latest published stable v0.9.0 link",
-    ],
-    [
-      "Historical prerelease: [DS Agent v0.8.0-rc.1]",
-      "README.md historical v0.8.0-rc.1 link",
-    ],
-    [
-      "Background Agent runs keep the composer usable while work is queued, claimed, executed, cancelled, and audited.",
-      "README.md v0.2.3 background Agent run summary",
-    ],
-    [
-      "Skill manifests declare permissions, source identity, integrity, trust state, execution plans, audit events, and disable or uninstall controls.",
-      "README.md v0.2.3 safe skill ecosystem summary",
-    ],
-    [
-      "turning local evidence into reviewable office outputs",
-      "README.md English introduction names DS Agent office-output strength",
-    ],
-    [
-      "what evidence, memory, route, validation, omissions, and output paths were used",
-      "README.md English introduction names auditable context receipts",
-    ],
-    [
-      "让日常办公任务真的能被完成、复核、延续和纠偏",
-      "README.md Chinese introduction names practical office strength",
-    ],
+    ["One Kernel. Modular capabilities. Verifiable execution.", "English README product promise"],
+    ["DS Agent is a local Agent Harness optimized for DeepSeek", "English README DeepSeek-first positioning"],
+    ["v1.0.0 stable", "English README formal stable status"],
+    ["The key difference is that Memory, Automation, Computer Use, parallel Subagents, and Skills are not isolated plugins", "English README unified Kernel thesis"],
+    ["contract-first modular Harness architecture", "English README modular architecture"],
+    ["Five core capabilities, one engineering philosophy", "English README five-capability framing"],
+    ["Memory and Soul", "English README Memory and Soul capability"],
+    ["Durable Automation", "English README durable Automation capability"],
+    ["Verified Computer Use", "English README verified Computer Use capability"],
+    ["Parallel Subagents", "English README parallel Subagent capability"],
+    ["Generated and automatic Skills", "English README generated automatic Skills capability"],
+    ["goal → done-when contract → context → plan → permission → execution → evidence → verification → recovery", "English README Loop Engineering contract"],
+    ["DeepSeek and DS Agent boundary", "English README model boundary"],
+    ["Why Rust", "English README Rust rationale"],
+    ["Production Microsoft/Google account registration and live external-write authority remain disabled in v1.0.0", "English README connector authority boundary"],
+    ["README.zh-CN.md", "English README language switch"],
+    ["Search aliases: DS Agent, DSAgent, dsagent, DeepSeek Agent OS.", "English README searchable aliases"],
   ]) {
     checkTextIncludesCollapsed("README.md", readme, phrase, label);
   }
-  checkTextDoesNotInclude(
-    "README.md",
-    readme,
-    "Latest stable: [DS Agent v0.8.0]",
-    "README current release status must not regress to v0.8.0",
-  );
+  for (const [phrase, label] of [
+    ["一个 Kernel，模块化能力，统一可信执行。", "Chinese README product promise"],
+    ["DS Agent 是专门为 DeepSeek 优化的本地 Agent Harness", "Chinese README DeepSeek-first positioning"],
+    ["v1.0.0 正式稳定版", "Chinese README formal stable status"],
+    ["真正的差异点是：记忆、自动化执行、Computer Use、Subagent 并行协作和技能", "Chinese README unified Kernel thesis"],
+    ["契约优先的模块化 Harness 架构", "Chinese README modular architecture"],
+    ["五项核心能力，一套工程理念", "Chinese README five-capability framing"],
+    ["记忆与 Soul", "Chinese README Memory and Soul capability"],
+    ["持久自动化", "Chinese README durable Automation capability"],
+    ["可验证的 Computer Use", "Chinese README verified Computer Use capability"],
+    ["Subagent 并行协作", "Chinese README parallel Subagent capability"],
+    ["技能生成与自动使用", "Chinese README generated automatic Skills capability"],
+    ["目标 → 完成条件 → 上下文 → 规划 → 权限 → 执行 → 证据 → 验证 → 恢复", "Chinese README Loop Engineering contract"],
+    ["DeepSeek 与 DS Agent 的工作边界", "Chinese README model boundary"],
+    ["为什么使用 Rust", "Chinese README Rust rationale"],
+    ["v1.0.0 仍未开放生产 Microsoft/Google 账号注册和真实外部写入权限", "Chinese README connector authority boundary"],
+    ["README.md", "Chinese README language switch"],
+    ["中文搜索别名：DS Agent、DSAgent、dsagent、DeepSeek Agent OS。", "Chinese README searchable aliases"],
+  ]) {
+    checkTextIncludesCollapsed("README.zh-CN.md", readmeZh, phrase, label);
+  }
+  for (const [filePath, content] of [["README.md", readme], ["README.zh-CN.md", readmeZh]]) {
+    checkTextDoesNotInclude(filePath, content, "Current source candidate", `${filePath} no stale candidate status`);
+    checkTextDoesNotInclude(filePath, content, "Latest published stable: [DS Agent v0.9.0]", `${filePath} no stale v0.9 latest status`);
+    checkTextDoesNotInclude(filePath, content, "Two Audiences", `${filePath} no split audience introduction`);
+    if (content.split(/\r?\n/).length > 260) {
+      failures.push(`${filePath} must remain concise at 260 lines or fewer`);
+    } else {
+      checks.push(`${filePath} concise line budget`);
+    }
+  }
   checkTextDoesNotInclude(
     "docs/INSTALLATION.md",
     readText("docs/INSTALLATION.md"),
@@ -925,153 +908,8 @@ function checkRequiredDocs() {
     }
   }
 
-  for (const phrase of [
-    "The current 1.0.0 source candidate includes the permission loop",
-    "Harness architecture v1",
-    "runs through a stable Agent OS Kernel plus Workflow Packs",
-    "uses permissioned tool boundaries, source-linked evidence, bounded workflow runs, selective context assembly, and token-efficient DeepSeek routing",
-    "keeps context focused instead of loading every available source into each request",
-    "brings the desktop shell, local event history, policy model, and DeepSeek route model into one buildable Windows app",
-    "includes the permission loop for built-in local tools",
-    "Built-in local tools cover file, network, browser, email approval records, local folders, terminal diagnostics, and Computer Use surfaces",
-    "The first tool paths let users",
-    "run source-linked web search",
-    "record approval and audit decisions for mutating terminal and browser-form actions",
-    "record approval and audit decisions for email read/draft/send flows",
-    "Permission review clarity v1",
-    "keeps high-impact actions explicit",
-    "Outbound email and desktop control approvals authorize only the next matching attempt",
-    "Permission state visibility v1",
-    "shows whether a grant is reusable, ready for one use, or already spent",
-    "Approval decision traceability v1",
-    "keeps high-impact retries tied to the approval that authorized them",
-    "keeps earlier audit history readable",
-    "Recent tool output gives operators a clear path from action back to decision",
-    "Web search follows the selected model route",
-    "configured local bridge service when it can return source-linked results",
-    "otherwise requires a selected source-linked web-search route before live search can run",
-    "approved local evidence",
-    "approved local export flow",
-    "Evidence-template seeding uses blank operator templates",
-    "keeps desktop control visibly approval-gated before any mouse or keyboard action can run",
-    "one-shot approval plus a local in-memory unlock code",
-    "local operator unlocks computer control for five minutes",
-    "source-linked web search evidence",
-    "Web search evidence clarity v1",
-    "shows the selected search route before a web search runs",
-    "uses source-linked search when the selected model route cannot provide verified web results",
-    "requires source URLs before search output is treated as evidence",
-    "keeps approval gates in place and avoids live network requests while approval is pending",
-    "Reserved alpha presets disclose when they share the same local search implementation",
-    "Optional local web-search bridge readiness v1",
-    "uses only a configured local loopback bridge for supported providers",
-    "maps returned source URLs into the same evidence and audit trail",
-    "Setup directory clarity v2",
-    "keeps program files and app data separate from the user-selected workspace",
-    "stores that single setup choice in the current user's app data directory",
-    "automatically manages evidence, exports, reports, runs, sources, work packages, memory, and logs under that workspace",
-    "Windows packaging clarity v1",
-    "builds the local Windows preview as an NSIS installer",
-    "keeps macOS packaging configured but pending verification on a macOS host",
-    "Screen evidence clarity v1",
-    "keeps approved screenshots as local evidence files with readable audit references",
-    "keeps pending and failed attempts in the approval trail so users can see why screen inspection did not run",
-    "Screen inspection consent v1",
-    "treats screen capture as a sensitive desktop read",
-    "runs screen capture without an extra prompt in the default full-access mode",
-    "medium-risk reads remain policy-evaluated in limited automation mode",
-    "Local screenshot storage clarity v1",
-    "saves approved PNG screenshots under `computer-screenshots/`",
-    "uses the selected evidence folder, or app data before first-run setup",
-    "records portable relative references for export and audit",
-    "Tool route settings v1",
-    "shows the selected model route and available tool paths",
-    "keeps email read, draft, and send as approval and audit surfaces",
-    "keeps local folders and export packages separate from cloud accounts",
-    "DeepSeek model request path v1",
-    "calls the official Chat Completions endpoint when a local API key is configured",
-    "keeps automated tests offline",
-    "redacts local API keys from request errors",
-    "keeps source-linked web search evidence on dedicated routes",
-    "DeepSeek cache and usage visibility v1",
-    "keeps Operations Briefing synthesis responsive with an in-session request cache",
-    "secret-safe usage records",
-    "cache hit/miss state",
-    "public source does not hardcode live DeepSeek prices",
-    "Desktop automation route clarity v1",
-    "shows whether screen inspection and desktop control will use the selected local route or a configured local bridge",
-    "keeps desktop control visibly approval-gated before any mouse or keyboard action can run",
-    "does not silently switch routes when a configured bridge is unavailable",
-    "Desktop prerequisite clarity v1",
-    "shows local screen and input prerequisites before a tool runs",
-    "Local bridge evidence safety v1",
-    "only accepts local loopback bridge endpoints",
-    "keeps screen evidence, control actions, and source-linked web search inside the same approval and audit path",
-    "stores returned screen evidence in the selected evidence folder",
-    "does not expose local file paths through bridge responses",
-    "Work-package readiness summary v1",
-    "adds a secret-safe readiness snapshot to exported work packages",
-    "shows whether DeepSeek requests, source-linked web search, desktop automation, local folders, and selected tool routes are ready",
-    "without storing API keys, user machine paths, running live model calls, capturing screens, or controlling the desktop during export",
-    "Audited desktop input safety v1",
-    "keeps real desktop input inside a small reviewed action set",
-    "requires a one-shot approval plus a local in-memory unlock code before any mouse or keyboard action can run",
-    "keeps desktop control experimental and visibly gated",
-    "Local computer control unlock window v1",
-    "adds a short local unlock window after approval",
-    "computer control stays locked when the local unlock window is not active",
-    "unlock code stays out of audit events and exported work packages",
-    "Computer tool route selection v1",
-    "keeps screen inspection and desktop control on the route users see before approval",
-    "reports an unavailable bridge as a clear error",
-    "keeps DeepSeek and custom-model routes on local Windows/macOS desktop automation paths",
-    "Operations Briefing clarity v1",
-    "turns approved local evidence into a management brief",
-    "drafts a summary, anomaly leads, and action items from approved local evidence",
-    "can use DeepSeek synthesis when configured and falls back to a local draft with a visible warning",
-    "Report export clarity v1",
-    "exports Markdown, standalone HTML, lightweight PDF, and work-package JSON through an approved local export flow",
-    "Markdown and HTML preserve full Unicode",
-    "preview PDF stays lightweight and ASCII-safe",
-    "Briefing handoff safety v1",
-    "keeps imported briefing runs read-only and reviewable",
-    "keeps source-machine evidence handles redacted in exported work packages",
-    "keeps memory candidate history local and auditable",
-    "keeps resolved memory candidates out of exported packages",
-    "uses blank operator templates without overwriting existing local evidence files",
-    "Memory review clarity v1",
-    "keeps memory writes explicit and auditable",
-    "moving routine candidate decisions into DS Agent background maintenance",
-    "can still propose corrections, edit, expire, and delete long-term memories",
-    "Memory conflict clarity v1",
-    "surfaces likely overlaps in the audit view",
-    "apply link, merge, replace, update, archive, or reject decisions in the background",
-    "Memory import safety v1",
-    "keeps imported memory candidates local and auditable before DS Agent background maintenance resolves them",
-  ]) {
-    checkTextIncludesCollapsed(
-      "README.md",
-      readme,
-      phrase,
-      `README.md Architecture overview user-facing wording: ${phrase}`,
-    );
-  }
-
-  const staleReadmeZhToolSurface = "网盘、本地邮件边界";
-  if (collapsedReadme.includes(staleReadmeZhToolSurface)) {
-    failures.push(
-      `README.md must not describe current zh tool surfaces with stale cloud-drive/email-boundary wording: ${staleReadmeZhToolSurface}`,
-    );
-  } else {
-    checks.push("README.md no stale zh cloud-drive/email-boundary tool wording");
-  }
-  checkTextIncludesCollapsed(
-    "README.md",
-    readme,
-    "面向文件、网络、浏览器、终端、本地文件夹读取/导出、邮件读取/草稿/发送审批记录和 Computer Use 的权限化工具入口",
-    "README.md current zh tool surface wording",
-  );
-
+  const staleReadmeEnglishToolSurface =
+    "Permissioned tool surfaces for file, network, browser, terminal, drive, email, and Computer Use operations.";
   const releaseNotes = readText("docs/RELEASE_NOTES_v0.1.0.md");
   const collapsedReleaseNotes = releaseNotes.replace(/\s+/g, " ").trim();
   if (collapsedReleaseNotes.includes(staleReadmeEnglishToolSurface)) {
@@ -1177,12 +1015,6 @@ function checkRequiredDocs() {
     checks.push("release notes local-secret warning");
   }
 
-  checkTextIncludesCollapsed(
-    "README.md",
-    readme,
-    "local-only continuation material and are intentionally excluded from public source snapshots",
-    "README.md local-only continuation docs",
-  );
   checkTextIncludesCollapsed(
     "docs/RELEASE_NOTES_v0.1.0.md",
     releaseNotes,
@@ -1689,56 +1521,20 @@ function checkPublicReleaseCopyPositioning() {
   checkTextIncludesCollapsed(
     "README.md",
     readme,
-    "Harness architecture v1",
-    "README.md harness architecture positioning",
+    "contract-first modular Harness architecture",
+    "README.md modular Harness positioning",
   );
   checkTextIncludesCollapsed(
     "README.md",
     readme,
-    "Loop engineering lives in the product surface",
-    "README.md loop engineering positioning",
+    "DS Agent treats work as a goal-directed loop, not a single model reply",
+    "README.md Loop Engineering positioning",
   );
   checkTextIncludesCollapsed(
     "README.md",
     readme,
-    "token-efficient DeepSeek routing",
-    "README.md token-efficient DeepSeek routing positioning",
-  );
-  checkTextIncludesCollapsed(
-    "README.md",
-    readme,
-    "Context receipts show loop mode, workflow policy, selected evidence, memory, model route, token/cache state, validation results, and intentional omissions",
-    "README.md loop context receipt positioning",
-  );
-  checkTextIncludesCollapsed(
-    "README.md",
-    readme,
-    "Markdown and HTML report exports carry the same context receipt summary",
-    "README.md report export context receipt positioning",
-  );
-  checkTextIncludesCollapsed(
-    "README.md",
-    readme,
-    "Bounded repair loops rerun only the failed step with the smallest useful context",
-    "README.md bounded repair loop positioning",
-  );
-  checkTextIncludesCollapsed(
-    "README.md",
-    readme,
-    "goal loop contract",
-    "README.md goal loop contract positioning",
-  );
-  checkTextIncludesCollapsed(
-    "README.md",
-    readme,
-    "done-when criteria, completion verifier, stop conditions, and near-miss guardrails",
-    "README.md goal completion verifier positioning",
-  );
-  checkTextIncludesCollapsed(
-    "README.md",
-    readme,
-    "one short, task-grounded next-better suggestion",
-    "README.md completion advice positioning",
+    "The Kernel persists run and review state, retries only bounded failed steps, and does not claim completion from model confidence alone",
+    "README.md verified completion positioning",
   );
   checkTextIncludesCollapsed(
     "docs/RELEASE_NOTES_v0.1.0.md",
@@ -2634,18 +2430,6 @@ function checkWindowsValidationStatusDocs() {
   const releaseNotes = readText("docs/RELEASE_NOTES_v0.1.0.md");
 
   checkTextIncludesCollapsed(
-    "README.md",
-    readme,
-    "Windows build/install/launch/run path is verified through the repeatable release gate",
-    "README.md Windows local validation status",
-  );
-  checkTextIncludesCollapsed(
-    "README.md",
-    readme,
-    "installed UI workflow smoke",
-    "README.md installed workflow smoke status",
-  );
-  checkTextIncludesCollapsed(
     "docs/RELEASE_NOTES_v0.1.0.md",
     releaseNotes,
     "Windows build/install/launch/run path has been locally validated",
@@ -2656,18 +2440,6 @@ function checkWindowsValidationStatusDocs() {
     releaseNotes,
     "installed UI workflow smoke",
     "release notes installed workflow smoke status",
-  );
-  checkTextIncludesCollapsed(
-    "README.md",
-    readme,
-    "macOS validation and release work will follow after the Windows preview continues to pass local release gates",
-    "README.md macOS deferral after local gates",
-  );
-  checkTextIncludesCollapsed(
-    "README.md",
-    readme,
-    "macOS 的验证和发布会在 Windows 预览版持续通过本地 release gates 后推进",
-    "README.md macOS deferral after local gates zh",
   );
   checkTextIncludesCollapsed(
     "docs/RELEASE_NOTES_v0.1.0.md",
@@ -2715,7 +2487,7 @@ function checkWindowsValidationStatusDocs() {
 }
 
 function checkReleaseGateDocs() {
-  for (const docPath of ["README.md", "docs/INSTALLATION.md"]) {
+  for (const docPath of ["docs/INSTALLATION.md"]) {
     const content = readText(docPath);
     checkTextIncludesCollapsed(
       docPath,
@@ -2850,6 +2622,7 @@ function checkReleaseGateDocs() {
 
 function checkMemoryStudioDocs() {
   const readme = readText("README.md");
+  const readmeZh = readText("README.zh-CN.md");
   const releaseNotes = readText("docs/RELEASE_NOTES_v0.1.0.md");
   const app = readText("apps/desktop/src/App.tsx");
   const i18n = readText("apps/desktop/src/i18n.ts");
@@ -2859,26 +2632,14 @@ function checkMemoryStudioDocs() {
   checkTextIncludesCollapsed(
     "README.md",
     readme,
-    "linked memory title/body search",
-    "README.md linked memory title/body search",
+    "auditable background maintenance can update, merge, or archive memory",
+    "README.md auditable memory self-maintenance",
   );
   checkTextIncludesCollapsed(
-    "README.md",
-    readme,
-    "linked memory search match source",
-    "README.md linked memory search match source",
-  );
-  checkTextIncludesCollapsed(
-    "README.md",
-    readme,
-    "关联记忆标题/正文搜索",
-    "README.md linked memory title/body search zh",
-  );
-  checkTextIncludesCollapsed(
-    "README.md",
-    readme,
-    "关联记忆搜索命中来源",
-    "README.md linked memory search match source zh",
+    "README.zh-CN.md",
+    readmeZh,
+    "后台维护能够自动更新、合并或归档",
+    "README.zh-CN.md auditable memory self-maintenance",
   );
   checkTextIncludesCollapsed(
     "docs/RELEASE_NOTES_v0.1.0.md",
@@ -2893,64 +2654,16 @@ function checkMemoryStudioDocs() {
     "release notes linked memory search match source",
   );
   checkTextIncludesCollapsed(
-    "README.md",
-    readme,
-    "linked memory relation notes",
-    "README.md linked memory relation notes",
-  );
-  checkTextIncludesCollapsed(
     "docs/RELEASE_NOTES_v0.1.0.md",
     releaseNotes,
     "linked memory relation notes",
     "release notes linked memory relation notes",
   );
   checkTextIncludesCollapsed(
-    "README.md",
-    readme,
-    "manual existing-memory links",
-    "README.md manual existing-memory links",
-  );
-  checkTextIncludesCollapsed(
-    "README.md",
-    readme,
-    "手动关联已有长期记忆",
-    "README.md manual existing-memory links zh",
-  );
-  checkTextIncludesCollapsed(
     "docs/RELEASE_NOTES_v0.1.0.md",
     releaseNotes,
     "manual existing-memory links",
     "release notes manual existing-memory links",
-  );
-  checkTextIncludesCollapsed(
-    "README.md",
-    readme,
-    "feedback-informed retrieval scoring",
-    "README.md feedback-informed memory retrieval scoring",
-  );
-  checkTextIncludesCollapsed(
-    "README.md",
-    readme,
-    "stale/conflicting/should_update feedback surfaces compact review hints",
-    "README.md selected-memory feedback review hints",
-  );
-  checkTextIncludesCollapsed(
-    "README.md",
-    readme,
-    "Automatic Memory maintenance v1 keeps routine memory care out of the user's workflow",
-    "README.md memory maintenance strategy v1",
-  );
-  checkTextIncludesCollapsed(
-    "README.md",
-    readme,
-    "DS Agent 会自动记录检索调优、应用审计更新",
-    "README.md memory maintenance strategy v1 zh",
-  );
-  checkTextIncludesCollapsed(
-    "README.md",
-    readme,
-    "反馈会参与后续检索评分",
-    "README.md feedback-informed memory retrieval scoring zh",
   );
   checkTextIncludesCollapsed(
     "docs/RELEASE_NOTES_v0.1.0.md",
@@ -3049,24 +2762,6 @@ function checkMemoryStudioDocs() {
     "Memory Studio feedback review empty-state copy",
   );
   checkTextIncludesCollapsed(
-    "README.md",
-    readme,
-    "new/skipped archived briefing runs",
-    "README.md archived briefing run import preview counts",
-  );
-  checkTextIncludesCollapsed(
-    "README.md",
-    readme,
-    "new/skipped pending memory candidates",
-    "README.md pending memory candidate import preview counts",
-  );
-  checkTextIncludesCollapsed(
-    "README.md",
-    readme,
-    "new/skipped workflow templates",
-    "README.md workflow template import preview counts",
-  );
-  checkTextIncludesCollapsed(
     "docs/RELEASE_NOTES_v0.1.0.md",
     releaseNotes,
     "new/skipped archived briefing runs",
@@ -3111,76 +2806,6 @@ function checkMemoryStudioDocs() {
       `release notes structured Operations Briefing wording: ${phrase}`,
     );
   }
-  const readmeBasicFunctionsHeading = readme.indexOf("## Basic Functions / 基本功能");
-  const readmeBasicFunctionsStart = readme.indexOf("### English", readmeBasicFunctionsHeading);
-  const readmeBasicFunctionsEnd = readme.indexOf("### 中文", readmeBasicFunctionsStart);
-  if (
-    readmeBasicFunctionsHeading === -1 ||
-    readmeBasicFunctionsStart === -1 ||
-    readmeBasicFunctionsEnd === -1
-  ) {
-    failures.push("README.md must keep the Basic Functions English section before the Chinese section");
-  } else {
-    const readmeBasicFunctions = readme.slice(readmeBasicFunctionsStart, readmeBasicFunctionsEnd);
-    const collapsedReadmeBasicFunctions = readmeBasicFunctions.replace(/\s+/g, " ").trim();
-    const staleReadmeOperationsBriefingRunOnSnippet =
-      "Operations Briefing workflow that reads local evidence, drafts a management brief, can use DeepSeek synthesis when configured";
-    if (collapsedReadmeBasicFunctions.includes(staleReadmeOperationsBriefingRunOnSnippet)) {
-      failures.push("README.md Basic Functions must not bury Operations Briefing import/export safety in one long run-on bullet");
-    } else {
-      checks.push("README.md Basic Functions no run-on Operations Briefing bullet");
-    }
-    for (const phrase of [
-      "Operations Briefing workflow:",
-      "Reads local evidence and drafts a management brief.",
-      "Can use DeepSeek synthesis when configured.",
-      "Exports Markdown, HTML, lightweight PDF, and work-package JSON to local paths.",
-      "During work-package imports, previews new/skipped workflow templates, new/skipped pending memory candidates, and new/skipped archived briefing runs.",
-      "Keeps imported archived runs as read-only replay details while redacted source-machine evidence handles stay visible as a safety boundary.",
-      "Uses blank operator templates under",
-    ]) {
-      checkTextIncludesCollapsed(
-        "README.md Basic Functions",
-        readmeBasicFunctions,
-        phrase,
-        `README.md Basic Functions structured Operations Briefing wording: ${phrase}`,
-      );
-    }
-  }
-  const readmeBasicFunctionsZhStart = readme.indexOf("### 中文", readmeBasicFunctionsEnd);
-  const readmeBasicFunctionsZhEnd = readme.indexOf("Read first:", readmeBasicFunctionsZhStart);
-  if (readmeBasicFunctionsZhStart === -1 || readmeBasicFunctionsZhEnd === -1) {
-    failures.push("README.md must keep the Basic Functions Chinese section before Read first");
-  } else {
-    const readmeBasicFunctionsZh = readme.slice(
-      readmeBasicFunctionsZhStart,
-      readmeBasicFunctionsZhEnd,
-    );
-    const collapsedReadmeBasicFunctionsZh = readmeBasicFunctionsZh.replace(/\s+/g, " ").trim();
-    const staleReadmeOperationsBriefingZhRunOnSnippet =
-      "Operations Briefing 经营简报工作流，可读取本地证据、生成管理简报，并在配置 DeepSeek 后调用模型合成";
-    if (collapsedReadmeBasicFunctionsZh.includes(staleReadmeOperationsBriefingZhRunOnSnippet)) {
-      failures.push("README.md Chinese Basic Functions must not bury Operations Briefing import/export safety in one long run-on bullet");
-    } else {
-      checks.push("README.md Chinese Basic Functions no run-on Operations Briefing bullet");
-    }
-    for (const phrase of [
-      "Operations Briefing 经营简报工作流：",
-      "读取本地证据并生成管理简报。",
-      "配置 DeepSeek 后可调用模型合成。",
-      "将 Markdown、HTML、轻量 PDF 和 work-package JSON 导出到本地路径。",
-      "导入工作包时预览新增/跳过的工作流模板、待审核记忆候选和归档简报运行。",
-      "导入归档运行保持只读回放详情，同时保留已清理的源机器证据句柄作为安全边界。",
-      "使用 `docs/templates/operations-briefing-evidence/` 下的空白运营模板",
-    ]) {
-      checkTextIncludesCollapsed(
-        "README.md Chinese Basic Functions",
-        readmeBasicFunctionsZh,
-        phrase,
-        `README.md Chinese Basic Functions structured Operations Briefing wording: ${phrase}`,
-      );
-    }
-  }
   const collapsedReadme = readme.replace(/\s+/g, " ").trim();
   for (const phrase of [
     "managed bridge sidecars",
@@ -3197,24 +2822,6 @@ function checkMemoryStudioDocs() {
       checks.push(`README.md no stale external-bridge wording: ${phrase}`);
     }
   }
-  checkTextIncludesCollapsed(
-    "README.md",
-    readme,
-    "automatic local bridge-service management",
-    "README.md user-facing local bridge service limit",
-  );
-  checkTextIncludesCollapsed(
-    "README.md",
-    readme,
-    "自动安装或管理本地桥接服务",
-    "README.md zh user-facing local bridge service limit",
-  );
-  checkTextIncludesCollapsed(
-    "README.md",
-    readme,
-    "package-internal duplicate ids are counted as skipped",
-    "README.md package-internal duplicate import preview ids",
-  );
   checkTextIncludesCollapsed(
     "docs/RELEASE_NOTES_v0.1.0.md",
     releaseNotes,
@@ -3235,22 +2842,10 @@ function checkMemoryStudioDocs() {
     "work-package import preview regression counts duplicate package ids as skipped",
   );
   checkTextIncludesCollapsed(
-    "README.md",
-    readme,
-    "resolved memory candidates stay out of exported work packages",
-    "README.md resolved memory candidates stay local-only during export",
-  );
-  checkTextIncludesCollapsed(
     "docs/RELEASE_NOTES_v0.1.0.md",
     releaseNotes,
     "resolved memory candidates stay out of exported work packages",
     "release notes resolved memory candidates stay local-only during export",
-  );
-  checkTextIncludesCollapsed(
-    "README.md",
-    readme,
-    "imported memory candidates drop source-machine source links",
-    "README.md imported memory candidates drop source-machine source links",
   );
   checkTextIncludesCollapsed(
     "docs/RELEASE_NOTES_v0.1.0.md",
@@ -3484,7 +3079,6 @@ function checkSoulProfileSettingsAndBootstrap() {
 function checkOperationsBriefingArchiveReplayUi() {
   const app = readText("apps/desktop/src/App.tsx");
   const i18n = readText("apps/desktop/src/i18n.ts");
-  const readme = readText("README.md");
   const releaseNotes = readText("docs/RELEASE_NOTES_v0.1.0.md");
   const workPackageKernel = readText("apps/desktop/src-tauri/src/kernel/work_package.rs");
   const eventStoreKernel = readText("apps/desktop/src-tauri/src/kernel/event_store.rs");
@@ -3512,18 +3106,6 @@ function checkOperationsBriefingArchiveReplayUi() {
     i18n,
     "archiveEvidenceRedacted",
     "Operations Briefing copy includes redacted imported evidence handle label",
-  );
-  checkTextIncludesCollapsed(
-    "README.md",
-    readme,
-    "redacted source-machine evidence handles",
-    "README.md archived briefing evidence handle redaction",
-  );
-  checkTextIncludesCollapsed(
-    "README.md",
-    readme,
-    "exported work packages redact source-machine evidence handles",
-    "README.md work-package export evidence handle redaction",
   );
   checkTextIncludesCollapsed(
     "docs/RELEASE_NOTES_v0.1.0.md",
@@ -4293,7 +3875,7 @@ function checkPackageManagerBaseline() {
     "CI frozen pnpm install",
   );
 
-  for (const docPath of ["README.md", "docs/INSTALLATION.md"]) {
+  for (const docPath of ["README.md", "README.zh-CN.md", "docs/INSTALLATION.md"]) {
     const content = readText(docPath);
     checkTextIncludes(docPath, content, "npx pnpm@9.15.9 install", `${docPath} pinned pnpm install`);
     checkTextIncludes(docPath, content, "npx pnpm@9.15.9 test", `${docPath} pinned pnpm test`);
@@ -4728,7 +4310,7 @@ function checkOperationsBriefingSmokeEvidence() {
     checks.push("DeepSeek briefing smoke sample default");
   }
 
-  for (const docPath of requiredDocs) {
+  for (const docPath of detailedValidationDocs) {
     const content = readText(docPath);
     if (!content.includes("operations-briefing-smoke-evidence")) {
       failures.push(`${docPath} must document the Operations Briefing smoke evidence folder`);
@@ -4814,7 +4396,7 @@ function checkOperationsBriefingSeedEvidence() {
     checks.push("Windows local smoke desktop evidence template seed");
   }
 
-  for (const docPath of requiredDocs) {
+  for (const docPath of detailedValidationDocs) {
     const content = readText(docPath);
     if (!content.includes(seedEvidenceDir)) {
       failures.push(`${docPath} must document the desktop Operations Briefing seed evidence folder`);
