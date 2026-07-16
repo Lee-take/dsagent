@@ -1,0 +1,33 @@
+{
+  "version": "t1.fixture-set/v1",
+  "fixture_set_id": "t1-monthly-operations-brief-fixture-set-v1",
+  "data_class": "synthetic_benchmark_only",
+  "generator_id": "t1-synthetic-office-fixtures-v1",
+  "generated_at": "2026-07-16T00:00:00Z",
+  "files": [
+    {
+      "fixture_id": "monthly-revenue-xlsx",
+      "relative_path": "inputs/01-monthly-revenue.xlsx",
+      "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "bytes": 4677,
+      "sha256": "7877ef41911263907895adba7e3c4b18f1795bfbb6146d2b858f9cbec6d2cfa8",
+      "source_label": "Synthetic June 2026 monthly revenue workbook"
+    },
+    {
+      "fixture_id": "operations-notes-docx",
+      "relative_path": "inputs/02-operations-notes.docx",
+      "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "bytes": 2526,
+      "sha256": "b8914071c772e000d7f13a7f8632808cf115700e5bd1c45232314b0280ecd391",
+      "source_label": "Synthetic June 2026 operations notes document"
+    },
+    {
+      "fixture_id": "risk-summary-pdf",
+      "relative_path": "inputs/03-risk-summary.pdf",
+      "media_type": "application/pdf",
+      "bytes": 867,
+      "sha256": "ab4e27543100cb8a2803b14c89a35a81a5150b3393403ba68a82b737712b52d7",
+      "source_label": "Synthetic June 2026 risk summary PDF"
+    }
+  ]
+}
