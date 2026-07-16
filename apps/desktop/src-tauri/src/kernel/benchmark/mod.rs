@@ -8,6 +8,8 @@ use sha2::{Digest, Sha256};
 use crate::kernel::models::AccessMode;
 use crate::kernel::policy::{capability_risk, CapabilityKind, RiskLevel};
 
+pub mod t1;
+
 pub const BENCHMARK_TASK_SPEC_VERSION: &str = "ds-agent.benchmark-task-spec/v1";
 pub const BENCHMARK_RUN_RESULT_VERSION: &str = "ds-agent.benchmark-run-result/v1";
 
