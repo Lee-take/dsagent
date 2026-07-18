@@ -49,6 +49,8 @@ const allowedSourceBinaryFiles = new Set([
 const requiredDocs = [
   "README.md",
   "README.zh-CN.md",
+  "CODE_SIGNING_POLICY.md",
+  "PRIVACY.md",
   "docs/INSTALLATION.md",
   "docs/RELEASE_NOTES_v1.0.2.md",
   "docs/RELEASE_NOTES_v1.0.1.md",
@@ -74,6 +76,8 @@ const publicReleaseCopyFiles = [
   ".github/ISSUE_TEMPLATE/deepseek_compatibility.yml",
   ".github/pull_request_template.md",
   "CONTRIBUTING.md",
+  "CODE_SIGNING_POLICY.md",
+  "PRIVACY.md",
   "README.md",
   "README.zh-CN.md",
   "SECURITY.md",
@@ -344,6 +348,8 @@ const requiredGovernanceDocs = [
   "LICENSE",
   "SECURITY.md",
   "CONTRIBUTING.md",
+  "CODE_SIGNING_POLICY.md",
+  "PRIVACY.md",
   "docs/OPEN_SOURCE_RELEASE.md",
 ];
 const requiredGitHubHygieneFiles = [
@@ -497,6 +503,7 @@ checkExternalBridgeUserVisibleErrors();
 checkLocalReleaseHelperSelfTests();
 checkPackageManagerBaseline();
 checkGovernanceDocs();
+checkCodeSigningAndPrivacyPolicies();
 checkContributingPolicyStatus();
 checkOpenSourceReleaseStatus();
 checkEnvironmentHygiene();
@@ -3352,17 +3359,11 @@ function checkGovernanceDocs() {
   );
 
   const securityPolicy = readText("SECURITY.md");
-  checkTextIncludes(
+  checkTextIncludesCollapsed(
     "SECURITY.md",
     securityPolicy,
-    "0.1.0 preview",
-    "SECURITY.md current preview scope",
-  );
-  checkTextIncludes(
-    "SECURITY.md",
-    securityPolicy,
-    "source-first public preview",
-    "SECURITY.md source-first public preview scope",
+    "DS Agent v1.0.2 is the current published stable release",
+    "SECURITY.md current stable scope",
   );
   checkTextIncludes(
     "SECURITY.md",
@@ -3387,6 +3388,18 @@ function checkGovernanceDocs() {
     securityPolicy,
     "Computer Use remains experimental and high-risk",
     "SECURITY.md Computer Use high-risk status",
+  );
+  checkTextIncludesCollapsed(
+    "SECURITY.md",
+    securityPolicy,
+    "Current stable v1.0.2 reads a user-supplied DeepSeek API key from the desktop process environment",
+    "SECURITY.md current stable credential boundary",
+  );
+  checkTextIncludesCollapsed(
+    "SECURITY.md",
+    securityPolicy,
+    "Unpublished Step 1 onboarding work proposes a dedicated Windows DPAPI vault",
+    "SECURITY.md unpublished DPAPI distinction",
   );
   const collapsedSecurityPolicy = securityPolicy.replace(/\s+/g, " ").trim();
   for (const phrase of [
@@ -3428,6 +3441,68 @@ function checkGovernanceDocs() {
     "DS Agent does not install, launch, or supervise local bridge services",
     "SECURITY.md user-managed local bridge service boundary",
   );
+}
+
+function checkCodeSigningAndPrivacyPolicies() {
+  const signingPolicy = readText("CODE_SIGNING_POLICY.md");
+  const privacyPolicy = readText("PRIVACY.md");
+  const readme = readText("README.md");
+  const readmeZh = readText("README.zh-CN.md");
+  const installation = readText("docs/INSTALLATION.md");
+  const openSourceRelease = readText("docs/OPEN_SOURCE_RELEASE.md");
+
+  for (const [phrase, label] of [
+    ["# Code signing policy", "code-signing policy title"],
+    ["DS Agent `v1.0.2` is unsigned", "code-signing current unsigned status"],
+    ["Free code signing provided by", "SignPath acknowledgement"],
+    ["certificate by", "SignPath certificate acknowledgement"],
+    ["Authors and committers", "code-signing author role"],
+    ["Reviewers for outside contributions", "code-signing reviewer role"],
+    ["Signing approver", "code-signing approver role"],
+    ["Every signing request requires a manual decision", "manual signing approval"],
+    ["GitHub-hosted Windows runner", "origin-verifiable hosted build"],
+    ["sign `ds-agent.exe` before it is packaged into NSIS", "application-before-installer signing order"],
+    ["separately sign the resulting NSIS installer", "installer signing stage"],
+    ["Private keys and signing API tokens must never be committed", "signing secret exclusion"],
+    ["guessed or placeholder identifiers are forbidden", "signing placeholder exclusion"],
+    ["Authenticode `Valid`", "Authenticode validity gate"],
+    ["not designed to discover or exploit vulnerabilities", "non-hacking project purpose"],
+    ["PRIVACY.md", "code-signing privacy link"],
+  ]) {
+    checkTextIncludesCollapsed("CODE_SIGNING_POLICY.md", signingPolicy, phrase, label);
+  }
+
+  for (const [phrase, label] of [
+    ["# Privacy Policy", "privacy policy title"],
+    ["does not operate a project cloud backend, advertising service, or project analytics or telemetry service", "no project telemetry service"],
+    ["The current stable `v1.0.2` reads a user-supplied DeepSeek API key", "privacy current credential behavior"],
+    ["https://cdn.deepseek.com/policies/en-US/deepseek-privacy-policy.html", "DeepSeek privacy disclosure"],
+    ["DuckDuckGo's privacy policy", "web-search privacy disclosure"],
+    ["https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement", "GitHub privacy disclosure"],
+    ["Hugging Face", "skill-source privacy disclosure"],
+    ["WebView2 data and privacy documentation", "WebView2 privacy disclosure"],
+    ["accepts only loopback addresses", "local bridge privacy boundary"],
+    ["Production Microsoft and Google account registration and live mail/calendar writes are disabled in `v1.0.2`", "disabled connector privacy boundary"],
+    ["not uploaded merely because the application is open", "no passive content upload"],
+  ]) {
+    checkTextIncludesCollapsed("PRIVACY.md", privacyPolicy, phrase, label);
+  }
+
+  for (const [filePath, content] of [["README.md", readme], ["README.zh-CN.md", readmeZh]]) {
+    checkTextIncludes(filePath, content, "CODE_SIGNING_POLICY.md", `${filePath} code-signing link`);
+    checkTextIncludes(filePath, content, "PRIVACY.md", `${filePath} privacy link`);
+    checkTextIncludesCollapsed(filePath, content, "Free code signing provided by SignPath.io, certificate by SignPath Foundation", `${filePath} SignPath acknowledgement`);
+    checkTextIncludes(filePath, content, "12,714,353 bytes", `${filePath} exact v1.0.2 asset size`);
+    checkTextIncludes(filePath, content, "21459D5A8CFF2606171CBD52B9D5508A40434101693BEFA81E8DC2D9EBF50E3D", `${filePath} exact v1.0.2 asset SHA-256`);
+    checkTextDoesNotInclude(filePath, content, "12,716,857 bytes", `${filePath} no stale v1.0.1 asset size`);
+    checkTextDoesNotInclude(filePath, content, "469C4EFA54F4C94A6E37D28C9C88D331B26E1770C6792DC93D02B451640E2A6F", `${filePath} no stale v1.0.1 asset SHA-256`);
+  }
+
+  checkTextIncludesCollapsed("docs/INSTALLATION.md", installation, "## Code signing policy and verification", "installation code-signing section");
+  checkTextIncludes("docs/INSTALLATION.md", installation, "Get-AuthenticodeSignature", "installation Authenticode readback command");
+  checkTextIncludes("docs/OPEN_SOURCE_RELEASE.md", openSourceRelease, "CODE_SIGNING_POLICY.md", "open-source release code-signing policy");
+  checkTextIncludes("docs/OPEN_SOURCE_RELEASE.md", openSourceRelease, "PRIVACY.md", "open-source release privacy policy");
+  checkTextIncludesCollapsed("docs/OPEN_SOURCE_RELEASE.md", openSourceRelease, "must not contain a signing token", "open-source release no signing secret policy");
 }
 
 function checkContributingPolicyStatus() {

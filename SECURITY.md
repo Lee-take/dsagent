@@ -1,15 +1,16 @@
 # Security Policy
 
-DeepSeek Agent OS is an alpha local-first desktop project. The 0.1.0 preview is
-a source-first public preview and is not an official DeepSeek product. Security
+DS Agent is a local-first Windows desktop agent. DS Agent v1.0.2 is the current
+published stable release and is not an official DeepSeek product. Security
 reports are welcome, especially around local credentials, permission gates,
-audit records, Computer Use boundaries, and package import/export behavior.
+audit records, Computer Use boundaries, update integrity, code signing, and
+package import/export behavior.
 
 ## Supported Version
 
 | Version | Supported |
 | --- | --- |
-| 0.1.0 | Security reports accepted; no stability guarantee |
+| 1.0.2 | Supported |
 
 ## Reporting A Vulnerability
 
@@ -28,8 +29,12 @@ Include:
 
 ## Security Boundaries
 
-- DeepSeek API keys are read from the local process environment and must not be
-  stored in events, UI state, logs, or exported work packages.
+- Current stable v1.0.2 reads a user-supplied DeepSeek API key from the desktop
+  process environment. It must not be stored in events, UI state, logs, or
+  exported work packages.
+- Unpublished Step 1 onboarding work proposes a dedicated Windows DPAPI vault
+  and secret-free readiness receipt. It is not part of the current stable
+  release and must not be described as published until its release gates pass.
 - `pnpm test:secrets` scans tracked and unignored repository files for live
   `sk-` style keys and non-empty `DEEPSEEK_API_KEY` assignments without printing
   candidate values.
@@ -42,6 +47,9 @@ Include:
 - Web search evidence must preserve source URLs.
 - Import writes memories as reviewable candidates, not automatic long-term
   memory.
+- Release identity must follow the [code signing policy](CODE_SIGNING_POLICY.md).
+  An unsigned or invalidly signed artifact must not be represented as a signed
+  release. See also the [privacy policy](PRIVACY.md).
 
 ## Out Of Scope For Alpha
 

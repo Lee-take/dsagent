@@ -23,6 +23,32 @@ source checkout to run the installed app.
 The installer-selected application directory is only for program files. It is
 not the workspace, evidence folder, export folder, or event database location.
 
+## Code signing policy and verification
+
+DS Agent `v1.0.2` is an immutable historical unsigned release. Its checksum
+remains the verification route for that asset. Future release notes must state
+whether a release is signed. A release must not be described as signed unless
+both `ds-agent.exe` and the NSIS installer independently report Authenticode
+`Valid`, the expected signer and timestamp, and the documented SHA-256.
+
+For releases accepted into the open-source signing program: **Free code signing
+provided by SignPath.io, certificate by SignPath Foundation.** The complete
+[Code signing policy](../CODE_SIGNING_POLICY.md) defines provenance, approval,
+verification, and incident handling. The [privacy policy](../PRIVACY.md)
+describes current local data and user-triggered network behavior.
+
+On Windows, inspect a downloaded installer without launching it:
+
+```powershell
+Get-AuthenticodeSignature .\DS.Agent_1.0.2_x64-setup.exe |
+  Select-Object Status, StatusMessage, SignerCertificate, TimeStamperCertificate
+Get-FileHash .\DS.Agent_1.0.2_x64-setup.exe -Algorithm SHA256
+```
+
+For `v1.0.2`, `Status` is expected to be `NotSigned`. For a future release that
+is explicitly documented as signed, any status other than `Valid`, any
+unexpected signer, or any hash mismatch is a stop condition.
+
 At first run, choose one local workspace root. DS Agent uses that workspace for
 approved local file actions and maintains subdirectories for evidence, exports,
 reports, workflow runs, work packages, memory, logs, and future artifact types
