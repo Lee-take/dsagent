@@ -182,6 +182,15 @@ The v1.0.2 installer is currently unsigned, so Windows may display an
 unknown-publisher warning. Read the [installation guide](docs/INSTALLATION.md)
 before installing.
 
+## Code signing policy
+
+DS Agent `v1.0.2` remains unsigned. The project is preparing an open-source
+signing application; no release is represented as signed until its application
+executable and installer independently verify as Authenticode `Valid`. For
+releases accepted into the program: **Free code signing provided by
+SignPath.io, certificate by SignPath Foundation.** See the full
+[code signing policy](CODE_SIGNING_POLICY.md) and [privacy policy](PRIVACY.md).
+
 ### Build from source
 
 ```powershell
@@ -197,8 +206,8 @@ example `D:\build-target\ds-agent-v1-release`.
 
 - Release: [DS Agent v1.0.2](https://github.com/Lee-take/dsagent/releases/tag/v1.0.2)
 - Installer: `DS.Agent_1.0.2_x64-setup.exe`
-- Size: `12,716,857 bytes`
-- SHA-256: `469C4EFA54F4C94A6E37D28C9C88D331B26E1770C6792DC93D02B451640E2A6F`
+- Size: `12,714,353 bytes`
+- SHA-256: `21459D5A8CFF2606171CBD52B9D5508A40434101693BEFA81E8DC2D9EBF50E3D`
 - Fix: approvals now stay with their owning task, and one task with several
   permissions needs only one confirm-or-reject decision.
 - Validation: source secret scan, production frontend build, Node/UI checks,
@@ -212,7 +221,9 @@ example `D:\build-target\ds-agent-v1-release`.
 - [v1 architecture](docs/architecture/DS_AGENT_V1_ARCHITECTURE_PLAN.md)
 - [v1.0.2 release notes](docs/RELEASE_NOTES_v1.0.2.md)
 - [v1 completion audit](docs/DS_AGENT_V1_COMPLETION_AUDIT.md)
-- [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md) · [License](LICENSE)
+- [Security](SECURITY.md) · [Privacy](PRIVACY.md) ·
+  [Code signing policy](CODE_SIGNING_POLICY.md) ·
+  [Contributing](CONTRIBUTING.md) · [License](LICENSE)
 
 DS Agent is an independent open-source project. It is not an official DeepSeek
 product and does not claim DeepSeek ownership, authorization, or endorsement.

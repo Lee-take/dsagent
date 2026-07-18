@@ -63,6 +63,10 @@ Ship a buildable local-first desktop Agent OS preview that demonstrates:
   setup behavior, and Operations Briefing scope.
 - If an unsigned installer is attached, disclose the unsigned status in the
   release notes and provide a SHA-256 checksum.
+- The immutable `v1.0.2` installer remains unsigned. A future release must not
+  be represented as signed unless its application executable and NSIS installer
+  satisfy `CODE_SIGNING_POLICY.md` and independently verify as Authenticode
+  `Valid` with the expected signer, timestamp, source binding, and SHA-256.
 
 ## Release Hygiene Artifacts
 
@@ -71,6 +75,13 @@ Ship a buildable local-first desktop Agent OS preview that demonstrates:
 - `CONTRIBUTING.md` explains the `0.1.0` Windows-first preview policy.
 - `SECURITY.md` documents current security boundaries and private reporting
   expectations.
+- `PRIVACY.md` documents local data handling and every current category of
+  user-triggered network activity.
+- `CODE_SIGNING_POLICY.md` documents signing roles, manual approval,
+  source-to-binary provenance, two-stage application/installer signing, and
+  independent Authenticode verification. Until SignPath approval provides real
+  identifiers, CI must not contain guessed organization, project, policy, or
+  artifact slugs and the repository must not contain a signing token.
 - GitHub Private Vulnerability Reporting is enabled for sensitive security
   reports.
 - `.github/pull_request_template.md` keeps PRs scoped to existing preview work.

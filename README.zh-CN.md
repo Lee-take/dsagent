@@ -161,6 +161,13 @@ command 与 React UI 保持薄层，业务状态由 Kernel 和持久投影统一
 v1.0.2 安装包目前尚未签名，Windows 可能显示“未知发布者”提示。安装前请阅读
 [安装指南](docs/INSTALLATION.md)。
 
+## Code signing policy（代码签名政策）
+
+DS Agent `v1.0.2` 仍未签名。项目正在准备开源签名申请；只有应用程序和安装包都独立回读为
+Authenticode `Valid`，才会将对应 Release 声明为已签名。获准加入该计划的 Release 将遵循：
+**Free code signing provided by SignPath.io, certificate by SignPath Foundation.**
+完整说明见[代码签名政策](CODE_SIGNING_POLICY.md)和[隐私政策](PRIVACY.md)。
+
 ### 从源码运行
 
 ```powershell
@@ -176,8 +183,8 @@ npx pnpm@9.15.9 --filter @deepseek-agent-os/desktop tauri:dev
 
 - Release：[DS Agent v1.0.2](https://github.com/Lee-take/dsagent/releases/tag/v1.0.2)
 - 安装包：`DS.Agent_1.0.2_x64-setup.exe`
-- 大小：`12,716,857 bytes`
-- SHA-256：`469C4EFA54F4C94A6E37D28C9C88D331B26E1770C6792DC93D02B451640E2A6F`
+- 大小：`12,714,353 bytes`
+- SHA-256：`21459D5A8CFF2606171CBD52B9D5508A40434101693BEFA81E8DC2D9EBF50E3D`
 - 修复：审批只跟随所属任务；同一任务需要多项权限时，只需一次确认或拒绝。
 - 验证：源文件密钥扫描、前端 production build、全部 Node/UI 检查以及 852 项 Rust
   测试；845 项通过，7 项需要额外权限的 live/GUI 测试按设计忽略，0 项失败。
@@ -189,7 +196,9 @@ npx pnpm@9.15.9 --filter @deepseek-agent-os/desktop tauri:dev
 - [v1 架构计划](docs/architecture/DS_AGENT_V1_ARCHITECTURE_PLAN.md)
 - [v1.0.2 发布说明](docs/RELEASE_NOTES_v1.0.2.md)
 - [v1 完成审计](docs/DS_AGENT_V1_COMPLETION_AUDIT.md)
-- [安全说明](SECURITY.md) · [参与贡献](CONTRIBUTING.md) · [开源许可](LICENSE)
+- [安全说明](SECURITY.md) · [隐私政策](PRIVACY.md) ·
+  [代码签名政策](CODE_SIGNING_POLICY.md) · [参与贡献](CONTRIBUTING.md) ·
+  [开源许可](LICENSE)
 
 DS Agent 是独立开源项目，不是 DeepSeek 官方产品，也不主张任何 DeepSeek 所有权、授权
 或官方背书。项目使用 DeepSeek 名称，仅用于说明模型兼容性和 DeepSeek-first 设计方向。
