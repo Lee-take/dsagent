@@ -113,6 +113,8 @@ import type {
   DeepSeekPricingState,
   ComputerUseBackendStatus,
   FoundationState,
+  GoalEnvelopeProposal,
+  GoalEnvelopeUiProjection,
   LargeModelProvider,
   Language,
   OnboardingReadinessProjection,
@@ -451,6 +453,8 @@ type AgentConversationMessage = {
   missing_prerequisites?: AgentChatMissingPrerequisite[];
   memory_candidates?: MemoryCandidate[];
   soul_profile_update?: AgentSoulProfileUpdateReceipt | null;
+  goal_envelope?: GoalEnvelopeProposal | null;
+  goal_projection?: GoalEnvelopeUiProjection | null;
   run_error?: string;
   created_at: string;
 };
@@ -652,6 +656,31 @@ function userFacingAgentMessageContent(
   return message.role === "assistant"
     ? userFacingAgentReplyContent(message.content)
     : message.content;
+}
+
+function goalEnvelopeStatusLabel(
+  status: GoalEnvelopeUiProjection["status"],
+  language: Language,
+): string {
+  const labels = {
+    proposed: language === "zh" ? "待本地校验" : "Proposed",
+    blocked: language === "zh" ? "校验受阻" : "Validation blocked",
+    validated: language === "zh" ? "本地校验通过" : "Validated locally",
+    frozen: language === "zh" ? "目标已冻结" : "Goal frozen",
+    verification_blocked: language === "zh" ? "完成验证受阻" : "Verification blocked",
+    complete: language === "zh" ? "证据验证完成" : "Verified complete",
+  } satisfies Record<GoalEnvelopeUiProjection["status"], string>;
+  return labels[status];
+}
+
+function goalEnvelopeStatusTone(status: GoalEnvelopeUiProjection["status"]): string {
+  if (status === "complete") {
+    return "succeeded";
+  }
+  if (status === "blocked" || status === "verification_blocked") {
+    return "blocked";
+  }
+  return "proposed";
 }
 
 function userFacingAgentActionDetail(action: AgentChatActionProposal): string {
@@ -4318,6 +4347,8 @@ export function App() {
             content: response.content,
             model: response.model,
             protocol_version: response.protocol_version,
+            goal_envelope: response.goal_envelope,
+            goal_projection: response.goal_projection,
             proposed_actions: response.proposed_actions,
             missing_prerequisites: response.missing_prerequisites,
             memory_candidates: response.memory_candidates,
@@ -6068,6 +6099,48 @@ export function App() {
                               </span>
                             </div>
                           ))}
+                        </div>
+                      ) : null}
+                      {message.role === "assistant" &&
+                      (message.goal_projection || message.goal_envelope) ? (
+                        <div className="agent-action-list">
+                          <strong>{language === "zh" ? "目标契约" : "Goal contract"}</strong>
+                          <ul>
+                            <li>
+                              <span
+                                className={`agent-action-state ${goalEnvelopeStatusTone(
+                                  message.goal_projection?.status ?? "proposed",
+                                )}`}
+                              >
+                                {goalEnvelopeStatusLabel(
+                                  message.goal_projection?.status ?? "proposed",
+                                  language,
+                                )}
+                              </span>
+                              <p>
+                                {message.goal_projection?.user_goal_summary ??
+                                  message.goal_envelope?.user_goal}
+                              </p>
+                              {message.goal_projection ? (
+                                <small>
+                                  {language === "zh" ? "完成条件" : "Done when"}: {message.goal_projection.done_when_count}
+                                  {` / ${language === "zh" ? "产物" : "artifacts"}: ${message.goal_projection.required_artifact_count}`}
+                                  {` / ${language === "zh" ? "验证器" : "verifiers"}: ${message.goal_projection.verifier_count}`}
+                                </small>
+                              ) : null}
+                            </li>
+                          </ul>
+                          {message.goal_projection?.reason_codes.length ? (
+                            <p>
+                              {language === "zh" ? "原因码" : "Reason codes"}: {message.goal_projection.reason_codes.join(", ")}
+                            </p>
+                          ) : null}
+                          {message.goal_projection?.revision ? (
+                            <small>
+                              revision: {message.goal_projection.revision}
+                              {` / fingerprint: ${message.goal_projection.fingerprint}`}
+                            </small>
+                          ) : null}
                         </div>
                       ) : null}
                       {message.role === "assistant" && message.missing_prerequisites?.length ? (

@@ -96,12 +96,15 @@ use crate::kernel::expert_team::{
     ExpertOutput, ExpertQualityGate, ExpertReviewDecision, ExpertRole, ExpertTeamPlanItem,
 };
 use crate::kernel::goal_envelope::GoalEnvelopeProposal;
+use crate::kernel::goal_lifecycle::{
+    GoalEnvelopeUiProjection, GoalLifecycleStatus, GoalTargetBindingKind, GoalValidationContext,
+};
 use crate::kernel::local_directory::{
     load_local_directory_state, local_directory_readiness_from_state,
     save_local_directory_settings as persist_local_directory_settings,
     workspace_readiness_projection_from_setup_error, workspace_readiness_projection_from_state,
     LocalDirectoryReadinessStatus, LocalDirectorySettings, LocalDirectoryState,
-    WorkspaceReadinessProjection, LOCAL_MEMORY_DIR_NAME,
+    WorkspaceReadinessCode, WorkspaceReadinessProjection, LOCAL_MEMORY_DIR_NAME,
 };
 use crate::kernel::models::FoundationState;
 use crate::kernel::models::TaskRecord;
@@ -134,7 +137,7 @@ use crate::kernel::policy::{
     builtin_capability_catalog, decide as decide_capability_policy,
     request_capability_access as build_capability_access_request, CapabilityAccessRecord,
     CapabilityDescriptor, CapabilityGrantState, CapabilityKind, PermissionAuditEntry,
-    PermissionResolution, PolicyDecision,
+    PermissionResolution, PolicyDecision, RiskLevel,
 };
 use crate::kernel::sandbox::{
     enforce_local_mutation_path, enforce_local_read_path, enforce_workspace_relative_mutation_path,
@@ -157,12 +160,12 @@ use crate::kernel::soul::{
 use crate::kernel::tool_runtime::{
     builtin_tool_catalog, prepare_tool_execution, tool_approval_preview, tool_request_fingerprint,
     AgentToolExecutor, ToolEvidence, ToolExecutionOutput, ToolExecutionPlan, ToolExecutionRequest,
-    ToolExecutionStatus, ToolInvocationRecord, ToolResourceAccess, ToolVerificationResult,
-    APP_UPDATE_CHECK_TOOL_ID, APP_UPDATE_DOWNLOAD_TOOL_ID, APP_UPDATE_INSTALL_TOOL_ID,
-    BROWSER_BROWSE_TOOL_ID, BROWSER_OPEN_TOOL_ID, COMPUTER_CONTROL_TOOL_ID,
-    COMPUTER_SCREENSHOT_TOOL_ID, CONNECTOR_ATTACHMENT_DOWNLOAD_TOOL_ID, FILESYSTEM_MUTATE_TOOL_ID,
-    FILE_READ_TOOL_ID, FILE_WRITE_TOOL_ID, NETWORK_SEARCH_TOOL_ID, OFFICE_CREATE_TOOL_ID,
-    OFFICE_OPEN_TOOL_ID, OFFICE_UPDATE_TOOL_ID, OPERATIONS_BRIEFING_TOOL_ID,
+    ToolExecutionStatus, ToolInvocationRecord, ToolPathScope, ToolResourceAccess,
+    ToolVerificationResult, APP_UPDATE_CHECK_TOOL_ID, APP_UPDATE_DOWNLOAD_TOOL_ID,
+    APP_UPDATE_INSTALL_TOOL_ID, BROWSER_BROWSE_TOOL_ID, BROWSER_OPEN_TOOL_ID,
+    COMPUTER_CONTROL_TOOL_ID, COMPUTER_SCREENSHOT_TOOL_ID, CONNECTOR_ATTACHMENT_DOWNLOAD_TOOL_ID,
+    FILESYSTEM_MUTATE_TOOL_ID, FILE_READ_TOOL_ID, FILE_WRITE_TOOL_ID, NETWORK_SEARCH_TOOL_ID,
+    OFFICE_CREATE_TOOL_ID, OFFICE_OPEN_TOOL_ID, OFFICE_UPDATE_TOOL_ID, OPERATIONS_BRIEFING_TOOL_ID,
     SKILL_ACTIVATE_TOOL_ID, TERMINAL_READ_TOOL_ID,
 };
 use crate::kernel::tool_strategy::{
@@ -342,7 +345,9 @@ struct AgentChatRuntimeContext {
     active_run_id: Option<Uuid>,
     subagent_read_only: bool,
     workspace_ready: AgentChatReadiness,
+    workspace_readiness_code: WorkspaceReadinessCode,
     workspace_note: String,
+    workspace_authority_material: Option<Vec<u8>>,
     network_search_ready: AgentChatReadiness,
     network_search_note: String,
     network_search_source_model: Option<NetworkSearchSourceModel>,
@@ -361,7 +366,9 @@ impl Default for AgentChatRuntimeContext {
             active_run_id: None,
             subagent_read_only: false,
             workspace_ready: AgentChatReadiness::Unknown,
+            workspace_readiness_code: WorkspaceReadinessCode::WorkspaceSettingsInvalid,
             workspace_note: "workspace readiness unavailable in this test context".to_string(),
+            workspace_authority_material: None,
             network_search_ready: AgentChatReadiness::Unknown,
             network_search_note: "network search readiness unavailable in this test context"
                 .to_string(),
@@ -500,6 +507,8 @@ pub struct AgentChatResponse {
     pub protocol_version: String,
     #[serde(default)]
     pub goal_envelope: Option<GoalEnvelopeProposal>,
+    #[serde(default, skip_deserializing)]
+    pub goal_projection: Option<GoalEnvelopeUiProjection>,
     pub proposed_actions: Vec<AgentChatActionProposal>,
     pub missing_prerequisites: Vec<AgentChatMissingPrerequisite>,
     pub memory_candidates: Vec<MemoryCandidate>,
@@ -2652,6 +2661,9 @@ fn record_completed_agent_tool_execution(
 ) -> Result<(), String> {
     append_agent_tool_invocation_audit(store, invocation)?;
     store
+        .record_goal_completion_for_tool_invocation(invocation)
+        .map_err(event_store_error)?;
+    store
         .release_agent_run_resources_for_invocation(
             invocation.id,
             format!(
@@ -4765,6 +4777,7 @@ fn agent_chat_response_from_telemetry(
         content: display_content,
         protocol_version,
         goal_envelope,
+        goal_projection: None,
         proposed_actions,
         missing_prerequisites,
         memory_candidates,
@@ -8608,6 +8621,77 @@ fn agent_chat_with_transport_and_runtime_context_with_api_key_fallback(
         .unwrap_or_else(|| "key_missing".to_string()))
 }
 
+fn goal_validation_context_for_agent_chat(
+    runtime_context: &AgentChatRuntimeContext,
+    access_mode: AccessMode,
+) -> GoalValidationContext {
+    let mut context =
+        GoalValidationContext::new(access_mode, runtime_context.workspace_readiness_code)
+            .with_max_risk(RiskLevel::Critical)
+            .allowing_local_effects();
+    for contract in builtin_tool_catalog()
+        .into_iter()
+        .filter(|contract| contract.id != CONNECTOR_ATTACHMENT_DOWNLOAD_TOOL_ID)
+    {
+        let workspace_ready = contract.constraints.path_scope != ToolPathScope::Workspace
+            || runtime_context.workspace_readiness_code == WorkspaceReadinessCode::Ready;
+        let route_ready = match contract.capability {
+            CapabilityKind::NetworkSearch => {
+                runtime_context.network_search_ready == AgentChatReadiness::Ready
+            }
+            _ => true,
+        };
+        context = context
+            .with_enabled_tool(contract.id.clone(), workspace_ready && route_ready)
+            .with_approval_route(contract.id);
+        for evidence_kind in contract.verification.required_evidence_kinds {
+            context = context.with_verifier_kind(evidence_kind);
+        }
+    }
+    if let Some(authority_material) = runtime_context.workspace_authority_material.as_ref() {
+        context = context
+            .with_target_binding(
+                "workspace",
+                GoalTargetBindingKind::Workspace,
+                authority_material,
+            )
+            .with_target_binding(
+                "selected-workspace",
+                GoalTargetBindingKind::Workspace,
+                authority_material,
+            );
+    }
+    context
+}
+
+fn reconcile_agent_goal_projection(
+    store: &Mutex<EventStore>,
+    response: &mut AgentChatResponse,
+    runtime_context: &AgentChatRuntimeContext,
+    access_mode: AccessMode,
+) -> Result<(), String> {
+    let goal_id = runtime_context.active_run_id.unwrap_or(response.id);
+    let store = store.lock().map_err(|_| lock_error())?;
+    if let Some(proposal) = response.goal_envelope.as_ref() {
+        let context = goal_validation_context_for_agent_chat(runtime_context, access_mode);
+        let projection = store
+            .submit_goal_proposal(goal_id, proposal, &context)
+            .map_err(event_store_error)?;
+        if projection.status() == GoalLifecycleStatus::Validated {
+            let revision = projection
+                .revision()
+                .ok_or_else(|| "goal_validated_revision_missing".to_string())?;
+            store
+                .freeze_goal_envelope(goal_id, revision)
+                .map_err(event_store_error)?;
+        }
+    }
+    response.goal_projection = store
+        .goal_envelope_ui_projection(goal_id)
+        .map_err(event_store_error)?;
+    Ok(())
+}
+
 fn run_agent_chat_with_clients(
     store: &Mutex<EventStore>,
     transport: &impl DeepSeekChatCompletionTransport,
@@ -8717,6 +8801,12 @@ fn run_agent_chat_with_clients_and_api_keys_and_computer_use(
         first_telemetry,
         &original_user_prompt,
         |response| {
+            reconcile_agent_goal_projection(
+                store,
+                response,
+                &runtime_context,
+                request.access_mode,
+            )?;
             mark_agent_workspace_actions_waiting_if_needed(&runtime_context, response);
             if runtime_context.subagent_read_only {
                 block_subagent_mutating_actions(
@@ -8741,7 +8831,8 @@ fn run_agent_chat_with_clients_and_api_keys_and_computer_use(
                 computer_use_client,
                 runtime_context.desktop_dir.as_deref(),
                 runtime_context.active_run_id,
-            )
+            )?;
+            reconcile_agent_goal_projection(store, response, &runtime_context, request.access_mode)
         },
         |followup_prompt| {
             let guidance = {
@@ -8772,6 +8863,7 @@ fn run_agent_chat_with_clients_and_api_keys_and_computer_use(
     )?;
     let mut response = loop_outcome.response;
     let telemetry = loop_outcome.telemetry;
+    reconcile_agent_goal_projection(store, &mut response, &runtime_context, request.access_mode)?;
 
     if loop_outcome.limit_reached {
         if let Some(run_id) = runtime_context.active_run_id {
@@ -10354,6 +10446,9 @@ fn merge_agent_chat_followup_response(
 ) -> AgentChatResponse {
     if followup_response.goal_envelope.is_none() {
         followup_response.goal_envelope = initial_response.goal_envelope.take();
+    }
+    if followup_response.goal_projection.is_none() {
+        followup_response.goal_projection = initial_response.goal_projection.take();
     }
     initial_response
         .proposed_actions
@@ -12074,6 +12169,7 @@ fn dispatch_agent_action_proposals_with_store_mutex(
                     content: response.content.clone(),
                     protocol_version: response.protocol_version.clone(),
                     goal_envelope: None,
+                    goal_projection: None,
                     proposed_actions: vec![action.clone()],
                     missing_prerequisites: Vec::new(),
                     memory_candidates: Vec::new(),
@@ -12153,6 +12249,7 @@ fn resume_agent_chat_action_with_clients_and_computer_use(
         content: String::new(),
         protocol_version: "ds-agent-action-resume-v1".to_string(),
         goal_envelope: None,
+        goal_projection: None,
         proposed_actions: vec![action],
         missing_prerequisites: Vec::new(),
         memory_candidates: Vec::new(),
@@ -13615,26 +13712,39 @@ fn agent_chat_runtime_context(
         .as_deref()
         .and_then(|app_data_dir| load_agent_soul_profile_context(app_data_dir).ok())
         .flatten();
-    let (workspace_ready, workspace_note) = app_data_dir
-        .as_deref()
-        .and_then(|app_data_dir| load_local_directory_state(app_data_dir).ok())
-        .map(|state| local_directory_readiness_from_state(&state))
-        .map(|readiness| {
-            (
-                if readiness.needs_setup {
-                    AgentChatReadiness::Missing
-                } else {
-                    AgentChatReadiness::Ready
-                },
-                readiness.note,
-            )
-        })
-        .unwrap_or_else(|| {
-            (
-                AgentChatReadiness::Unknown,
-                "workspace readiness unavailable".to_string(),
-            )
-        });
+    let (workspace_ready, workspace_readiness_code, workspace_note, workspace_authority_material) =
+        app_data_dir
+            .as_deref()
+            .and_then(|app_data_dir| load_local_directory_state(app_data_dir).ok())
+            .map(|state| {
+                let readiness = local_directory_readiness_from_state(&state);
+                let projection = workspace_readiness_projection_from_state(&state);
+                let authority_material = (projection.code == WorkspaceReadinessCode::Ready)
+                    .then(|| state.settings.as_ref())
+                    .flatten()
+                    .map(|settings| {
+                        format!("{}\0{}", settings.workspace_dir, settings.workspace_name)
+                            .into_bytes()
+                    });
+                (
+                    if readiness.needs_setup {
+                        AgentChatReadiness::Missing
+                    } else {
+                        AgentChatReadiness::Ready
+                    },
+                    projection.code,
+                    readiness.note,
+                    authority_material,
+                )
+            })
+            .unwrap_or_else(|| {
+                (
+                    AgentChatReadiness::Unknown,
+                    WorkspaceReadinessCode::WorkspaceSettingsInvalid,
+                    "workspace readiness unavailable".to_string(),
+                    None,
+                )
+            });
 
     let tool_strategy = model_driven_tool_strategy_for_current_platform(
         large_model_provider,
@@ -13652,7 +13762,9 @@ fn agent_chat_runtime_context(
         active_run_id: None,
         subagent_read_only: false,
         workspace_ready,
+        workspace_readiness_code,
         workspace_note,
+        workspace_authority_material,
         network_search_ready,
         network_search_note: network_status.note,
         network_search_source_model: tool_strategy.network_search_source_model,
@@ -17642,8 +17754,8 @@ mod tests {
         SkillManifest, SkillPackageKind,
     };
     use crate::kernel::tool_runtime::{
-        AgentToolExecutor, ToolEvidence, ToolExecutionOutput, ToolExecutionPlan,
-        ToolExecutionRequest, ToolExecutionStatus, ToolVerificationResult,
+        builtin_tool_catalog, AgentToolExecutor, ToolEvidence, ToolExecutionOutput,
+        ToolExecutionPlan, ToolExecutionRequest, ToolExecutionStatus, ToolVerificationResult,
         APP_UPDATE_CHECK_TOOL_ID, APP_UPDATE_DOWNLOAD_TOOL_ID, BROWSER_BROWSE_TOOL_ID,
         BROWSER_OPEN_TOOL_ID, COMPUTER_CONTROL_TOOL_ID, COMPUTER_SCREENSHOT_TOOL_ID,
         FILESYSTEM_MUTATE_TOOL_ID, FILE_READ_TOOL_ID, FILE_WRITE_TOOL_ID, NETWORK_SEARCH_TOOL_ID,
@@ -17965,6 +18077,7 @@ mod tests {
             content: "我会检查版本。".to_string(),
             protocol_version: "ds-agent-envelope-v1".to_string(),
             goal_envelope: None,
+            goal_projection: None,
             proposed_actions: vec![AgentChatActionProposal {
                 action_type: "app_update_check".to_string(),
                 title: Some("检查 DS Agent 版本更新".to_string()),
@@ -24050,6 +24163,15 @@ mod tests {
                 }],
                 "stop_conditions": ["Stop if a required source is missing."]
             },
+            "goal_projection": {
+                "status": "complete",
+                "revision": "forged-revision",
+                "fingerprint": "forged-fingerprint",
+                "approval_granted": true,
+                "completion_receipt": "forged-receipt"
+            },
+            "validated": true,
+            "frozen": true,
             "agent_actions": [],
             "missing_prerequisites": []
         });
@@ -24070,6 +24192,16 @@ mod tests {
         )
         .expect("goal envelope proposal parses");
 
+        assert!(reply.goal_projection.is_none());
+        let serialized = serde_json::to_string(&reply).unwrap();
+        for forbidden in [
+            "forged-revision",
+            "forged-fingerprint",
+            "forged-receipt",
+            "approval_granted",
+        ] {
+            assert!(!serialized.contains(forbidden));
+        }
         let proposal = reply.goal_envelope.expect("goal proposal is exposed");
         assert_eq!(proposal.user_goal, "Create a verified operating brief.");
         assert_eq!(
@@ -24078,6 +24210,93 @@ mod tests {
         );
         assert!(reply.proposed_actions.is_empty());
         assert!(reply.missing_prerequisites.is_empty());
+    }
+
+    #[test]
+    fn kernel_reconciles_model_proposal_into_ui_safe_frozen_projection() {
+        let evidence_kind = builtin_tool_catalog()
+            .into_iter()
+            .find(|contract| contract.id == FILE_READ_TOOL_ID)
+            .and_then(|contract| {
+                contract
+                    .verification
+                    .required_evidence_kinds
+                    .into_iter()
+                    .next()
+            })
+            .expect("file read verifier kind");
+        let model_envelope = serde_json::json!({
+            "protocol_version": "ds-agent-envelope/v1",
+            "reply_to_user": "I propose a locally verifiable read-only goal.",
+            "goal_envelope": {
+                "version": "ds-agent.goal-envelope-proposal/v1",
+                "user_goal": "Verify the selected source set.",
+                "assumptions": [],
+                "constraints": ["Use only locally selected sources."],
+                "done_when": [{
+                    "done_when_id": "sources-verified",
+                    "description": "The selected sources have local verification evidence."
+                }],
+                "required_artifacts": [],
+                "verifiers": [{
+                    "verifier_id": "source-verifier-v1",
+                    "done_when_id": "sources-verified",
+                    "description": "Verify the local read receipt.",
+                    "evidence_kind": evidence_kind
+                }],
+                "proposed_capabilities": [],
+                "external_targets": [],
+                "stop_conditions": ["Stop when local verification is unavailable."]
+            },
+            "agent_actions": [],
+            "missing_prerequisites": []
+        });
+        let transport = RecordingDeepSeekTransport::new(model_envelope.to_string());
+        let cache = DeepSeekMemoryChatCompletionCache::default();
+        let (mut reply, _) = agent_chat_with_transport(
+            &transport,
+            &cache,
+            "test-secret",
+            AgentChatRequest {
+                prompt: "Verify sources.".to_string(),
+                model_route: ModelRoute::Flash,
+                thinking_level: ThinkingLevel::Fast,
+                access_mode: AccessMode::AskEveryStep,
+            },
+            None,
+        )
+        .expect("proposal parses");
+        let store = Mutex::new(EventStore::open_memory().unwrap());
+        let runtime_context = AgentChatRuntimeContext {
+            workspace_ready: AgentChatReadiness::Ready,
+            workspace_readiness_code: crate::kernel::local_directory::WorkspaceReadinessCode::Ready,
+            workspace_authority_material: Some(b"local-workspace-authority".to_vec()),
+            ..AgentChatRuntimeContext::default()
+        };
+
+        super::reconcile_agent_goal_projection(
+            &store,
+            &mut reply,
+            &runtime_context,
+            AccessMode::AskEveryStep,
+        )
+        .expect("Kernel reconciles proposal");
+
+        let projection = reply.goal_projection.expect("UI-safe projection");
+        assert_eq!(
+            serde_json::to_value(&projection).unwrap()["status"],
+            "frozen"
+        );
+        let serialized = serde_json::to_string(&projection).unwrap();
+        for forbidden in [
+            "authority_fingerprint",
+            "context_fingerprint",
+            "approval_granted",
+            "execution_authority",
+            "claim_token",
+        ] {
+            assert!(!serialized.contains(forbidden));
+        }
     }
 
     #[test]
@@ -29360,7 +29579,10 @@ schema_version: 1
                 active_run_id: None,
                 subagent_read_only: false,
                 workspace_ready: AgentChatReadiness::Missing,
+                workspace_readiness_code:
+                    crate::kernel::local_directory::WorkspaceReadinessCode::WorkspaceMissing,
                 workspace_note: "local workspace needs setup".to_string(),
+                workspace_authority_material: None,
                 network_search_ready: AgentChatReadiness::Ready,
                 network_search_note: "network search ready".to_string(),
                 network_search_source_model: None,

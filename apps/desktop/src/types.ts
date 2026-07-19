@@ -960,12 +960,35 @@ export type GoalEnvelopeProposal = {
   stop_conditions: string[];
 };
 
+export type GoalEnvelopeUiStatus =
+  | "proposed"
+  | "blocked"
+  | "validated"
+  | "frozen"
+  | "verification_blocked"
+  | "complete";
+
+export type GoalEnvelopeUiProjection = {
+  version: "ds-agent.goal-envelope-ui/v1";
+  goal_id: string;
+  status: GoalEnvelopeUiStatus;
+  reason_codes: string[];
+  revision: string | null;
+  fingerprint: string;
+  completion_fingerprint: string | null;
+  user_goal_summary: string | null;
+  done_when_count: number;
+  required_artifact_count: number;
+  verifier_count: number;
+};
+
 export type AgentChatResponse = {
   id: string;
   role: "assistant";
   content: string;
   protocol_version: string;
   goal_envelope: GoalEnvelopeProposal | null;
+  goal_projection: GoalEnvelopeUiProjection | null;
   proposed_actions: AgentChatActionProposal[];
   missing_prerequisites: AgentChatMissingPrerequisite[];
   memory_candidates: MemoryCandidate[];
