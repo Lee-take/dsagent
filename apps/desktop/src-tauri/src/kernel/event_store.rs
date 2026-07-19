@@ -75,6 +75,14 @@ use crate::kernel::expert_team::{
     parent_input_revision, resources_conflict, validate_team_plan, ExpertAttemptResult,
     ExpertMergeReceipt, ExpertTeamPlanItem, EXPERT_TEAM_MAX_TOTAL_ATTEMPTS,
 };
+use crate::kernel::goal_envelope::GoalEnvelopeProposal;
+use crate::kernel::goal_lifecycle::{
+    completion_event, completion_evidence_from_tool_invocation, completion_projection,
+    frozen_projection, goal_ui_projection as build_goal_ui_projection, projection_event,
+    proposal_received_projection, validated_projection, GoalCompletionProjection,
+    GoalEnvelopeUiProjection, GoalLifecycleProjection, GoalLifecycleState, GoalLifecycleStatus,
+    GoalValidationContext, GOAL_COMPLETION_SCHEMA_VERSION, GOAL_LIFECYCLE_SCHEMA_VERSION,
+};
 use crate::kernel::models::{
     AccessMode, KernelEvent, MemoryCandidate, MemoryCandidateMergePreview, MemoryCandidateRecord,
     MemoryCandidateReplacePreview, MemoryCandidateResolution, MemoryCandidateSource,
@@ -1294,6 +1302,34 @@ impl EventStore {
 
             CREATE INDEX IF NOT EXISTS idx_kernel_events_created_at
                 ON kernel_events (created_at);
+
+            CREATE TABLE IF NOT EXISTS goal_envelope_projection (
+                goal_id TEXT PRIMARY KEY NOT NULL,
+                schema_version TEXT NOT NULL,
+                status TEXT NOT NULL,
+                proposal_fingerprint TEXT NOT NULL,
+                revision TEXT,
+                projection_json TEXT NOT NULL,
+                row_revision INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_goal_envelope_projection_status
+                ON goal_envelope_projection (status, updated_at);
+
+            CREATE TABLE IF NOT EXISTS goal_completion_projection (
+                goal_id TEXT PRIMARY KEY NOT NULL,
+                schema_version TEXT NOT NULL,
+                revision TEXT NOT NULL,
+                frozen_fingerprint TEXT NOT NULL,
+                status TEXT NOT NULL,
+                projection_json TEXT NOT NULL,
+                row_revision INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_goal_completion_projection_status
+                ON goal_completion_projection (status, updated_at);
 
             CREATE TABLE IF NOT EXISTS capability_access_state (
                 request_id TEXT PRIMARY KEY NOT NULL,
@@ -10298,6 +10334,378 @@ impl EventStore {
         Self::insert_kernel_event(&transaction, event)?;
         transaction.commit()?;
         Ok(())
+    }
+
+    pub fn submit_goal_proposal(
+        &self,
+        goal_id: Uuid,
+        proposal: &GoalEnvelopeProposal,
+        context: &GoalValidationContext,
+    ) -> EventStoreResult<GoalLifecycleProjection> {
+        let received = proposal_received_projection(goal_id, proposal)
+            .map_err(|_| EventStoreError::InvalidState("goal_proposal_invalid".to_string()))?;
+        self.persist_goal_projection(&received)?;
+        let validated = validated_projection(goal_id, proposal, context)
+            .map_err(|_| EventStoreError::InvalidState("goal_proposal_invalid".to_string()))?;
+        self.persist_goal_projection(&validated)
+    }
+
+    pub fn freeze_goal_envelope(
+        &self,
+        goal_id: Uuid,
+        expected_revision: &str,
+    ) -> EventStoreResult<GoalLifecycleProjection> {
+        let current = self
+            .goal_envelope_projection(goal_id)?
+            .ok_or_else(|| EventStoreError::InvalidState("goal_not_found".to_string()))?;
+        let frozen = frozen_projection(&current, expected_revision)
+            .map_err(|code| EventStoreError::InvalidState(code.to_string()))?;
+        self.persist_goal_projection(&frozen)
+    }
+
+    pub fn goal_envelope_projection(
+        &self,
+        goal_id: Uuid,
+    ) -> EventStoreResult<Option<GoalLifecycleProjection>> {
+        let row = self
+            .conn
+            .query_row(
+                r#"SELECT schema_version, status, proposal_fingerprint, revision, projection_json
+                   FROM goal_envelope_projection WHERE goal_id = ?1"#,
+                params![goal_id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        row.map(|row| Self::decode_goal_projection(goal_id, row))
+            .transpose()
+    }
+
+    fn persist_goal_projection(
+        &self,
+        next: &GoalLifecycleProjection,
+    ) -> EventStoreResult<GoalLifecycleProjection> {
+        next.validate_persisted()
+            .map_err(|code| EventStoreError::InvalidState(code.to_string()))?;
+        let transaction = self.conn.unchecked_transaction()?;
+        let current_row = transaction
+            .query_row(
+                r#"SELECT schema_version, status, proposal_fingerprint, revision, projection_json
+                   FROM goal_envelope_projection WHERE goal_id = ?1"#,
+                params![next.goal_id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let current = current_row
+            .map(|row| Self::decode_goal_projection(next.goal_id, row))
+            .transpose()?;
+        let event = projection_event(next)?;
+
+        if let Some(current) = current.as_ref() {
+            if current == next
+                || (next.status() == GoalLifecycleStatus::ProposalReceived
+                    && current.proposal_fingerprint() == next.proposal_fingerprint())
+                || (current.status() == GoalLifecycleStatus::Frozen
+                    && next.status() == GoalLifecycleStatus::Validated
+                    && current.proposal_fingerprint() == next.proposal_fingerprint()
+                    && current.revision() == next.revision())
+            {
+                Self::insert_goal_kernel_event(&transaction, &event)?;
+                transaction.commit()?;
+                return Ok(current.clone());
+            }
+            if !Self::goal_transition_allowed(current, next) {
+                return Err(EventStoreError::InvalidState(
+                    "goal_transition_not_allowed".to_string(),
+                ));
+            }
+        } else if next.status() != GoalLifecycleStatus::ProposalReceived {
+            return Err(EventStoreError::InvalidState(
+                "goal_transition_not_allowed".to_string(),
+            ));
+        }
+
+        let projection_json = serde_json::to_string(next)?;
+        transaction.execute(
+            r#"INSERT INTO goal_envelope_projection
+               (goal_id, schema_version, status, proposal_fingerprint, revision,
+                projection_json, row_revision, updated_at)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)
+               ON CONFLICT(goal_id) DO UPDATE SET
+                 schema_version = excluded.schema_version,
+                 status = excluded.status,
+                 proposal_fingerprint = excluded.proposal_fingerprint,
+                 revision = excluded.revision,
+                 projection_json = excluded.projection_json,
+                 row_revision = goal_envelope_projection.row_revision + 1,
+                 updated_at = excluded.updated_at"#,
+            params![
+                next.goal_id.to_string(),
+                GOAL_LIFECYCLE_SCHEMA_VERSION,
+                next.status().as_str(),
+                next.proposal_fingerprint(),
+                next.revision(),
+                projection_json,
+                event.created_at.to_rfc3339_opts(SecondsFormat::Nanos, true),
+            ],
+        )?;
+        Self::insert_goal_kernel_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok(next.clone())
+    }
+
+    fn insert_goal_kernel_event(
+        transaction: &Transaction<'_>,
+        event: &KernelEvent,
+    ) -> EventStoreResult<()> {
+        transaction.execute(
+            r#"INSERT OR IGNORE INTO kernel_events (id, event_type, payload_json, created_at)
+               VALUES (?1, ?2, ?3, ?4)"#,
+            params![
+                event.id.to_string(),
+                event.event_type,
+                event.payload_json,
+                event.created_at.to_rfc3339_opts(SecondsFormat::Nanos, true),
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn goal_transition_allowed(
+        current: &GoalLifecycleProjection,
+        next: &GoalLifecycleProjection,
+    ) -> bool {
+        if current.goal_id != next.goal_id {
+            return false;
+        }
+        if next.status() == GoalLifecycleStatus::ProposalReceived {
+            return current.proposal_fingerprint() != next.proposal_fingerprint();
+        }
+        if current.proposal_fingerprint() != next.proposal_fingerprint() {
+            return false;
+        }
+        matches!(
+            (&current.state, &next.state),
+            (
+                GoalLifecycleState::ProposalReceived { .. },
+                GoalLifecycleState::ValidationBlocked { .. } | GoalLifecycleState::Validated { .. }
+            ) | (
+                GoalLifecycleState::ValidationBlocked { .. },
+                GoalLifecycleState::ValidationBlocked { .. } | GoalLifecycleState::Validated { .. }
+            ) | (
+                GoalLifecycleState::Validated { .. },
+                GoalLifecycleState::ValidationBlocked { .. }
+                    | GoalLifecycleState::Validated { .. }
+                    | GoalLifecycleState::Frozen { .. }
+            ) | (
+                GoalLifecycleState::Frozen { .. },
+                GoalLifecycleState::ValidationBlocked { .. } | GoalLifecycleState::Validated { .. }
+            )
+        )
+    }
+
+    fn decode_goal_projection(
+        goal_id: Uuid,
+        row: (String, String, String, Option<String>, String),
+    ) -> EventStoreResult<GoalLifecycleProjection> {
+        let (schema_version, status, proposal_fingerprint, revision, projection_json) = row;
+        let projection: GoalLifecycleProjection = serde_json::from_str(&projection_json)?;
+        projection
+            .validate_persisted()
+            .map_err(|code| EventStoreError::InvalidState(code.to_string()))?;
+        if projection.goal_id != goal_id
+            || projection.schema_version != schema_version
+            || projection.status().as_str() != status
+            || projection.proposal_fingerprint() != proposal_fingerprint
+            || projection.revision().map(str::to_string) != revision
+        {
+            return Err(EventStoreError::InvalidState(
+                "goal_projection_invalid".to_string(),
+            ));
+        }
+        Ok(projection)
+    }
+
+    pub fn record_goal_completion_for_tool_invocation(
+        &self,
+        invocation: &ToolInvocationRecord,
+    ) -> EventStoreResult<Option<GoalCompletionProjection>> {
+        let Some(goal_id) = invocation.run_id else {
+            return Ok(None);
+        };
+        let Some(lifecycle) = self.goal_envelope_projection(goal_id)? else {
+            return Ok(None);
+        };
+        if lifecycle.frozen().is_none() {
+            return Ok(None);
+        }
+        let receipts = completion_evidence_from_tool_invocation(&lifecycle, invocation)
+            .map_err(|code| EventStoreError::InvalidState(code.to_string()))?;
+        let mut evidence = self
+            .goal_completion_projection(goal_id)?
+            .map(|projection| projection.evidence)
+            .unwrap_or_default();
+        for receipt in receipts {
+            if let Some(existing) = evidence
+                .iter()
+                .find(|existing| existing.evidence_id == receipt.evidence_id)
+            {
+                if existing != &receipt {
+                    return Err(EventStoreError::InvalidState(
+                        "goal_completion_evidence_conflict".to_string(),
+                    ));
+                }
+                continue;
+            }
+            evidence.push(receipt);
+        }
+        let projection = completion_projection(&lifecycle, &evidence)
+            .map_err(|code| EventStoreError::InvalidState(code.to_string()))?;
+        self.persist_goal_completion_projection(&lifecycle, &projection)
+            .map(Some)
+    }
+
+    pub fn goal_completion_projection(
+        &self,
+        goal_id: Uuid,
+    ) -> EventStoreResult<Option<GoalCompletionProjection>> {
+        let row = self
+            .conn
+            .query_row(
+                r#"SELECT schema_version, revision, frozen_fingerprint, status, projection_json
+                   FROM goal_completion_projection WHERE goal_id = ?1"#,
+                params![goal_id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let projection = Self::decode_goal_completion_projection(goal_id, row)?;
+        let Some(lifecycle) = self.goal_envelope_projection(goal_id)? else {
+            return Ok(None);
+        };
+        let Some(frozen) = lifecycle.frozen() else {
+            return Ok(None);
+        };
+        if projection.revision != frozen.revision
+            || projection.frozen_fingerprint != frozen.fingerprint
+        {
+            return Ok(None);
+        }
+        projection
+            .validate_against(&lifecycle)
+            .map_err(|code| EventStoreError::InvalidState(code.to_string()))?;
+        Ok(Some(projection))
+    }
+
+    pub fn goal_envelope_ui_projection(
+        &self,
+        goal_id: Uuid,
+    ) -> EventStoreResult<Option<GoalEnvelopeUiProjection>> {
+        let Some(lifecycle) = self.goal_envelope_projection(goal_id)? else {
+            return Ok(None);
+        };
+        let completion = self.goal_completion_projection(goal_id)?;
+        build_goal_ui_projection(&lifecycle, completion.as_ref())
+            .map(Some)
+            .map_err(|code| EventStoreError::InvalidState(code.to_string()))
+    }
+
+    fn persist_goal_completion_projection(
+        &self,
+        lifecycle: &GoalLifecycleProjection,
+        next: &GoalCompletionProjection,
+    ) -> EventStoreResult<GoalCompletionProjection> {
+        next.validate_against(lifecycle)
+            .map_err(|code| EventStoreError::InvalidState(code.to_string()))?;
+        let event = completion_event(next)?;
+        let transaction = self.conn.unchecked_transaction()?;
+        let current_json = transaction
+            .query_row(
+                "SELECT projection_json FROM goal_completion_projection WHERE goal_id = ?1",
+                params![next.goal_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if let Some(current_json) = current_json {
+            let current: GoalCompletionProjection = serde_json::from_str(&current_json)?;
+            if current == *next {
+                Self::insert_goal_kernel_event(&transaction, &event)?;
+                transaction.commit()?;
+                return Ok(current);
+            }
+        }
+        let projection_json = serde_json::to_string(next)?;
+        transaction.execute(
+            r#"INSERT INTO goal_completion_projection
+               (goal_id, schema_version, revision, frozen_fingerprint, status,
+                projection_json, row_revision, updated_at)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)
+               ON CONFLICT(goal_id) DO UPDATE SET
+                 schema_version = excluded.schema_version,
+                 revision = excluded.revision,
+                 frozen_fingerprint = excluded.frozen_fingerprint,
+                 status = excluded.status,
+                 projection_json = excluded.projection_json,
+                 row_revision = goal_completion_projection.row_revision + 1,
+                 updated_at = excluded.updated_at"#,
+            params![
+                next.goal_id.to_string(),
+                GOAL_COMPLETION_SCHEMA_VERSION,
+                next.revision,
+                next.frozen_fingerprint,
+                next.status.as_str(),
+                projection_json,
+                event.created_at.to_rfc3339_opts(SecondsFormat::Nanos, true),
+            ],
+        )?;
+        Self::insert_goal_kernel_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok(next.clone())
+    }
+
+    fn decode_goal_completion_projection(
+        goal_id: Uuid,
+        row: (String, String, String, String, String),
+    ) -> EventStoreResult<GoalCompletionProjection> {
+        let (schema_version, revision, frozen_fingerprint, status, projection_json) = row;
+        let projection: GoalCompletionProjection = serde_json::from_str(&projection_json)?;
+        if projection.goal_id != goal_id
+            || projection.schema_version != schema_version
+            || projection.schema_version != GOAL_COMPLETION_SCHEMA_VERSION
+            || projection.revision != revision
+            || projection.frozen_fingerprint != frozen_fingerprint
+            || projection.status.as_str() != status
+        {
+            return Err(EventStoreError::InvalidState(
+                "goal_completion_projection_invalid".to_string(),
+            ));
+        }
+        Ok(projection)
     }
 
     pub fn list_recent(&self, limit: usize) -> EventStoreResult<Vec<KernelEvent>> {
