@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
-const expectedVersion = "1.2.0";
+const expectedVersion = "1.3.0";
 const maxSourceFileBytes = 2 * 1024 * 1024;
 const binaryReleaseExtensions = new Set([
   ".appimage",
@@ -52,6 +52,7 @@ const requiredDocs = [
   "CODE_SIGNING_POLICY.md",
   "PRIVACY.md",
   "docs/INSTALLATION.md",
+  "docs/RELEASE_NOTES_v1.3.0.md",
   "docs/RELEASE_NOTES_v1.2.0.md",
   "docs/RELEASE_NOTES_v1.1.0.md",
   "docs/RELEASE_NOTES_v1.0.2.md",
@@ -87,6 +88,7 @@ const publicReleaseCopyFiles = [
   "apps/desktop/package.json",
   "docs/INSTALLATION.md",
   "docs/OPEN_SOURCE_RELEASE.md",
+  "docs/RELEASE_NOTES_v1.3.0.md",
   "docs/RELEASE_NOTES_v1.2.0.md",
   "docs/RELEASE_NOTES_v1.1.0.md",
   "docs/RELEASE_NOTES_v1.0.2.md",
@@ -499,6 +501,7 @@ checkJsonField(
 );
 checkWindowsAppIconPackaging();
 checkCargoLicense();
+checkReproducibleWindowsReleaseBuild();
 checkPackageScripts();
 checkSecretScanHygiene();
 checkRootWorkspaceScripts();
@@ -507,6 +510,8 @@ checkExternalBridgeUserVisibleErrors();
 checkLocalReleaseHelperSelfTests();
 checkStepOneOnboardingReadinessContract();
 checkStepTwoGoalEnvelopeReleaseBoundary();
+checkStepThreeCapabilityManifestReleaseBoundary();
+checkStepThreeGroupedApprovalKernelBoundary();
 checkPackageManagerBaseline();
 checkGovernanceDocs();
 checkCodeSigningAndPrivacyPolicies();
@@ -727,7 +732,7 @@ function checkRequiredDocs() {
   for (const [phrase, label] of [
     ["One Kernel. Modular capabilities. Verifiable execution.", "English README product promise"],
     ["DS Agent is a local Agent Harness optimized for DeepSeek", "English README DeepSeek-first positioning"],
-    ["v1.2.0 stable", "English README formal stable status"],
+    ["v1.3.0 stable", "English README formal stable status"],
     ["The key difference is that Memory, Automation, Computer Use, parallel Subagents, and Skills are not isolated plugins", "English README unified Kernel thesis"],
     ["contract-first modular Harness architecture", "English README modular architecture"],
     ["Five core capabilities, one engineering philosophy", "English README five-capability framing"],
@@ -739,7 +744,8 @@ function checkRequiredDocs() {
     ["goal → done-when contract → context → plan → permission → execution → evidence → verification → recovery", "English README Loop Engineering contract"],
     ["DeepSeek and DS Agent boundary", "English README model boundary"],
     ["Why Rust", "English README Rust rationale"],
-    ["Production Microsoft/Google account registration and live external-write authority remain disabled in v1.2.0", "English README connector authority boundary"],
+    ["Production Microsoft/Google account registration and live external-write authority remain disabled in v1.3.0", "English README connector authority boundary"],
+    ["Approval creates only exact authority; it does not execute a Tool, resume the task, or mark the Goal complete", "English README grouped authorization non-execution boundary"],
     ["README.zh-CN.md", "English README language switch"],
     ["Search aliases: DS Agent, DSAgent, dsagent, DeepSeek Agent OS.", "English README searchable aliases"],
   ]) {
@@ -748,7 +754,7 @@ function checkRequiredDocs() {
   for (const [phrase, label] of [
     ["一个 Kernel，模块化能力，统一可信执行。", "Chinese README product promise"],
     ["DS Agent 是专门为 DeepSeek 优化的本地 Agent Harness", "Chinese README DeepSeek-first positioning"],
-    ["v1.2.0 正式稳定版", "Chinese README formal stable status"],
+    ["v1.3.0 正式稳定版", "Chinese README formal stable status"],
     ["真正的差异点是：记忆、自动化执行、Computer Use、Subagent 并行协作和技能", "Chinese README unified Kernel thesis"],
     ["契约优先的模块化 Harness 架构", "Chinese README modular architecture"],
     ["五项核心能力，一套工程理念", "Chinese README five-capability framing"],
@@ -760,7 +766,8 @@ function checkRequiredDocs() {
     ["目标 → 完成条件 → 上下文 → 规划 → 权限 → 执行 → 证据 → 验证 → 恢复", "Chinese README Loop Engineering contract"],
     ["DeepSeek 与 DS Agent 的工作边界", "Chinese README model boundary"],
     ["为什么使用 Rust", "Chinese README Rust rationale"],
-    ["v1.2.0 仍未开放生产 Microsoft/Google 账号注册和真实外部写入权限", "Chinese README connector authority boundary"],
+    ["v1.3.0 仍未开放生产 Microsoft/Google 账号注册和真实外部写入权限", "Chinese README connector authority boundary"],
+    ["批准只产生精确权限，不会执行 Tool、恢复任务或把 Goal 标记为完成", "Chinese README grouped authorization non-execution boundary"],
     ["README.md", "Chinese README language switch"],
     ["中文搜索别名：DS Agent、DSAgent、dsagent、DeepSeek Agent OS。", "Chinese README searchable aliases"],
   ]) {
@@ -1608,20 +1615,50 @@ function checkPublicReleaseCopyPositioning() {
   checkTextIncludes(
     "apps/desktop/src-tauri/src/kernel/app_update.rs",
     readText("apps/desktop/src-tauri/src/kernel/app_update.rs"),
-    'APP_UPDATE_USER_AGENT: &str = "DS-Agent-Updater/1.2.0"',
-    "app updater User-Agent v1.2.0",
+    'APP_UPDATE_USER_AGENT: &str = "DS-Agent-Updater/1.3.0"',
+    "app updater User-Agent v1.3.0",
   );
   checkTextIncludes(
     "apps/desktop/src-tauri/src/kernel/app_update.rs",
     readText("apps/desktop/src-tauri/src/kernel/app_update.rs"),
-    'APP_UPDATE_CURRENT_RELEASE_TAG: &str = "v1.2.0"',
-    "app updater current release tag v1.2.0",
+    'APP_UPDATE_CURRENT_RELEASE_TAG: &str = "v1.3.0"',
+    "app updater current release tag v1.3.0",
   );
   checkTextDoesNotInclude(
     "apps/desktop/src-tauri/src/kernel/app_update.rs",
     readText("apps/desktop/src-tauri/src/kernel/app_update.rs"),
     'APP_UPDATE_CURRENT_RELEASE_TAG: &str = "v0.9.0"',
     "app updater current release tag must not regress to v0.9.0",
+  );
+  checkTextIncludesCollapsed(
+    "docs/RELEASE_NOTES_v1.3.0.md",
+    readText("docs/RELEASE_NOTES_v1.3.0.md"),
+    "Package, desktop, Tauri, Cargo, updater, and installer metadata are `1.3.0` / `v1.3.0`.",
+    "v1.3.0 stable release notes version identity",
+  );
+  checkTextIncludesCollapsed(
+    "docs/RELEASE_NOTES_v1.3.0.md",
+    readText("docs/RELEASE_NOTES_v1.3.0.md"),
+    "both `ds-agent.exe` and `DS.Agent_1.3.0_x64-setup.exe` are intentionally Authenticode `NotSigned`",
+    "v1.3.0 dual-artifact unsigned disclosure",
+  );
+  checkTextIncludesCollapsed(
+    "docs/RELEASE_NOTES_v1.3.0.md",
+    readText("docs/RELEASE_NOTES_v1.3.0.md"),
+    "Approval creates only the exact task authority. It does not execute a Tool, resume a task",
+    "v1.3.0 approval non-execution boundary",
+  );
+  checkTextIncludesCollapsed(
+    "docs/RELEASE_NOTES_v1.3.0.md",
+    readText("docs/RELEASE_NOTES_v1.3.0.md"),
+    "It does not add task execution or automatic resume, an Office golden path, a connector or Computer Use expansion",
+    "v1.3.0 scope exclusion",
+  );
+  checkTextIncludesCollapsed(
+    "docs/RELEASE_NOTES_v1.3.0.md",
+    readText("docs/RELEASE_NOTES_v1.3.0.md"),
+    "The cancelled formal 20-run Windows lab is not claimed.",
+    "v1.3.0 no false formal-lab claim",
   );
   checkTextIncludesCollapsed(
     "docs/RELEASE_NOTES_v1.2.0.md",
@@ -3416,7 +3453,7 @@ function checkGovernanceDocs() {
   checkTextIncludesCollapsed(
     "SECURITY.md",
     securityPolicy,
-    "DS Agent v1.2.0 is the current published stable release",
+    "DS Agent v1.3.0 is the current published stable release",
     "SECURITY.md current stable scope",
   );
   checkTextIncludes(
@@ -3446,7 +3483,7 @@ function checkGovernanceDocs() {
   checkTextIncludesCollapsed(
     "SECURITY.md",
     securityPolicy,
-    "Current stable v1.2.0 stores one user-supplied DeepSeek API key in a dedicated Windows DPAPI vault",
+    "Current stable v1.3.0 stores one user-supplied DeepSeek API key in a dedicated Windows DPAPI vault",
     "SECURITY.md current stable credential boundary",
   );
   checkTextIncludesCollapsed(
@@ -3507,7 +3544,7 @@ function checkCodeSigningAndPrivacyPolicies() {
 
   for (const [phrase, label] of [
     ["# Code signing policy", "code-signing policy title"],
-    ["DS Agent `v1.2.0` is intentionally published unsigned", "code-signing current unsigned status"],
+    ["DS Agent `v1.3.0` is intentionally published unsigned", "code-signing current unsigned status"],
     ["The SignPath Foundation application is submitted and approval is pending", "code-signing pending application status"],
     ["Free code signing provided by", "SignPath acknowledgement"],
     ["certificate by", "SignPath certificate acknowledgement"],
@@ -3530,7 +3567,7 @@ function checkCodeSigningAndPrivacyPolicies() {
   for (const [phrase, label] of [
     ["# Privacy Policy", "privacy policy title"],
     ["does not operate a project cloud backend, advertising service, or project analytics or telemetry service", "no project telemetry service"],
-    ["The current stable `v1.2.0` accepts one user-supplied DeepSeek API key", "privacy current credential behavior"],
+    ["The current stable `v1.3.0` accepts one user-supplied DeepSeek API key", "privacy current credential behavior"],
     ["dedicated Windows DPAPI-protected local vault", "privacy DPAPI storage boundary"],
     ["https://cdn.deepseek.com/policies/en-US/deepseek-privacy-policy.html", "DeepSeek privacy disclosure"],
     ["DuckDuckGo's privacy policy", "web-search privacy disclosure"],
@@ -3538,7 +3575,7 @@ function checkCodeSigningAndPrivacyPolicies() {
     ["Hugging Face", "skill-source privacy disclosure"],
     ["WebView2 data and privacy documentation", "WebView2 privacy disclosure"],
     ["accepts only loopback addresses", "local bridge privacy boundary"],
-    ["Production Microsoft and Google account registration and live mail/calendar writes are disabled in `v1.2.0`", "disabled connector privacy boundary"],
+    ["Production Microsoft and Google account registration and live mail/calendar writes are disabled in `v1.3.0`", "disabled connector privacy boundary"],
     ["not uploaded merely because the application is open", "no passive content upload"],
   ]) {
     checkTextIncludesCollapsed("PRIVACY.md", privacyPolicy, phrase, label);
@@ -3551,7 +3588,7 @@ function checkCodeSigningAndPrivacyPolicies() {
     checkTextIncludes(filePath, content, "NotSigned", `${filePath} unsigned Authenticode disclosure`);
     checkTextIncludes(filePath, content, "Unknown publisher", `${filePath} unknown-publisher warning`);
     checkTextIncludes(filePath, content, "SmartScreen", `${filePath} SmartScreen warning`);
-    checkTextIncludes(filePath, content, "docs/RELEASE_NOTES_v1.2.0.md", `${filePath} v1.2.0 release-notes link`);
+    checkTextIncludes(filePath, content, "docs/RELEASE_NOTES_v1.3.0.md", `${filePath} v1.3.0 release-notes link`);
     checkTextDoesNotInclude(filePath, content, "12,716,857 bytes", `${filePath} no stale v1.0.1 asset size`);
     checkTextDoesNotInclude(filePath, content, "469C4EFA54F4C94A6E37D28C9C88D331B26E1770C6792DC93D02B451640E2A6F", `${filePath} no stale v1.0.1 asset SHA-256`);
   }
@@ -4115,6 +4152,59 @@ function checkCargoLicense() {
   checks.push("apps/desktop/src-tauri/Cargo.toml license");
 }
 
+function checkReproducibleWindowsReleaseBuild() {
+  const cargoConfigPath = ".cargo/config.toml";
+  const cargoConfig = readText(cargoConfigPath);
+  checkTextIncludes(
+    cargoConfigPath,
+    cargoConfig,
+    "[target.x86_64-pc-windows-gnu]",
+    "Windows GNU release target has repository build configuration",
+  );
+  checkTextIncludes(
+    cargoConfigPath,
+    cargoConfig,
+    'rustflags = ["-C", "link-arg=-Wl,--no-insert-timestamp"]',
+    "Windows GNU linker omits nondeterministic PE timestamps",
+  );
+
+  const cargoTomlPath = "apps/desktop/src-tauri/Cargo.toml";
+  const cargoToml = readText(cargoTomlPath);
+  if (!/\[profile\.release\][\s\S]*?^strip\s*=\s*"symbols"\s*$/m.test(cargoToml)) {
+    failures.push(`${cargoTomlPath} release profile must strip the target-path-bearing COFF symbol table`);
+  } else {
+    checks.push("Windows GNU release profile strips COFF symbols");
+  }
+
+  const nsisHookPath = "apps/desktop/src-tauri/nsis/shortcut-icons.nsh";
+  const nsisHook = readText(nsisHookPath);
+  checkTextIncludes(
+    nsisHookPath,
+    nsisHook,
+    "!macro NSIS_HOOK_PREINSTALL",
+    "NSIS preinstall reproducibility hook",
+  );
+  checkTextIncludes(
+    nsisHookPath,
+    nsisHook,
+    "SetDateSave off",
+    "NSIS omits source-file modification times",
+  );
+
+  checkTextIncludesCollapsed(
+    "docs/OPEN_SOURCE_RELEASE.md",
+    readText("docs/OPEN_SOURCE_RELEASE.md"),
+    "A stable installer release requires two fresh, distinct `CARGO_TARGET_DIR` builds with identical application and installer byte sizes and SHA-256 values.",
+    "open-source release requires byte-reproducible Windows candidates",
+  );
+  checkTextIncludesCollapsed(
+    "docs/RELEASE_NOTES_v1.3.0.md",
+    readText("docs/RELEASE_NOTES_v1.3.0.md"),
+    "The final release gate compares the application and installer from two fresh, distinct `CARGO_TARGET_DIR` builds byte-for-byte",
+    "v1.3.0 release notes disclose reproducibility gate",
+  );
+}
+
 function checkPackageScripts() {
   const packageJson = readJson("package.json");
   const scripts = packageJson.scripts ?? {};
@@ -4250,7 +4340,7 @@ function checkSmokeScriptReleaseLabels() {
   const rustRuntimeExpectations = [
     [
       "apps/desktop/src-tauri/src/kernel/deepseek.rs",
-      "DS-Agent/1.2.0 deepseek-v4",
+      "DS-Agent/1.3.0 deepseek-v4",
       "DeepSeek runtime User-Agent release label",
     ],
     [
@@ -4697,6 +4787,198 @@ function checkStepTwoGoalEnvelopeReleaseBoundary() {
     'invoke("complete_goal"',
     "frontend has no goal completion invocation",
   );
+}
+
+function checkStepThreeCapabilityManifestReleaseBoundary() {
+  const manifestPath =
+    "apps/desktop/src-tauri/src/kernel/task_capability_manifest.rs";
+  const manifest = readText(manifestPath);
+  const kernelModules = readText("apps/desktop/src-tauri/src/kernel/mod.rs");
+  const policy = readText("apps/desktop/src-tauri/src/kernel/policy.rs");
+  const eventStore = readText("apps/desktop/src-tauri/src/kernel/event_store.rs");
+  const commands = readText("apps/desktop/src-tauri/src/commands.rs");
+  const publicTypes = readText("apps/desktop/src/types.ts");
+  const app = readText("apps/desktop/src/App.tsx");
+
+  for (const [filePath, content, phrase, label] of [
+    [manifestPath, manifest, "ds-agent.task-capability-manifest/v1", "task capability manifest version"],
+    [manifestPath, manifest, "deny_unknown_fields", "task capability manifest unknown-field rejection"],
+    [manifestPath, manifest, "builtin_tool_catalog", "task manifest reuses the Kernel tool catalog"],
+    [manifestPath, manifest, "builtin_capability_catalog", "task manifest reuses the Kernel capability catalog"],
+    [manifestPath, manifest, "capability_risk", "task manifest derives Kernel risk"],
+    [manifestPath, manifest, "ds-agent.task-capability-manifest-revision.v1", "domain-separated manifest revision"],
+    [manifestPath, manifest, "ds-agent.task-capability-manifest-fingerprint.v1", "domain-separated manifest fingerprint"],
+    [manifestPath, manifest, "ds-agent.task-authorization-preview-hash.v1", "domain-separated authorization preview hash"],
+    [manifestPath, manifest, "TASK_AUTHORIZATION_PREVIEW_RENDERER_REVISION", "versioned authorization preview renderer"],
+    [manifestPath, manifest, "validate_for_manifest", "exact manifest-to-preview validation"],
+    [manifestPath, manifest, "existing_exact_tool_approval_contract_remains_compatible", "exact-tool approval regression"],
+    [manifestPath, manifest, "malformed_proposal_creates_no_permission_execution_event_or_completion_state", "malformed proposal authority regression"],
+    ["apps/desktop/src-tauri/src/kernel/mod.rs", kernelModules, "pub mod task_capability_manifest;", "Kernel manifest module registration"],
+    ["apps/desktop/src-tauri/src/kernel/policy.rs", policy, "pub const fn as_str", "canonical Kernel capability name"],
+  ]) {
+    checkTextIncludes(filePath, content, phrase, label);
+  }
+
+  for (const [filePath, content, label] of [
+    ["apps/desktop/src-tauri/src/kernel/event_store.rs", eventStore, "C3A adds no durable authorization state"],
+    ["apps/desktop/src/types.ts", publicTypes, "C3A adds no public manifest DTO"],
+    ["apps/desktop/src/App.tsx", app, "C3A adds no authorization UI"],
+  ]) {
+    checkTextDoesNotInclude(filePath, content, "task_capability_manifest", label);
+  }
+}
+
+function checkStepThreeGroupedApprovalKernelBoundary() {
+  const manifestPath =
+    "apps/desktop/src-tauri/src/kernel/task_capability_manifest.rs";
+  const domainPath =
+    "apps/desktop/src-tauri/src/kernel/task_grouped_approval.rs";
+  const storePath =
+    "apps/desktop/src-tauri/src/kernel/event_store/grouped_approval.rs";
+  const manifest = readText(manifestPath);
+  const domain = readText(domainPath);
+  const groupedStore = readText(storePath);
+  const eventStore = readText("apps/desktop/src-tauri/src/kernel/event_store.rs");
+  const kernelModules = readText("apps/desktop/src-tauri/src/kernel/mod.rs");
+  const commands = readText("apps/desktop/src-tauri/src/commands.rs");
+  const publicTypes = readText("apps/desktop/src/types.ts");
+  const app = readText("apps/desktop/src/App.tsx");
+  const desktopTest = readText("scripts/desktop-test.mjs");
+  const uiTestPath = "scripts/task-grouped-authorization-ui.test.mjs";
+  const uiTest = readText(uiTestPath);
+  const groupedProduction = groupedStore.slice(
+    0,
+    groupedStore.indexOf("\n#[cfg(test)]\nmod tests"),
+  );
+  const commandsProduction = commands.slice(
+    0,
+    commands.indexOf("\n#[cfg(test)]\nmod tests"),
+  );
+
+  for (const [filePath, content, phrase, label] of [
+    [manifestPath, manifest, "ds-agent.task-capability-proposal/v1", "descriptive task capability proposal version"],
+    [manifestPath, manifest, "pub struct TaskCapabilityProposal", "strict descriptive task capability proposal"],
+    [manifestPath, manifest, "bind_to_frozen_goal", "Kernel frozen-goal proposal binding"],
+    [manifestPath, manifest, "c3d_descriptive_proposal_is_strict_bounded_and_contains_no_kernel_authority", "C3D strict model proposal regression"],
+    [domainPath, domain, "ds-agent.task-grouped-approval/v1", "task grouped approval version"],
+    [domainPath, domain, "deny_unknown_fields", "task grouped approval unknown-field rejection"],
+    [domainPath, domain, "ds-agent.task-grouped-approval-id.v1", "domain-separated grouped approval identity"],
+    [domainPath, domain, "ds-agent.task-grouped-approval-integrity.v1", "grouped projection integrity binding"],
+    [domainPath, domain, "ds-agent.task-grouped-approval-request-fingerprint.v1", "exact task capability request fingerprint"],
+    [domainPath, domain, "exact_tool_preview_hash", "existing exact-tool preview contract reuse"],
+    [domainPath, domain, "DeepSeekModel", "model self-approval rejection actor"],
+    [domainPath, domain, "FrontendPayload", "frontend self-approval rejection actor"],
+    [storePath, groupedStore, "CREATE TABLE IF NOT EXISTS task_grouped_approval_state", "additive grouped approval migration"],
+    [storePath, groupedStore, "CREATE TABLE IF NOT EXISTS task_grouped_approval_item_audit", "per-capability durable audit migration"],
+    [storePath, groupedStore, "prepare_task_grouped_approval", "single grouped preparation path"],
+    [storePath, groupedProduction, "prepare_task_grouped_approval_from_proposal", "production grouped authorization producer"],
+    [storePath, groupedProduction, "compile_task_capability_manifest", "producer compiles the Kernel manifest"],
+    [storePath, groupedProduction, "task_authorization_preview", "producer renders the Kernel preview"],
+    [storePath, groupedStore, "resolve_task_grouped_approval", "single grouped resolution path"],
+    [storePath, groupedStore, "revoke_task_grouped_approval", "grouped revocation path"],
+    [storePath, groupedStore, "expire_task_grouped_approval", "grouped expiry path"],
+    [storePath, groupedStore, "authorize_task_grouped_capability", "exact task capability authority check"],
+    ["apps/desktop/src-tauri/src/kernel/event_store.rs", eventStore, "single exact-task resolver", "legacy per-item resolver is blocked"],
+    ["apps/desktop/src-tauri/src/kernel/event_store.rs", eventStore, "dedicated transactional state machine", "forged grouped events are blocked"],
+    [storePath, groupedStore, "exact_group_approval_uses_one_user_resolution_and_per_capability_audit", "single resolution and per-capability audit regression"],
+    [storePath, groupedStore, "tampered_projection_or_per_item_audit_fails_closed_on_restart", "restart tamper regression"],
+    [storePath, groupedStore, "additive_migration_is_idempotent_and_preserves_legacy_exact_tool_approval", "legacy exact-tool migration regression"],
+    ["apps/desktop/src-tauri/src/kernel/event_store.rs", eventStore, "grouped_approval::migrate(self)?", "Event Store grouped approval migration registration"],
+    ["apps/desktop/src-tauri/src/kernel/mod.rs", kernelModules, "pub mod task_grouped_approval;", "Kernel grouped approval module registration"],
+    [domainPath, domain, "ds-agent.task-grouped-authorization-ui/v1", "secret-free grouped authorization UI projection version"],
+    [domainPath, domain, "TaskGroupedAuthorizationIntent", "exact grouped authorization UI intent"],
+    [domainPath, domain, "authorization_view", "Kernel-owned grouped authorization read projection"],
+    [storePath, groupedStore, "list_task_grouped_authorizations", "Kernel authoritative grouped authorization list"],
+    [storePath, groupedStore, "resolve_task_grouped_authorization", "single grouped authorization UI resolver"],
+    [storePath, groupedStore, "revoke_task_grouped_authorization", "user-visible grouped authorization revoke"],
+    [storePath, groupedStore, "refresh_task_grouped_approval_state", "stale grouped authorization refresh"],
+    [storePath, groupedStore, "c3c_exact_ui_intent_rejects_tamper_replay_and_frontend_authority_fields", "C3C adversarial IPC intent regression"],
+    [storePath, groupedStore, "c3c_ui_read_refreshes_expiry_and_survives_restart_without_new_authority", "C3C restart and expiry UI regression"],
+    [storePath, groupedStore, "c3d_production_producer_is_idempotent_across_reconciliation_restart_and_terminal_state", "C3D producer durability regression"],
+    ["apps/desktop/src-tauri/src/commands.rs", commandsProduction, "task_capability_proposal", "ordinary structured response carries a private capability proposal"],
+    ["apps/desktop/src-tauri/src/commands.rs", commandsProduction, "prepare_task_grouped_approval_from_proposal", "ordinary chat reconciliation reaches the production producer"],
+    ["apps/desktop/src-tauri/src/commands.rs", commandsProduction, "response.goal_envelope = None", "ordinary response strips raw goal authority after projection"],
+    ["apps/desktop/src-tauri/src/commands.rs", commands, "c3d_production_chat_seam_prepares_one_durable_group_without_executing_tools", "C3D queued chat production seam regression"],
+    ["apps/desktop/src-tauri/src/commands.rs", commands, "pub fn list_task_grouped_authorizations", "thin grouped authorization list command"],
+    ["apps/desktop/src-tauri/src/commands.rs", commands, "pub fn resolve_task_grouped_authorization", "thin grouped authorization resolve command"],
+    ["apps/desktop/src-tauri/src/commands.rs", commands, "pub fn revoke_task_grouped_authorization", "thin grouped authorization revoke command"],
+    ["apps/desktop/src/types.ts", publicTypes, "TaskGroupedAuthorizationView", "public secret-free grouped authorization DTO"],
+    ["apps/desktop/src/App.tsx", app, "TaskGroupedAuthorizationCard", "ordinary-language grouped authorization card"],
+    ["apps/desktop/src/App.tsx", app, '"resolve_task_grouped_authorization"', "grouped authorization UI intent invocation"],
+    ["apps/desktop/src/App.tsx", app, '"revoke_task_grouped_authorization"', "grouped authorization revoke invocation"],
+    ["scripts/desktop-test.mjs", desktopTest, uiTestPath, "full test runs grouped authorization UI boundary"],
+    [uiTestPath, uiTest, "Grouped authorization UI and IPC authority boundary checks passed", "focused grouped authorization UI boundary test"],
+  ]) {
+    checkTextIncludes(filePath, content, phrase, label);
+  }
+
+  const groupedPreparationCalls =
+    groupedProduction.match(/self\.prepare_task_grouped_approval\(/g)?.length ?? 0;
+  if (groupedPreparationCalls !== 1) {
+    failures.push(
+      `${storePath} must have exactly one production call into the durable grouped preparation path`,
+    );
+  } else {
+    checks.push("single production grouped authorization producer call");
+  }
+
+  checkTextDoesNotInclude(
+    "apps/desktop/src-tauri/src/commands.rs",
+    commands,
+    "pub fn prepare_task_grouped_approval",
+    "no public prepare command can mint grouped authority",
+  );
+  checkTextDoesNotInclude(
+    "apps/desktop/src-tauri/src/commands.rs",
+    commands,
+    "pub fn compile_task_capability_manifest",
+    "no public manifest compiler command can mint Kernel authority",
+  );
+  checkTextDoesNotInclude(
+    "apps/desktop/src/types.ts",
+    publicTypes,
+    "TaskCapabilityProposal",
+    "model proposal remains private to the Rust boundary",
+  );
+  checkTextDoesNotInclude(
+    "apps/desktop/src/App.tsx",
+    app,
+    "prepare_task_grouped_approval",
+    "frontend cannot invoke grouped authority preparation",
+  );
+
+  checkTextDoesNotInclude(
+    domainPath,
+    domain.slice(
+      domain.indexOf("pub struct TaskGroupedAuthorizationIntent"),
+      domain.indexOf("impl TaskGroupedAuthorizationIntent"),
+    ),
+    "pub capability",
+    "frontend intent cannot submit a capability",
+  );
+  checkTextDoesNotInclude(
+    domainPath,
+    domain.slice(
+      domain.indexOf("pub struct TaskGroupedAuthorizationIntent"),
+      domain.indexOf("impl TaskGroupedAuthorizationIntent"),
+    ),
+    "pub actor",
+    "frontend intent cannot submit an authority actor",
+  );
+
+  for (const forbidden of [
+    "apply_mutation(",
+    "send_mail(",
+    "create_event(",
+    "computer_control",
+  ]) {
+    checkTextDoesNotInclude(
+      storePath,
+      groupedStore,
+      forbidden,
+      `C3B grouped approval Kernel excludes execution path ${forbidden}`,
+    );
+  }
 }
 
 function checkOperationsBriefingSmokeEvidence() {

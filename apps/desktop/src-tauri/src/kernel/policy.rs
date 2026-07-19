@@ -32,6 +32,33 @@ pub enum CapabilityKind {
     SkillUse,
 }
 
+impl CapabilityKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::FileRead => "file_read",
+            Self::FileWrite => "file_write",
+            Self::NetworkSearch => "network_search",
+            Self::BrowserBrowse => "browser_browse",
+            Self::BrowserSubmit => "browser_submit",
+            Self::EmailRead => "email_read",
+            Self::EmailDraft => "email_draft",
+            Self::EmailSend => "email_send",
+            Self::ConnectorAttachmentRead => "connector_attachment_read",
+            Self::ConnectorWrite => "connector_write",
+            Self::DriveRead => "drive_read",
+            Self::DriveWrite => "drive_write",
+            Self::TerminalRead => "terminal_read",
+            Self::TerminalWrite => "terminal_write",
+            Self::ComputerScreenshot => "computer_screenshot",
+            Self::ComputerControl => "computer_control",
+            Self::AppUpdateCheck => "app_update_check",
+            Self::AppUpdateDownload => "app_update_download",
+            Self::AppUpdateInstall => "app_update_install",
+            Self::SkillUse => "skill_use",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapabilityFamily {
