@@ -507,6 +507,7 @@ checkExternalBridgeUserVisibleErrors();
 checkLocalReleaseHelperSelfTests();
 checkStepOneOnboardingReadinessContract();
 checkStepTwoGoalEnvelopeReleaseBoundary();
+checkStepThreeCapabilityManifestReleaseBoundary();
 checkPackageManagerBaseline();
 checkGovernanceDocs();
 checkCodeSigningAndPrivacyPolicies();
@@ -4697,6 +4698,46 @@ function checkStepTwoGoalEnvelopeReleaseBoundary() {
     'invoke("complete_goal"',
     "frontend has no goal completion invocation",
   );
+}
+
+function checkStepThreeCapabilityManifestReleaseBoundary() {
+  const manifestPath =
+    "apps/desktop/src-tauri/src/kernel/task_capability_manifest.rs";
+  const manifest = readText(manifestPath);
+  const kernelModules = readText("apps/desktop/src-tauri/src/kernel/mod.rs");
+  const policy = readText("apps/desktop/src-tauri/src/kernel/policy.rs");
+  const eventStore = readText("apps/desktop/src-tauri/src/kernel/event_store.rs");
+  const commands = readText("apps/desktop/src-tauri/src/commands.rs");
+  const publicTypes = readText("apps/desktop/src/types.ts");
+  const app = readText("apps/desktop/src/App.tsx");
+
+  for (const [filePath, content, phrase, label] of [
+    [manifestPath, manifest, "ds-agent.task-capability-manifest/v1", "task capability manifest version"],
+    [manifestPath, manifest, "deny_unknown_fields", "task capability manifest unknown-field rejection"],
+    [manifestPath, manifest, "builtin_tool_catalog", "task manifest reuses the Kernel tool catalog"],
+    [manifestPath, manifest, "builtin_capability_catalog", "task manifest reuses the Kernel capability catalog"],
+    [manifestPath, manifest, "capability_risk", "task manifest derives Kernel risk"],
+    [manifestPath, manifest, "ds-agent.task-capability-manifest-revision.v1", "domain-separated manifest revision"],
+    [manifestPath, manifest, "ds-agent.task-capability-manifest-fingerprint.v1", "domain-separated manifest fingerprint"],
+    [manifestPath, manifest, "ds-agent.task-authorization-preview-hash.v1", "domain-separated authorization preview hash"],
+    [manifestPath, manifest, "TASK_AUTHORIZATION_PREVIEW_RENDERER_REVISION", "versioned authorization preview renderer"],
+    [manifestPath, manifest, "validate_for_manifest", "exact manifest-to-preview validation"],
+    [manifestPath, manifest, "existing_exact_tool_approval_contract_remains_compatible", "exact-tool approval regression"],
+    [manifestPath, manifest, "malformed_proposal_creates_no_permission_execution_event_or_completion_state", "malformed proposal authority regression"],
+    ["apps/desktop/src-tauri/src/kernel/mod.rs", kernelModules, "pub mod task_capability_manifest;", "Kernel manifest module registration"],
+    ["apps/desktop/src-tauri/src/kernel/policy.rs", policy, "pub const fn as_str", "canonical Kernel capability name"],
+  ]) {
+    checkTextIncludes(filePath, content, phrase, label);
+  }
+
+  for (const [filePath, content, label] of [
+    ["apps/desktop/src-tauri/src/kernel/event_store.rs", eventStore, "C3A adds no durable authorization state"],
+    ["apps/desktop/src-tauri/src/commands.rs", commands, "C3A adds no command authority"],
+    ["apps/desktop/src/types.ts", publicTypes, "C3A adds no public manifest DTO"],
+    ["apps/desktop/src/App.tsx", app, "C3A adds no authorization UI"],
+  ]) {
+    checkTextDoesNotInclude(filePath, content, "task_capability_manifest", label);
+  }
 }
 
 function checkOperationsBriefingSmokeEvidence() {
