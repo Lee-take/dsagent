@@ -183,6 +183,10 @@ pub enum MemorySearchMatchSource {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "the Free-prefixed names are the public Rust and snake_case Tauri and TypeScript settings contract; remove only with a versioned cross-language compatibility migration"
+)]
 pub enum NetworkSearchSourceModel {
     FreeWebSource,
     FreeLocalBrowser,
@@ -212,6 +216,10 @@ pub enum DriveBackend {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "the ScreenCapture-suffixed names are the public Rust and snake_case Tauri and TypeScript settings contract; remove only with a versioned cross-language compatibility migration"
+)]
 pub enum ComputerScreenshotBackend {
     CodexStyleScreenCapture,
     CodexBridgeScreenCapture,
@@ -221,6 +229,10 @@ pub enum ComputerScreenshotBackend {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "the InputControl-suffixed names are the public Rust and snake_case Tauri and TypeScript settings contract; remove only with a versioned cross-language compatibility migration"
+)]
 pub enum ComputerControlBackend {
     CodexStyleInputControl,
     CodexBridgeInputControl,

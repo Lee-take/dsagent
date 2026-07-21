@@ -1312,6 +1312,10 @@ struct AuthorizedAgentToolExecution {
     approval_request_id: Option<Uuid>,
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "both short-lived authorization variants own large execution or audit records; boxing only one leaves the lint and boxing both adds an allocation to every authorization outcome; remove when measured indirection wins or the records become shared"
+)]
 enum AgentToolAuthorization {
     Ready(AuthorizedAgentToolExecution),
     Finished(ToolInvocationRecord),
