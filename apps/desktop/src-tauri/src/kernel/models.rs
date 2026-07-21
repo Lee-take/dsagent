@@ -356,6 +356,10 @@ impl MemoryCandidate {
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "This public constructor preserves existing package and EventStore callers plus review-safe defaults; remove only when every caller migrates together without changing candidate serialization or validation."
+    )]
     pub fn new_with_metadata(
         title: String,
         body: String,
@@ -381,6 +385,10 @@ impl MemoryCandidate {
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "This public constructor is shared by Tauri-backed memory flows and compatibility tests; remove only through a coordinated caller migration preserving validation order, defaults, expiration filtering, and serialized fields."
+    )]
     pub fn new_with_metadata_and_expiration(
         title: String,
         body: String,
@@ -737,19 +745,33 @@ pub struct MemoryRecordUpdate {
     pub updated_at: DateTime<Utc>,
 }
 
+pub(crate) struct MemoryRecordUpdateInput {
+    pub(crate) memory_id: Uuid,
+    pub(crate) title: String,
+    pub(crate) body: String,
+    pub(crate) memory_type: MemoryType,
+    pub(crate) scope: MemoryScope,
+    pub(crate) sensitivity: MemorySensitivity,
+    pub(crate) lifecycle: MemoryLifecycle,
+    pub(crate) pinned: bool,
+    pub(crate) expires_at: Option<DateTime<Utc>>,
+    pub(crate) note: String,
+}
+
 impl MemoryRecordUpdate {
-    pub fn new(
-        memory_id: Uuid,
-        title: String,
-        body: String,
-        memory_type: MemoryType,
-        scope: MemoryScope,
-        sensitivity: MemorySensitivity,
-        lifecycle: MemoryLifecycle,
-        pinned: bool,
-        expires_at: Option<DateTime<Utc>>,
-        note: String,
-    ) -> Result<Self, String> {
+    pub(crate) fn new(input: MemoryRecordUpdateInput) -> Result<Self, String> {
+        let MemoryRecordUpdateInput {
+            memory_id,
+            title,
+            body,
+            memory_type,
+            scope,
+            sensitivity,
+            lifecycle,
+            pinned,
+            expires_at,
+            note,
+        } = input;
         let title = title.trim().to_string();
         let body = body.trim().to_string();
         if title.is_empty() {

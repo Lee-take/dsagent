@@ -90,8 +90,9 @@ use crate::kernel::models::{
     MemoryCandidateReplacePreview, MemoryCandidateResolution, MemoryCandidateSource,
     MemoryCandidateStatus, MemoryConflictSummary, MemoryMaintenanceActionKind,
     MemoryMaintenanceReviewAction, MemoryRecord, MemoryRecordDeletion, MemoryRecordLink,
-    MemoryRecordLinkSummary, MemoryRecordUpdate, MemoryRelationKind, MemorySearchMatch,
-    MemorySearchMatchSource, MemorySelectedFeedback, MemorySelectedFeedbackKind, TaskRecord,
+    MemoryRecordLinkSummary, MemoryRecordUpdate, MemoryRecordUpdateInput, MemoryRelationKind,
+    MemorySearchMatch, MemorySearchMatchSource, MemorySelectedFeedback, MemorySelectedFeedbackKind,
+    TaskRecord,
 };
 use crate::kernel::policy::{
     capability_risk, request_capability_access, CapabilityAccessRecord, CapabilityAccessRequest,
@@ -12861,6 +12862,10 @@ impl EventStore {
             .collect()
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "This positional field set is the stable EventStore memory-update boundary used by Tauri and maintenance callers; remove only when all callers migrate together while preserving event payload, replay projection, validation, expiration, and audit semantics."
+    )]
     pub fn update_memory_record(
         &self,
         memory_id: Uuid,
@@ -12880,7 +12885,7 @@ impl EventStore {
             .ok_or_else(|| {
                 EventStoreError::NotFound(format!("memory record {memory_id} was not found"))
             })?;
-        let update = MemoryRecordUpdate::new(
+        let update = MemoryRecordUpdate::new(MemoryRecordUpdateInput {
             memory_id,
             title,
             body,
@@ -12888,10 +12893,10 @@ impl EventStore {
             scope,
             sensitivity,
             lifecycle,
-            existing.pinned,
+            pinned: existing.pinned,
             expires_at,
             note,
-        )
+        })
         .map_err(EventStoreError::InvalidState)?;
         let event = KernelEvent::new(MEMORY_RECORD_UPDATED_EVENT, &update)?;
         self.append(&event)?;

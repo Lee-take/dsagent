@@ -1922,38 +1922,49 @@ fn slide_xml(slide: &OfficeSlideSpec) -> String {
             2,
             "Title",
             &slide.title,
-            685800,
-            609600,
-            10820400,
-            914400,
-            3600,
-            true
+            PptTextShapeLayout {
+                x: 685800,
+                y: 609600,
+                cx: 10820400,
+                cy: 914400,
+                font_size: 3600,
+                bold: true,
+            },
         ),
         ppt_text_shape(
             3,
             "Body",
             &slide.body,
-            914400,
-            1828800,
-            10363200,
-            3657600,
-            2400,
-            false
+            PptTextShapeLayout {
+                x: 914400,
+                y: 1828800,
+                cx: 10363200,
+                cy: 3657600,
+                font_size: 2400,
+                bold: false,
+            },
         )
     )
 }
 
-fn ppt_text_shape(
-    id: u32,
-    name: &str,
-    text: &str,
+struct PptTextShapeLayout {
     x: i64,
     y: i64,
     cx: i64,
     cy: i64,
     font_size: u32,
     bold: bool,
-) -> String {
+}
+
+fn ppt_text_shape(id: u32, name: &str, text: &str, layout: PptTextShapeLayout) -> String {
+    let PptTextShapeLayout {
+        x,
+        y,
+        cx,
+        cy,
+        font_size,
+        bold,
+    } = layout;
     let bold_attr = if bold { r#" b="1""# } else { "" };
     let paragraphs = body_lines(text)
         .into_iter()
