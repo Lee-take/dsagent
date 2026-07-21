@@ -85,7 +85,7 @@ impl ComputerUseAccessibilityClient for LocalComputerUseAccessibilityClient {
     fn capture_redacted_state(&self) -> Result<RedactedComputerUseState, String> {
         #[cfg(windows)]
         {
-            return WindowsComputerUseAccessibilityClient.capture_redacted_state();
+            WindowsComputerUseAccessibilityClient.capture_redacted_state()
         }
         #[cfg(not(windows))]
         {
