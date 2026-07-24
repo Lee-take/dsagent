@@ -1556,7 +1556,7 @@ mod tests {
 
     struct FakeControlClient {
         calls: AtomicUsize,
-        fail: bool,
+        failure: Option<&'static str>,
     }
 
     struct InMemoryStepPersistence {
@@ -1598,14 +1598,21 @@ mod tests {
         fn succeeding() -> Self {
             Self {
                 calls: AtomicUsize::new(0),
-                fail: false,
+                failure: None,
             }
         }
 
         fn failing() -> Self {
             Self {
                 calls: AtomicUsize::new(0),
-                fail: true,
+                failure: Some("fake input backend failed"),
+            }
+        }
+
+        fn timing_out() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                failure: Some("deterministic control timeout"),
             }
         }
     }
@@ -1617,8 +1624,8 @@ mod tests {
             action: &ComputerControlAction,
         ) -> Result<ComputerControlExecution, String> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            if self.fail {
-                Err("fake input backend failed".to_string())
+            if let Some(error) = self.failure {
+                Err(error.to_string())
             } else {
                 Ok(ComputerControlExecution {
                     summary: action.audit_summary(),
@@ -1732,6 +1739,31 @@ mod tests {
         )
         .unwrap();
         (ready, approval_id)
+    }
+
+    fn persist_action_started_for_test(
+        store: &EventStore,
+        step_id: Uuid,
+        approval_id: Uuid,
+    ) -> ComputerUseStep {
+        let mut step = store.get_computer_use_step(step_id).unwrap();
+        let expected_revision = step.revision;
+        let action = step.action.clone().expect("ready step has exact action");
+        step.mark_action_started(
+            approval_id,
+            &action.application_fingerprint,
+            &action.process_fingerprint,
+            &action.window_fingerprint,
+            &action.pre_window_title_fingerprint,
+            &action.frame_fingerprint,
+            &action.target_fingerprint,
+            Utc::now(),
+        )
+        .unwrap();
+        store
+            .update_computer_use_step(&step, expected_revision)
+            .unwrap();
+        step
     }
 
     #[test]
@@ -2365,6 +2397,313 @@ mod tests {
     }
 
     #[test]
+    fn c5d_control_timeout_screenshot_failure_and_window_closure_never_replay() {
+        {
+            let store = EventStore::open_memory().unwrap();
+            let screenshots = FakeScreenshotClient::new(1);
+            let accessibility = FakeAccessibilityClient::new(vec![
+                redacted_state("window", "target", Some("before")),
+                redacted_state("window", "target", Some("before")),
+            ]);
+            let control = FakeControlClient::timing_out();
+            let (ready, approval_id) =
+                setup_ready_step(&store, &screenshots, &accessibility, "after");
+
+            let result = execute_ready_computer_use_step(
+                &store,
+                ready.id,
+                ComputerUseExecutionPermit {
+                    approval_request_id: approval_id,
+                    local_unlock_confirmed: true,
+                },
+                &screenshots,
+                &accessibility,
+                &control,
+            )
+            .unwrap();
+
+            assert_eq!(result.step.status, ComputerUseStepStatus::EffectUnknown);
+            assert_eq!(result.step.action_start_count, 1);
+            assert_eq!(control.calls.load(Ordering::SeqCst), 1);
+            assert!(result
+                .safe_error
+                .as_deref()
+                .is_some_and(|error| error.contains("control timeout")));
+            assert!(execute_ready_computer_use_step(
+                &store,
+                ready.id,
+                ComputerUseExecutionPermit {
+                    approval_request_id: approval_id,
+                    local_unlock_confirmed: true,
+                },
+                &screenshots,
+                &accessibility,
+                &control,
+            )
+            .is_err());
+            assert_eq!(control.calls.load(Ordering::SeqCst), 1);
+        }
+
+        {
+            let store = EventStore::open_memory().unwrap();
+            let screenshots = FakeScreenshotClient::new(1);
+            let accessibility = FakeAccessibilityClient::new(vec![
+                redacted_state("window", "target", Some("before")),
+                redacted_state("window", "target", Some("before")),
+            ]);
+            let control = FakeControlClient::succeeding();
+            let (ready, approval_id) =
+                setup_ready_step(&store, &screenshots, &accessibility, "after");
+
+            let result = execute_ready_computer_use_step(
+                &store,
+                ready.id,
+                ComputerUseExecutionPermit {
+                    approval_request_id: approval_id,
+                    local_unlock_confirmed: true,
+                },
+                &screenshots,
+                &accessibility,
+                &control,
+            )
+            .unwrap();
+
+            assert_eq!(result.step.status, ComputerUseStepStatus::EffectUnknown);
+            assert_eq!(result.step.action_start_count, 1);
+            assert_eq!(control.calls.load(Ordering::SeqCst), 1);
+            assert!(execute_ready_computer_use_step(
+                &store,
+                ready.id,
+                ComputerUseExecutionPermit {
+                    approval_request_id: approval_id,
+                    local_unlock_confirmed: true,
+                },
+                &screenshots,
+                &accessibility,
+                &control,
+            )
+            .is_err());
+            assert_eq!(control.calls.load(Ordering::SeqCst), 1);
+        }
+
+        {
+            let store = EventStore::open_memory().unwrap();
+            let screenshots = FakeScreenshotClient::new(3);
+            let accessibility = FakeAccessibilityClient::with_results(vec![
+                Ok(redacted_state("window", "target", Some("before"))),
+                Ok(redacted_state("window", "target", Some("before"))),
+                Err("bound process/window closed after ActionStarted".to_string()),
+                Err("bound process/window closed after ActionStarted".to_string()),
+            ]);
+            let control = FakeControlClient::succeeding();
+            let (ready, approval_id) =
+                setup_ready_step(&store, &screenshots, &accessibility, "after");
+
+            let result = execute_ready_computer_use_step(
+                &store,
+                ready.id,
+                ComputerUseExecutionPermit {
+                    approval_request_id: approval_id,
+                    local_unlock_confirmed: true,
+                },
+                &screenshots,
+                &accessibility,
+                &control,
+            )
+            .unwrap();
+
+            assert_eq!(result.step.status, ComputerUseStepStatus::EffectUnknown);
+            assert_eq!(result.step.action_start_count, 1);
+            assert_eq!(control.calls.load(Ordering::SeqCst), 1);
+            assert!(execute_ready_computer_use_step(
+                &store,
+                ready.id,
+                ComputerUseExecutionPermit {
+                    approval_request_id: approval_id,
+                    local_unlock_confirmed: true,
+                },
+                &screenshots,
+                &accessibility,
+                &control,
+            )
+            .is_err());
+            assert_eq!(control.calls.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
+    fn c5d_takeover_and_restart_after_action_started_are_inspected_without_replay() {
+        {
+            let store = EventStore::open_memory().unwrap();
+            let screenshots = FakeScreenshotClient::new(1);
+            let accessibility = FakeAccessibilityClient::new(vec![redacted_state(
+                "window",
+                "target",
+                Some("before"),
+            )]);
+            let (ready, approval_id) =
+                setup_ready_step(&store, &screenshots, &accessibility, "after");
+            persist_action_started_for_test(&store, ready.id, approval_id);
+            let taken_over = take_over_computer_use_step(
+                &store,
+                ready.id,
+                "User took over after durable ActionStarted.".to_string(),
+            )
+            .unwrap();
+            assert_eq!(taken_over.status, ComputerUseStepStatus::UserTakenOver);
+            assert_eq!(taken_over.action_start_count, 1);
+            let control = FakeControlClient::succeeding();
+            assert!(execute_ready_computer_use_step(
+                &store,
+                ready.id,
+                ComputerUseExecutionPermit {
+                    approval_request_id: approval_id,
+                    local_unlock_confirmed: true,
+                },
+                &FakeScreenshotClient::new(0),
+                &FakeAccessibilityClient::new(Vec::new()),
+                &control,
+            )
+            .is_err());
+            assert_eq!(control.calls.load(Ordering::SeqCst), 0);
+        }
+
+        {
+            let directory = tempdir().unwrap();
+            let path = directory.path().join("c5d-restart.db");
+            let (step_id, approval_id) = {
+                let store = EventStore::open(&path).unwrap();
+                let screenshots = FakeScreenshotClient::new(1);
+                let accessibility = FakeAccessibilityClient::new(vec![redacted_state(
+                    "window",
+                    "target",
+                    Some("before"),
+                )]);
+                let (ready, approval_id) =
+                    setup_ready_step(&store, &screenshots, &accessibility, "after");
+                persist_action_started_for_test(&store, ready.id, approval_id);
+                (ready.id, approval_id)
+            };
+
+            let reopened = EventStore::open(&path).unwrap();
+            let sweep = reopened
+                .recover_computer_use_steps_after_restart(Utc::now())
+                .unwrap();
+            assert_eq!(sweep.effect_unknown, 1);
+            let recovered = reopened.get_computer_use_step(step_id).unwrap();
+            assert_eq!(recovered.status, ComputerUseStepStatus::EffectUnknown);
+            assert_eq!(recovered.action_start_count, 1);
+            let second = reopened
+                .recover_computer_use_steps_after_restart(Utc::now())
+                .unwrap();
+            assert_eq!(second.effect_unknown, 0);
+            let control = FakeControlClient::succeeding();
+            assert!(execute_ready_computer_use_step(
+                &reopened,
+                step_id,
+                ComputerUseExecutionPermit {
+                    approval_request_id: approval_id,
+                    local_unlock_confirmed: true,
+                },
+                &FakeScreenshotClient::new(0),
+                &FakeAccessibilityClient::new(Vec::new()),
+                &control,
+            )
+            .is_err());
+            assert_eq!(control.calls.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn c5d_deterministic_fault_injection_matrix_is_fail_closed() {
+        let matrix: [(&str, usize, fn()); 15] = [
+            (
+                "bounded observation retry and exhaustion",
+                2,
+                observation_retry_is_bounded_and_never_retries_an_action,
+            ),
+            (
+                "stale application process HWND and frame",
+                4,
+                wrong_application_process_window_or_frame_stops_before_input,
+            ),
+            (
+                "File Explorer folder and target drift",
+                2,
+                file_explorer_folder_or_file_drift_stops_before_semantic_selection,
+            ),
+            (
+                "Excel workbook sheet and cell drift",
+                3,
+                excel_workbook_sheet_or_cell_drift_stops_before_semantic_write,
+            ),
+            (
+                "Edge profile HWND PID target frame tab URL origin document action receipt and decoy drift",
+                16,
+                edge_portal_identity_rejects_profile_tab_url_origin_document_target_and_action_drift,
+            ),
+            (
+                "Edge DOM mutation without exact semantic receipt",
+                1,
+                edge_portal_semantic_receipt_blocks_dom_or_screenshot_only_false_completion,
+            ),
+            (
+                "expired approved observation",
+                1,
+                stale_approved_observation_requires_replan_before_revalidation,
+            ),
+            (
+                "approved action mutation",
+                1,
+                action_mutation_after_approval_is_rejected_before_input,
+            ),
+            (
+                "ambiguous control failure",
+                1,
+                input_backend_failure_becomes_effect_unknown_and_is_not_replayed,
+            ),
+            (
+                "control timeout screenshot failure and process window closure",
+                3,
+                c5d_control_timeout_screenshot_failure_and_window_closure_never_replay,
+            ),
+            (
+                "screenshot without semantic post receipt",
+                1,
+                screenshot_only_post_state_stays_awaiting_verification,
+            ),
+            (
+                "Excel write without exact cell receipt",
+                1,
+                excel_semantic_write_without_a_cell_receipt_cannot_complete,
+            ),
+            (
+                "corrupt semantic post receipt",
+                1,
+                deterministic_postcondition_failure_is_distinct_from_action_failure,
+            ),
+            (
+                "post-action target mutation",
+                1,
+                post_action_target_change_becomes_effect_unknown_without_replay,
+            ),
+            (
+                "takeover and restart after ActionStarted with recovery inspection",
+                2,
+                c5d_takeover_and_restart_after_action_started_are_inspected_without_replay,
+            ),
+        ];
+        let mut completed_cases = 0usize;
+        for (label, denominator, run) in matrix {
+            run();
+            completed_cases += denominator;
+            eprintln!("C5D deterministic fault matrix passed: {label} ({denominator})");
+        }
+        assert_eq!(completed_cases, 40);
+    }
+
+    #[test]
     fn screenshot_only_post_state_stays_awaiting_verification() {
         let directory = tempdir().unwrap();
         let store = EventStore::open(directory.path().join("evidence-only.db")).unwrap();
@@ -2653,6 +2992,180 @@ mod tests {
         std::fs::create_dir_all(&directory)
             .map_err(|error| format!("C5B smoke directory creation failed: {error}"))?;
         Ok(directory)
+    }
+
+    #[cfg(windows)]
+    fn apply_c5d_window_change(
+        window_handle: isize,
+        expected_process_id: u32,
+        application: &str,
+    ) -> Result<(), String> {
+        const ENABLE_ENV: &str = "DEEPSEEK_AGENT_OS_C5D_WINDOW_CHANGE";
+        const EVIDENCE_ENV: &str = "DEEPSEEK_AGENT_OS_C5D_WINDOW_CHANGE_EVIDENCE";
+        const RUN_ID_ENV: &str = "DEEPSEEK_AGENT_OS_C5D_RUN_ID";
+
+        if std::env::var(ENABLE_ENV).ok().as_deref() != Some("1") {
+            return Ok(());
+        }
+        let run_id = std::env::var(RUN_ID_ENV)
+            .map_err(|_| format!("{RUN_ID_ENV} is required for C5D window-change evidence"))?;
+        if run_id.is_empty()
+            || !run_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err(format!("{RUN_ID_ENV} must be a safe non-empty label"));
+        }
+        let evidence_path = std::env::var_os(EVIDENCE_ENV)
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| format!("{EVIDENCE_ENV} is required for C5D window-change evidence"))?;
+        if !evidence_path.is_absolute() || evidence_path.exists() {
+            return Err(format!(
+                "{EVIDENCE_ENV} must name a fresh absolute evidence file"
+            ));
+        }
+        let authorized_roots = [
+            std::env::var_os("DEEPSEEK_AGENT_OS_C5B_SMOKE_ROOT"),
+            std::env::var_os("DEEPSEEK_AGENT_OS_C5C_SMOKE_ROOT"),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .collect::<Vec<_>>();
+        if authorized_roots.is_empty()
+            || !authorized_roots
+                .iter()
+                .any(|root| root.is_absolute() && evidence_path.starts_with(root))
+        {
+            return Err(format!(
+                "{EVIDENCE_ENV} must stay inside the active isolated C5B/C5C smoke root"
+            ));
+        }
+        let parent = evidence_path
+            .parent()
+            .ok_or_else(|| "C5D window-change evidence file has no parent".to_string())?;
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("C5D evidence directory creation failed: {error}"))?;
+
+        use std::thread;
+        use std::time::Duration;
+        use windows::Win32::Foundation::{HWND, RECT};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetForegroundWindow, GetWindowRect, SetWindowPos, ShowWindow, SWP_NOACTIVATE,
+            SWP_NOOWNERZORDER, SWP_NOZORDER, SW_MINIMIZE, SW_RESTORE,
+        };
+
+        let hwnd = HWND(window_handle as _);
+        let before_process_id = windows_process_id_for_handle(window_handle)?;
+        if before_process_id != expected_process_id {
+            return Err(
+                "C5D bound HWND did not belong to the expected process before window change"
+                    .to_string(),
+            );
+        }
+        let mut before = RECT::default();
+        unsafe { GetWindowRect(hwnd, &mut before) }
+            .map_err(|error| format!("C5D could not read the initial window rectangle: {error}"))?;
+
+        let _ = unsafe { ShowWindow(hwnd, SW_MINIMIZE) };
+        thread::sleep(Duration::from_millis(250));
+        let foreground_while_minimized = unsafe { GetForegroundWindow() };
+        let focus_loss_observed = foreground_while_minimized != hwnd;
+        if !focus_loss_observed {
+            return Err(
+                "C5D could not observe focus loss while the exact window was minimized".to_string(),
+            );
+        }
+
+        let _ = unsafe { ShowWindow(hwnd, SW_RESTORE) };
+        thread::sleep(Duration::from_millis(300));
+        let mut restored = RECT::default();
+        unsafe { GetWindowRect(hwnd, &mut restored) }.map_err(|error| {
+            format!("C5D could not read the restored window rectangle: {error}")
+        })?;
+        let restored_width = restored.right - restored.left;
+        let restored_height = restored.bottom - restored.top;
+        if restored_width <= 0 || restored_height <= 0 {
+            return Err("C5D restored window rectangle was invalid".to_string());
+        }
+        let changed_width = if restored_width > 800 {
+            restored_width - 53
+        } else {
+            restored_width + 53
+        };
+        let changed_height = if restored_height > 600 {
+            restored_height - 37
+        } else {
+            restored_height + 37
+        };
+        unsafe {
+            SetWindowPos(
+                hwnd,
+                None,
+                restored.left + 23,
+                restored.top + 19,
+                changed_width,
+                changed_height,
+                SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOZORDER,
+            )
+        }
+        .map_err(|error| format!("C5D exact window move/resize failed: {error}"))?;
+        thread::sleep(Duration::from_millis(350));
+
+        let mut after = RECT::default();
+        unsafe { GetWindowRect(hwnd, &mut after) }
+            .map_err(|error| format!("C5D could not read the changed window rectangle: {error}"))?;
+        let moved = after.left != restored.left || after.top != restored.top;
+        let resized = (after.right - after.left) != restored_width
+            || (after.bottom - after.top) != restored_height;
+        if !moved || !resized {
+            return Err(format!(
+                "C5D exact window change was incomplete: moved={moved}, resized={resized}"
+            ));
+        }
+        let after_process_id = windows_process_id_for_handle(window_handle)?;
+        if after_process_id != expected_process_id {
+            return Err(
+                "C5D bound HWND did not belong to the expected process after window change"
+                    .to_string(),
+            );
+        }
+
+        let evidence = serde_json::json!({
+            "schema": "c5d-window-change-evidence/v1",
+            "run_id": run_id,
+            "application": application,
+            "window_handle": window_handle,
+            "process_id": expected_process_id,
+            "focus_loss_observed": focus_loss_observed,
+            "moved": moved,
+            "resized": resized,
+            "before": {
+                "left": before.left,
+                "top": before.top,
+                "right": before.right,
+                "bottom": before.bottom
+            },
+            "restored": {
+                "left": restored.left,
+                "top": restored.top,
+                "right": restored.right,
+                "bottom": restored.bottom
+            },
+            "after": {
+                "left": after.left,
+                "top": after.top,
+                "right": after.right,
+                "bottom": after.bottom
+            }
+        });
+        let bytes = serde_json::to_vec_pretty(&evidence)
+            .map_err(|error| format!("C5D window evidence serialization failed: {error}"))?;
+        std::fs::write(&evidence_path, bytes)
+            .map_err(|error| format!("C5D window evidence write failed: {error}"))?;
+        Ok(())
     }
 
     #[cfg(windows)]
@@ -3837,6 +4350,7 @@ Get-CimInstance Win32_Process -Filter "Name = 'msedge.exe'" | Where-Object {{
                     .action_fingerprint,
                 ComputerUseApprovalActor::User,
             )?;
+            apply_c5d_window_change(window_handle, browser_process_id, "edge-local-portal")?;
             let control = EdgePortalReceiptCorroboratingControlClient {
                 spec: spec.clone(),
                 contract: contract.clone(),
@@ -4424,6 +4938,7 @@ if ($null -eq $window) {{ throw 'exact File Explorer HWND and LocationURL did no
                     .action_fingerprint,
                 ComputerUseApprovalActor::User,
             )?;
+            apply_c5d_window_change(window_handle, process_id, "file-explorer")?;
             let control = WindowsBoundComputerControlClient::new_file_explorer(
                 window_handle,
                 process_id,
@@ -4663,6 +5178,7 @@ try {{
                     .action_fingerprint,
                 ComputerUseApprovalActor::User,
             )?;
+            apply_c5d_window_change(window_handle, process_id, "excel")?;
             let control = ExcelObjectModelCorroboratingControlClient {
                 inner: WindowsBoundComputerControlClient::new_excel(
                     window_handle,
@@ -4726,6 +5242,205 @@ try {{
             let _ = excel_host.wait();
         }
         run_result.expect("isolated Excel cell action verifies");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires an authorized interactive desktop with installed File Explorer, Excel, and Edge"]
+    fn windows_c5d_installed_reliability_matrix_records_thirty_exact_runs() {
+        use std::process::Command;
+
+        const ROOT_ENV: &str = "DEEPSEEK_AGENT_OS_C5D_RELIABILITY_ROOT";
+        const MATRIX_RUNS_PER_APP: usize = 10;
+        const EXPECTED_RUNS: usize = 30;
+        const DETERMINISTIC_CASES: usize = 40;
+
+        let root = std::env::var_os(ROOT_ENV)
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from)
+            .expect("C5D reliability root is required");
+        assert!(root.is_absolute(), "C5D reliability root must be absolute");
+        assert!(
+            !root.exists(),
+            "C5D reliability root must be fresh and absent: {}",
+            root.display()
+        );
+        std::fs::create_dir_all(&root).expect("C5D reliability root is created");
+        let report_path = root.join("c5d-reliability-matrix.json");
+        let test_binary = std::env::current_exe().expect("current Rust test binary is available");
+
+        let fault_output = Command::new(&test_binary)
+            .arg(
+                "kernel::computer_use_runtime::tests::c5d_deterministic_fault_injection_matrix_is_fail_closed",
+            )
+            .args(["--exact", "--nocapture", "--test-threads=1"])
+            .output()
+            .expect("C5D deterministic fault child test starts");
+        std::fs::write(
+            root.join("deterministic-fault-matrix.stdout.log"),
+            &fault_output.stdout,
+        )
+        .expect("deterministic fault stdout is recorded");
+        std::fs::write(
+            root.join("deterministic-fault-matrix.stderr.log"),
+            &fault_output.stderr,
+        )
+        .expect("deterministic fault stderr is recorded");
+        if !fault_output.status.success() {
+            let blocked = serde_json::json!({
+                "schema": "c5d-reliability-matrix/v1",
+                "environment_profile": "current-authorized-interactive-windows-host",
+                "deterministic_fault_matrix": {
+                    "declared_cases": DETERMINISTIC_CASES,
+                    "passed": false,
+                    "exit_code": fault_output.status.code()
+                },
+                "installed_runs": [],
+                "summary": {
+                    "attempted_runs": 0,
+                    "completed_runs": 0,
+                    "window_move_resize_attempts": 0,
+                    "window_move_resize_recoveries": 0,
+                    "wrong_target_writes": null,
+                    "false_completions": null
+                }
+            });
+            std::fs::write(
+                &report_path,
+                serde_json::to_vec_pretty(&blocked).expect("blocked report serializes"),
+            )
+            .expect("blocked report is recorded");
+            panic!("C5D deterministic fault matrix failed; installed runs were not started");
+        }
+
+        let applications = [
+            (
+                "file-explorer",
+                "DEEPSEEK_AGENT_OS_C5B_SMOKE_ROOT",
+                "kernel::computer_use_runtime::tests::windows_file_explorer_isolated_selection_smoke_verifies_exact_file",
+            ),
+            (
+                "excel",
+                "DEEPSEEK_AGENT_OS_C5B_SMOKE_ROOT",
+                "kernel::computer_use_runtime::tests::windows_excel_isolated_cell_value_smoke_verifies_exact_outcome",
+            ),
+            (
+                "edge-local-portal",
+                "DEEPSEEK_AGENT_OS_C5C_SMOKE_ROOT",
+                "kernel::computer_use_runtime::tests::windows_edge_local_portal_isolated_value_smoke_verifies_exact_receipt",
+            ),
+        ];
+        let mut runs = Vec::with_capacity(EXPECTED_RUNS);
+        let mut completed_runs = 0usize;
+        let mut recovered_window_changes = 0usize;
+
+        for iteration in 1..=MATRIX_RUNS_PER_APP {
+            for (application, smoke_root_env, test_name) in applications {
+                let run_id = format!("{application}-{iteration:02}");
+                let run_root = root.join(&run_id);
+                std::fs::create_dir(&run_root).expect("fresh C5D run root is created");
+                let window_evidence_path = run_root.join("window-change-evidence.json");
+                let output = Command::new(&test_binary)
+                    .arg(test_name)
+                    .args(["--exact", "--ignored", "--nocapture", "--test-threads=1"])
+                    .env_remove("DEEPSEEK_AGENT_OS_C5B_SMOKE_ROOT")
+                    .env_remove("DEEPSEEK_AGENT_OS_C5C_SMOKE_ROOT")
+                    .env(smoke_root_env, &run_root)
+                    .env("DEEPSEEK_AGENT_OS_C5D_WINDOW_CHANGE", "1")
+                    .env("DEEPSEEK_AGENT_OS_C5D_RUN_ID", &run_id)
+                    .env(
+                        "DEEPSEEK_AGENT_OS_C5D_WINDOW_CHANGE_EVIDENCE",
+                        &window_evidence_path,
+                    )
+                    .output()
+                    .expect("C5D installed child test starts");
+                let stdout_path = run_root.join("test.stdout.log");
+                let stderr_path = run_root.join("test.stderr.log");
+                std::fs::write(&stdout_path, &output.stdout).expect("run stdout is recorded");
+                std::fs::write(&stderr_path, &output.stderr).expect("run stderr is recorded");
+
+                let window_evidence = std::fs::read(&window_evidence_path)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+                let window_change_passed = window_evidence.as_ref().is_some_and(|evidence| {
+                    evidence.get("schema").and_then(|value| value.as_str())
+                        == Some("c5d-window-change-evidence/v1")
+                        && evidence.get("run_id").and_then(|value| value.as_str())
+                            == Some(run_id.as_str())
+                        && evidence.get("application").and_then(|value| value.as_str())
+                            == Some(application)
+                        && evidence
+                            .get("focus_loss_observed")
+                            .and_then(|value| value.as_bool())
+                            == Some(true)
+                        && evidence.get("moved").and_then(|value| value.as_bool()) == Some(true)
+                        && evidence.get("resized").and_then(|value| value.as_bool()) == Some(true)
+                });
+                let passed = output.status.success() && window_change_passed;
+                if passed {
+                    completed_runs += 1;
+                    recovered_window_changes += 1;
+                }
+                runs.push(serde_json::json!({
+                    "run_id": run_id,
+                    "application": application,
+                    "test_name": test_name,
+                    "passed": passed,
+                    "test_exit_code": output.status.code(),
+                    "window_change_passed": window_change_passed,
+                    "window_change_evidence": window_evidence,
+                    "stdout": stdout_path
+                        .strip_prefix(&root)
+                        .expect("stdout stays in reliability root")
+                        .to_string_lossy(),
+                    "stderr": stderr_path
+                        .strip_prefix(&root)
+                        .expect("stderr stays in reliability root")
+                        .to_string_lossy()
+                }));
+            }
+        }
+
+        let completion_rate_percent = completed_runs * 100 / EXPECTED_RUNS;
+        let window_recovery_rate_percent = recovered_window_changes * 100 / EXPECTED_RUNS;
+        let all_exact_runs_passed = completed_runs == EXPECTED_RUNS;
+        let report = serde_json::json!({
+            "schema": "c5d-reliability-matrix/v1",
+            "environment_profile": "current-authorized-interactive-windows-host",
+            "environment_profiles_authorized_and_present": 1,
+            "deterministic_fault_matrix": {
+                "declared_cases": DETERMINISTIC_CASES,
+                "passed": true,
+                "exit_code": fault_output.status.code()
+            },
+            "installed_runs": runs,
+            "summary": {
+                "attempted_runs": EXPECTED_RUNS,
+                "completed_runs": completed_runs,
+                "completion_rate_percent": completion_rate_percent,
+                "window_move_resize_attempts": EXPECTED_RUNS,
+                "window_move_resize_recoveries": recovered_window_changes,
+                "window_recovery_rate_percent": window_recovery_rate_percent,
+                "wrong_target_writes": if all_exact_runs_passed { Some(0usize) } else { None },
+                "false_completions": if all_exact_runs_passed { Some(0usize) } else { None }
+            },
+            "required_gates": {
+                "attempted_runs": 30,
+                "minimum_completion_rate_percent": 85,
+                "minimum_window_recovery_rate_percent": 95,
+                "maximum_wrong_target_writes": 0,
+                "maximum_false_completions": 0
+            }
+        });
+        std::fs::write(
+            &report_path,
+            serde_json::to_vec_pretty(&report).expect("C5D reliability report serializes"),
+        )
+        .expect("C5D reliability report is recorded");
+
+        assert_eq!(completed_runs, EXPECTED_RUNS);
+        assert!(completion_rate_percent >= 85);
+        assert!(window_recovery_rate_percent >= 95);
     }
 
     #[cfg(windows)]
