@@ -1179,11 +1179,10 @@ async function runInstalledOfficeArtifactSmoke(client) {
       );
     }
 
-    const relativeTarget = String(create.action.target ?? target).replaceAll("\\", "/");
-    const createdPath = path.join(workspaceDir, relativeTarget);
-    if (!existsSync(createdPath)) {
-      throw new Error(`Expected Office artifact was not found: ${createdPath}`);
-    }
+    const { createdPath, relativeTarget } = await resolveInstalledOfficeArtifactPath(
+      workspaceDir,
+      create.action.target ?? target,
+    );
 
     const wordOpen = verifyWordCanOpenDocument(createdPath);
     officeResult = {
@@ -1570,6 +1569,47 @@ async function verifyIsolatedLocalFilePath(filePath) {
   return resolvedPath;
 }
 
+async function resolveInstalledOfficeArtifactPath(workspaceDir, returnedTarget) {
+  if (!isolatedProfile?.root || !isolatedProfile?.tempRoot) {
+    throw new Error("Installed Office artifact validation requires an active isolated profile.");
+  }
+  const normalizedTarget = String(returnedTarget ?? "").trim();
+  if (!normalizedTarget) {
+    throw new Error("Installed Office artifact target is missing.");
+  }
+
+  const verifiedProfileRoot = await verifyIsolatedProfileRoot(
+    isolatedProfile.root,
+    isolatedProfile.tempRoot,
+  );
+  const resolvedWorkspace = path.resolve(workspaceDir);
+  const workspaceMetadata = await lstat(resolvedWorkspace);
+  if (workspaceMetadata.isSymbolicLink() || !workspaceMetadata.isDirectory()) {
+    throw new Error("Installed Office smoke workspace is unsafe.");
+  }
+  const canonicalWorkspace = await realpath(resolvedWorkspace);
+  if (!pathIsInsideRoot(canonicalWorkspace, verifiedProfileRoot)) {
+    throw new Error("Installed Office smoke workspace escaped the isolated profile.");
+  }
+
+  const candidatePath = path.isAbsolute(normalizedTarget)
+    ? path.resolve(normalizedTarget)
+    : path.resolve(canonicalWorkspace, normalizedTarget);
+  const verifiedFilePath = await verifyIsolatedLocalFilePath(candidatePath);
+  if (!existsSync(verifiedFilePath)) {
+    throw new Error(`Expected Office artifact was not found: ${verifiedFilePath}`);
+  }
+  const canonicalFile = await realpath(verifiedFilePath);
+  if (!pathIsInsideRoot(canonicalFile, canonicalWorkspace)) {
+    throw new Error("Installed Office artifact path escaped the smoke workspace.");
+  }
+
+  return {
+    createdPath: canonicalFile,
+    relativeTarget: path.relative(canonicalWorkspace, canonicalFile).replaceAll("\\", "/"),
+  };
+}
+
 function pathIsInsideRoot(candidate, root) {
   const relative = path.relative(root, candidate);
   return (
@@ -1870,6 +1910,44 @@ async function runSelfTest() {
     "escaped the isolated profile",
   );
   await removeSelfTestDirectory(unsafeRoot, "deepseek-agent-os-ui-smoke-self-test");
+
+  const officeWorkspace = path.join(isolatedProfileTest.workspaceDir, "office-self-test");
+  const relativeOfficeTarget = path.join("office", "relative.docx");
+  const absoluteOfficeTarget = path.join(officeWorkspace, "office", "absolute.docx");
+  const outsideOfficeTarget = path.join(isolatedProfileTest.workspaceDir, "outside.docx");
+  await mkdir(path.dirname(path.join(officeWorkspace, relativeOfficeTarget)), {
+    recursive: true,
+  });
+  await Promise.all([
+    writeFile(path.join(officeWorkspace, relativeOfficeTarget), "relative"),
+    writeFile(absoluteOfficeTarget, "absolute"),
+    writeFile(outsideOfficeTarget, "outside"),
+  ]);
+  const relativeOfficeArtifact = await resolveInstalledOfficeArtifactPath(
+    officeWorkspace,
+    relativeOfficeTarget,
+  );
+  if (
+    relativeOfficeArtifact.createdPath !== (await realpath(path.join(officeWorkspace, relativeOfficeTarget))) ||
+    relativeOfficeArtifact.relativeTarget !== "office/relative.docx"
+  ) {
+    throw new Error("Self-test expected a relative Office target to resolve inside the smoke workspace.");
+  }
+  const absoluteOfficeArtifact = await resolveInstalledOfficeArtifactPath(
+    officeWorkspace,
+    absoluteOfficeTarget,
+  );
+  if (
+    absoluteOfficeArtifact.createdPath !== (await realpath(absoluteOfficeTarget)) ||
+    absoluteOfficeArtifact.relativeTarget !== "office/absolute.docx"
+  ) {
+    throw new Error("Self-test expected an absolute Office target to resolve inside the smoke workspace.");
+  }
+  await assertAsyncSelfTestThrows(
+    () => resolveInstalledOfficeArtifactPath(officeWorkspace, outsideOfficeTarget),
+    "escaped the smoke workspace",
+  );
+
   await removeIsolatedProfile(isolatedProfileTest);
   isolatedProfile = undefined;
   if (existsSync(isolatedProfileTest.root)) {
